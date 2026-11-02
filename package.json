@@ -1,6 +1,7 @@
 {
   "name": "sqlexperiment",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "build": "pnpm --filter @restatedev/sessions build",
