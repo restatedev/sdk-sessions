@@ -195,7 +195,7 @@ tests in `test/`.
 ## Requirements
 
 - Restate server 1.8 or later.
-- The published TypeScript SDK, version 1.18.1. `@restatedev/sessions` pins it,
+- The published TypeScript SDK, version 1.18.2. `@restatedev/sessions` pins it,
   because it relies on some of the SDK's internals
   ([why](packages/sessions/README.md#concurrent-awaits)).
 

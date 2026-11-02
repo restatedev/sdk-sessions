@@ -16,8 +16,8 @@
     "@modelcontextprotocol/server": "2.0.0",
     "@opencode/plugin": "2.0.32",
     "@restatedev/agents": "workspace:*",
-    "@restatedev/restate-sdk": "1.18.1",
-    "@restatedev/restate-sdk-clients": "1.18.1",
+    "@restatedev/restate-sdk": "1.18.2",
+    "@restatedev/restate-sdk-clients": "1.18.2",
     "@restatedev/sessions": "workspace:*",
     "zod": "4.6.5"
   },

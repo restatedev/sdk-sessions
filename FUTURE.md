@@ -46,7 +46,7 @@ await concurrently.
 **Now:** `@restatedev/sessions` drives a SQL handler's promises with a selector of its
 own (`packages/sessions/src/selector.ts`), which takes over the
 invocation's `promisesExecutor.doProgress`: the SDK's internals, so the
-package pins `@restatedev/restate-sdk` 1.18.1. The published SDK lets one
+package pins `@restatedev/restate-sdk` 1.18.2. The published SDK lets one
 awaited promise wait for the server at a time
 (`ExternalProgressChannel.awaitNext`), so concurrent awaits that need the
 server fail with `awaitNext already pending`.
