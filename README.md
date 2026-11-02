@@ -254,3 +254,44 @@ the frameworks it uses ([which ones](packages/agents/README.md#choose-a-framewor
 pnpm --filter restate-sessions build:dist   # the addon as published: smaller and fully optimized (takes minutes)
 pnpm --filter e2e packaging                 # pack, lint and install both packages into a fresh project
 ```
+
+### Releasing
+
+The published packages (the two libraries and the addon's package per
+platform: every package of the workspace without `private`) are released
+together, with one version. Release notes are generated in the GitHub
+release: edit them there.
+
+1. On `main`, with a clean tree, prepare the release commit and tag (nothing
+   is pushed):
+   ```sh
+   .tools/prepare-release.sh 0.2.0
+   ```
+2. Push the commit and the tag; the script prints the exact command:
+   ```sh
+   git push --atomic origin HEAD:main v0.2.0
+   ```
+3. The tag triggers [`release.yml`](.github/workflows/release.yml), which
+   checks that every package carries the tag's version, runs the checks and
+   builds the packages on the tagged commit (the addon for each platform,
+   every package packed and installed on each), publishes those tarballs to
+   npm and creates the GitHub release.
+
+**Pre-releases:** a version such as `0.3.0-rc.1` is published under its
+identifier as npm dist-tag (`rc`), never `latest`, and marked a pre-release
+on GitHub.
+
+**Backports:** run the script on a `release-*` branch and push there. A
+version below npm's `latest` is published under the `release-<major>.<minor>`
+dist-tag instead.
+
+**Retrying:** if a job fails (a flaky test), re-run the failed jobs of the
+run, or run the workflow by hand on the tag. Packages already on npm at that
+version are skipped.
+
+**npm:** the workflow publishes through [trusted
+publishing](https://docs.npmjs.com/trusted-publishers) (no token), so each
+package on npmjs.com lists this repository's `release.yml` as its trusted
+publisher. A package that is not on npm yet cannot be created that way:
+download the run's `packages` artifact and `npm publish` its tarball with a
+token once, then re-run the `release` job.
