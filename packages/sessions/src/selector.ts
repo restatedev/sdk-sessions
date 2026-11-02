@@ -13,7 +13,7 @@
 // SDK's internals, as of the version this package pins (1.18.2).
 //
 // TODO: drop the selector, and the pin, once an SDK release lets a handler
-// with explicit recovery await concurrently (FUTURE.md at the repository's root).
+// with explicit recovery await concurrently.
 import { setImmediate } from 'node:timers/promises';
 
 /** A future of the VM, as `do_progress` takes it. */

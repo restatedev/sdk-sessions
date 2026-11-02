@@ -293,7 +293,7 @@ empty `ctx.run`. Handlers and views can't reach any other state key, since
 a session has no key/value state of its own.
 
 **Reads and writes.** A read is a state read. It is journaled for now (once
-protocol v8 ships it won't be, see [FUTURE.md](../../FUTURE.md)), and it goes
+protocol v8 ships it won't be), and it goes
 to the runtime unless this attempt wrote the key or the invocation started
 with it. An invocation starts with only the database's head (`state:
 { preload: ['v22/head'] }`): its open's first read needs no round trip, and
