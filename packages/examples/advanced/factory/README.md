@@ -267,15 +267,14 @@ it, on GitHub: its coder answers there, and pushes what you asked for.
 
 ## Run it, in a container
 
-The factory's image, [`Dockerfile`](Dockerfile), is built and pushed to
-`ghcr.io/igalshilman/sqlexperiment/factory` on each push to `main`
-([the workflow](../../../../.github/workflows/factory-image.yml)). It runs the
-factory on Linear and GitHub, as above; Restate registers it at port 9080.
-It holds no secrets (`.dockerignore` keeps every `.env` out): give them to it.
+The factory's image, [`Dockerfile`](Dockerfile), builds from the repository's
+root. It runs the factory on Linear and GitHub, as above; Restate registers
+it at port 9080. It holds no secrets (`.dockerignore` keeps every `.env`
+out): give them to it.
 
 ```sh
-docker run -p 9080:9080 -v factory:/data --env-file packages/examples/.env \
-  ghcr.io/igalshilman/sqlexperiment/factory
+docker build -f packages/examples/advanced/factory/Dockerfile -t factory .
+docker run -p 9080:9080 -v factory:/data --env-file packages/examples/.env factory
 ```
 
 The coders run real commands in it, in `/data/workspace`: the container is
