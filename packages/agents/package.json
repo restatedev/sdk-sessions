@@ -1,5 +1,5 @@
 {
-  "name": "restate-agents",
+  "name": "@restatedev/agents",
   "version": "0.1.0",
   "description": "Agent frameworks in Restate virtual objects, their state in the object's SQL database: pi, OpenCode, LangGraph, Claude (Anthropic SDK) and DeepSeek Harness",
   "repository": {
@@ -121,8 +121,8 @@
     "@opencode/sdk": "2.0.32",
     "@opencode/server": "2.0.32",
     "@restatedev/restate-sdk": "1.18.1",
+    "@restatedev/sessions": "workspace:*",
     "effect": "4.0.1",
-    "restate-sessions": "workspace:*",
     "zod": "4.6.5"
   },
   "peerDependencies": {
@@ -151,8 +151,8 @@
     "@opencode/plugin": "2.0.32",
     "@opencode/sdk": "2.0.32",
     "@opencode/server": "2.0.32",
+    "@restatedev/sessions": "workspace:^",
     "effect": "4.0.1",
-    "restate-sessions": "workspace:^",
     "zod": "^4.6.5"
   },
   "peerDependenciesMeta": {

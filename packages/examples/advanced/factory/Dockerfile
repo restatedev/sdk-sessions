@@ -33,7 +33,7 @@ COPY --from=addon /src/packages/sessions/native/sessions.node /tmp/sessions.node
 RUN mv /tmp/sessions.node packages/sessions/npm/linux-$(node -p process.arch)-gnu/
 COPY packages/agents packages/agents
 COPY packages/examples/package.json packages/examples/
-# With development dependencies: restate-agents' harnesses are its optional
+# With development dependencies: @restatedev/agents' harnesses are its optional
 # peers, installed in the workspace as its development dependencies.
 RUN pnpm install --frozen-lockfile --filter examples...
 
@@ -45,11 +45,11 @@ COPY --from=deps /app /app
 WORKDIR /app/packages/examples
 COPY packages/examples/advanced/factory/*.ts advanced/factory/
 # Node's compile cache, made here: the modules the endpoint loads as it starts
-# (restate-agents, OpenCode's and pi's, many files) come compiled already, a
+# (@restatedev/agents, OpenCode's and pi's, many files) come compiled already, a
 # quarter less of their loading on a new container, such as a coder's sandbox.
 # Every module but env.ts, which asks Linear and GitHub as it loads.
 ENV NODE_COMPILE_CACHE=/app/.node-compile-cache
-RUN node --input-type=module -e "for (const m of ['restate-agents', 'restate-agents/opencode', 'restate-agents/pi', \
+RUN node --input-type=module -e "for (const m of ['@restatedev/agents', '@restatedev/agents/opencode', '@restatedev/agents/pi', \
   './advanced/factory/answers.ts', './advanced/factory/github.ts', './advanced/factory/mcp.ts', \
   './advanced/factory/prompts.ts', './advanced/factory/signatures.ts', './advanced/factory/workspace.ts']) await import(m)"
 ENV PORT=9080

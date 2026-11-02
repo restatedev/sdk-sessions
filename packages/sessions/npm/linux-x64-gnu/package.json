@@ -1,7 +1,7 @@
 {
-  "name": "restate-sessions-linux-x64-gnu",
+  "name": "@restatedev/sessions-linux-x64-gnu",
   "version": "0.1.0",
-  "description": "restate-sessions' addon for Linux on x64, glibc 2.35 or later: installed with restate-sessions, on that platform alone",
+  "description": "@restatedev/sessions addon for Linux on x64, glibc 2.35 or later: installed with @restatedev/sessions, on that platform alone",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/restatedev/sdk-sessions.git",

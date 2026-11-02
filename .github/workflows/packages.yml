@@ -1,6 +1,6 @@
-# The packages as published: restate-sessions' addon built for each platform it
+# The packages as published: @restatedev/sessions' addon built for each platform it
 # ships (packages/sessions/src/platform.ts), each into its package
-# (restate-sessions-<platform>), then every package packed and installed with
+# (@restatedev/sessions-<platform>), then every package packed and installed with
 # npm on each platform (packages/e2e/packaging.ts).
 #
 # The tarballs are the run's `packages` artifact: what a release publishes

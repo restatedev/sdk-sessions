@@ -1,6 +1,6 @@
-# restate-sessions
+# @restatedev/sessions
 
-`restate-sessions` is the Restate TypeScript SDK plus _session objects_:
+`@restatedev/sessions` is the Restate TypeScript SDK plus _session objects_:
 virtual objects where each key has its own SQL database, `ctx.db`. We call
 them _sessions_ for short. The database is stored in the object's Restate
 state, so there is no database server to run, and you still get what
@@ -18,7 +18,7 @@ which it pins ([why](#concurrent-awaits)). See
 [the requirements](../../README.md#requirements).
 
 ```ts
-import * as restate from 'restate-sessions';
+import * as restate from '@restatedev/sessions';
 
 const ledger = restate.sessionObject({
   name: 'Ledger',
@@ -38,7 +38,7 @@ const ledger = restate.sessionObject({
 
 ## Defining a session object
 
-`restate-sessions` re-exports `@restatedev/restate-sdk`, so session objects
+`@restatedev/sessions` re-exports `@restatedev/restate-sdk`, so session objects
 sit next to your regular services, virtual objects and workflows.
 `restate.sessionObject({ name, schema, handlers, views })` takes:
 
@@ -185,7 +185,7 @@ column or index, it runs once on each key's database. Never change a step
 that has already run; add a new one instead. A view of a key that has never
 been written sees empty tables.
 
-Libraries that run in the database add their own tables. `restate-agents`
+Libraries that run in the database add their own tables. `@restatedev/agents`
 names its tables `restate_…`, so give yours other names.
 
 ## Calls and sends
@@ -413,7 +413,7 @@ Both run through crashes against a real server in
 node, 200 ledger transfers in a row take 18.8 ms each.
 
 For an agent that keeps its state in `ctx.db`, see
-[`restate-agents/pi`](../agents/src/pi/README.md), which runs pi-durable's
+[`@restatedev/agents/pi`](../agents/src/pi/README.md), which runs pi-durable's
 storage in the session's database.
 
 ## Caveats
@@ -449,18 +449,18 @@ storage in the session's database.
 ## Tests
 
 - [`test/`](test): the library's own tests, without a server
-  (`pnpm --filter restate-sessions test`): session objects, transactions and
+  (`pnpm --filter @restatedev/sessions test`): session objects, transactions and
   their sends, views, SQL errors and lost writes.
 - [`native/`](native/README.md#build-and-test): the addon's tests
-  (`pnpm --filter restate-sessions test:rust`).
+  (`pnpm --filter @restatedev/sessions test:rust`).
 - [`e2e/concurrency.ts`](../e2e/concurrency.ts) and
   [`e2e/crash.ts`](../e2e/crash.ts): against a real server.
 
 [`test/support.ts`](test/support.ts) runs a handler's attempts over an
 in-memory copy of the object's state, through crashes and fencing.
-`restate-agents` uses it in its tests too, as `restate-sessions/test/support`.
+`@restatedev/agents` uses it in its tests too, as `@restatedev/sessions/test/support`.
 
-`restate-sessions/internal` exposes what the tests take apart:
+`@restatedev/sessions/internal` exposes what the tests take apart:
 
 - `invoke`: run a handler for one attempt, over a context of your own;
 - `contextOf`: a handler's or view's context over such a context;

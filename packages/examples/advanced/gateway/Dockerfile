@@ -28,7 +28,7 @@ COPY --from=addon /src/packages/sessions/native/sessions.node /tmp/sessions.node
 RUN mv /tmp/sessions.node packages/sessions/npm/linux-$(node -p process.arch)-gnu/
 COPY packages/agents packages/agents
 COPY packages/examples/package.json packages/examples/
-# With development dependencies: restate-agents' harnesses are its optional
+# With development dependencies: @restatedev/agents' harnesses are its optional
 # peers, installed in the workspace as its development dependencies.
 RUN pnpm install --frozen-lockfile --filter examples...
 

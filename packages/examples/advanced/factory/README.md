@@ -305,14 +305,14 @@ npx vite advanced/factory/board   # http://localhost:5173, from packages/example
 
 It reads what the agents already keep, through Restate: the issues, by
 Restate's SQL over triage's state (its admin API, at port 9070), and each
-agent's conversation, with `follow()` of restate-agents' client (the
+agent's conversation, with `follow()` of @restatedev/agents' client (the
 ingress, at port 8080). Triage's calls to the planner, the coders and the
 reviewer name the agents to follow, and their answers carry the plan, the
 pull requests and the reviews. It changes nothing.
 
 ## What it shows
 
-- **A webhook into agents**: `webhook()` of restate-agents makes the
+- **A webhook into agents**: `webhook()` of @restatedev/agents makes the
   `linear` service. Linear posts to it at Restate's ingress, and it
   delivers each new issue, and each comment on it, to the triage agent,
   keyed by the issue, as a message that says where it comes from

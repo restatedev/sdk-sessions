@@ -8,7 +8,7 @@ it waits on, and where the code marks it (`TODO:` comments).
 **Waits on:** a Restate release with service protocol v8, and a TypeScript
 SDK release that exposes its ephemeral get.
 
-**Now:** the SQL store of `restate-sessions` reads the object's state with
+**Now:** the SQL store of `@restatedev/sessions` reads the object's state with
 regular, journaled gets (`objectStore` in `packages/sessions/src/session.ts`:
 `ctx.get`). Restate 1.8.0, the release the tests run
 (`@restatedev/restate-server` in `packages/e2e`), negotiates protocol v7
@@ -43,7 +43,7 @@ ephemeral one.
 **Waits on:** an SDK release whose explicit recovery lets a handler
 await concurrently.
 
-**Now:** `restate-sessions` drives a SQL handler's promises with a selector of its
+**Now:** `@restatedev/sessions` drives a SQL handler's promises with a selector of its
 own (`packages/sessions/src/selector.ts`), which takes over the
 invocation's `promisesExecutor.doProgress`: the SDK's internals, so the
 package pins `@restatedev/restate-sdk` 1.18.1. The published SDK lets one

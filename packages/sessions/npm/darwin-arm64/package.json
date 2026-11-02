@@ -1,7 +1,7 @@
 {
-  "name": "restate-sessions-darwin-arm64",
+  "name": "@restatedev/sessions-darwin-arm64",
   "version": "0.1.0",
-  "description": "restate-sessions' addon for macOS on Apple silicon: installed with restate-sessions, on that platform alone",
+  "description": "@restatedev/sessions addon for macOS on Apple silicon: installed with @restatedev/sessions, on that platform alone",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/restatedev/sdk-sessions.git",

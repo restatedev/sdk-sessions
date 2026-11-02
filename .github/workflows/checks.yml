@@ -50,7 +50,7 @@ jobs:
           path: /tmp/restate-sessions-examples-*
           if-no-files-found: ignore
 
-  # The addon's Rust tests (`pnpm --filter restate-sessions test:rust`).
+  # The addon's Rust tests (`pnpm --filter @restatedev/sessions test:rust`).
   rust:
     runs-on: ubuntu-latest
     steps:

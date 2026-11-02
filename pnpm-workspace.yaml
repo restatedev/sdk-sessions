@@ -1,6 +1,6 @@
 packages:
   - packages/*
-  # restate-sessions' addon, a package per platform.
+  # @restatedev/sessions' addon, a package per platform.
   - packages/sessions/npm/*
 # Dependencies whose install scripts run (npm ran them all).
 allowBuilds:
