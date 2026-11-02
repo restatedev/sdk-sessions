@@ -1,8 +1,12 @@
 {
   "name": "restate-sessions",
   "version": "0.1.0",
-  "private": true,
   "description": "Session objects on Restate: virtual objects with a SQL database per key, kept in the object's state (ctx.db)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/restatedev/sdk-sessions.git",
+    "directory": "packages/sessions"
+  },
   "files": [
     "dist",
     "src"
