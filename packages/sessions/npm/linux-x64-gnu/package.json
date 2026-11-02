@@ -2,6 +2,7 @@
   "name": "@restatedev/sessions-linux-x64-gnu",
   "version": "0.1.0",
   "description": "@restatedev/sessions addon for Linux on x64, glibc 2.35 or later: installed with @restatedev/sessions, on that platform alone",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/restatedev/sdk-sessions.git",
