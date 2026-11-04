@@ -3,7 +3,7 @@
 //! implements in JavaScript.
 //!
 //! The storage and the SQL on it live in `restate_sdk_shared_core` (its
-//! modules `state` and `sql`, with the features of the same names); this
+//! modules `state` and `sql`, both with its feature `sql`); this
 //! crate is the napi bindings around its `sql::Database`.
 #[cfg(not(test))]
 mod node;

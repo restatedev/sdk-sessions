@@ -119,8 +119,8 @@ The storage and the SQL on it live in
 [sdk-shared-core](https://github.com/restatedev/sdk-shared-core), as its
 modules `state` (`src/state/README.md` there: its architecture, design and
 format, under `src/state/docs/`), the storage of one file and its records,
-and `sql` (`src/sql/README.md`), the `Database` on it; the features of the
-same names turn them on. This crate is [`src/node.rs`](src/node.rs), the
+and `sql` (`src/sql/README.md`), the `Database` on it; its feature `sql`
+turns them on. This crate is [`src/node.rs`](src/node.rs), the
 napi bindings around that `Database`.
 
 ## Build and test
