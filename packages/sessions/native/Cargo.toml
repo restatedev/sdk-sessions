@@ -16,7 +16,9 @@ napi = { version = "3", default-features = false, features = ["napi8", "async", 
 napi-derive = "3"
 # The storage (`state`) and SQL on it (`sql`), with its feature `sql`. Its
 # branch until a release with them is out.
-restate-sdk-shared-core = { git = "https://github.com/restatedev/sdk-shared-core", branch = "sessions-storage", features = ["sql"] }
+restate-sdk-shared-core = { git = "https://github.com/restatedev/sdk-shared-core", branch = "sessions-storage", features = [
+  "sql",
+] }
 futures = "0.3"
 bytes = "1.10"
 
