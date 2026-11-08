@@ -591,6 +591,38 @@ describe("a stopped turn's run, left running", () => {
   });
 });
 
+describe("a framework's copy into its turn", () => {
+  it("takes positions of its own beside a write of the turn's that waits for the copy's transaction", async () => {
+    const map = new Map<string, Uint8Array>();
+    const sql = sqlAttempt({ map, key: 'k', id: 'inv1' });
+    let ordered: number[] = [];
+    await sql.end(() =>
+      answerOnce(sql.ctx, 'q', ITEMS, async (conversation) => {
+        const turn = conversation.turn;
+        const gate = Promise.withResolvers<void>();
+        // The framework's transaction copies its reply into the turn...
+        const copying = sql.ctx.db.transaction(async (tx) => {
+          await gate.promise;
+          await turn.copyIn(tx, [{ item: { role: 'assistant', text: 'copied' }, reply: true }]);
+        });
+        // ...while the turn's own write (an ask again, say) waits for it.
+        const asking = turn.askAgain('again');
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        gate.resolve();
+        await copying;
+        await asking;
+        ordered = turn.items.map((e) => e.n);
+        return 'copied';
+      }),
+    );
+    // In the order they committed: positions, and so the cursors of the changes (then the answer's reply).
+    const [turn] = await storedTurns(map);
+    const written = turn!.items.slice(0, 2);
+    expect(written.map((e) => e.item.text)).toEqual(['copied', 'again']);
+    expect(ordered).toEqual(written.map((e) => e.n));
+  });
+});
+
 /** A handler on the made-up framework whose message `die` leaves its turn open (its invocation gone). */
 const dying = (ctx: restate.SessionContext, message: string) =>
   answerOnce(ctx, message, ITEMS, async (conversation) => {

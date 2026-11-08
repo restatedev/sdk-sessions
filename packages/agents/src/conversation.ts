@@ -447,7 +447,8 @@ export class Turn<I> {
       entry.turn = this.n;
       this.#index(entry);
     }
-    this.#entries.push(...entries);
+    // In position order, also when a framework's copy into the turn committed between this write and its return.
+    this.#entries.splice(bisect(this.#entries, entries[0]?.n ?? Number.MAX_SAFE_INTEGER), 0, ...entries);
   }
 
   #index(entry: Entry<I>, note = true) {
@@ -605,12 +606,16 @@ export class Turn<I> {
       this.#checkWritable();
       const agent = this.#agent();
       const carried = 'carried' in this.#carried ? this.#carried.carried : ledger.carried()[1];
-      const seq = ledger.seq + 1;
-      await ledger.db.execute(
-        `UPDATE ${TURNS} SET status = ?, answer = ?, agent = ?, carried = ?, answered_at = ?, answered_seq = ? WHERE n = ?`,
-        [status, answer, agent ?? null, carried ?? null, at ?? null, seq, this.n],
-      );
-      ledger.seq = seq;
+      let seq = ledger.seq + 1;
+      // Its seq taken as the write runs, as `#insert` takes its own.
+      await ledger.db.transaction(async (tx) => {
+        seq = ledger.seq + 1;
+        await tx.execute(
+          `UPDATE ${TURNS} SET status = ?, answer = ?, agent = ?, carried = ?, answered_at = ?, answered_seq = ? WHERE n = ?`,
+          [status, answer, agent ?? null, carried ?? null, at ?? null, seq, this.n],
+        );
+        ledger.seq = seq;
+      });
       Object.assign(this.prompt, { status, answer, agent, carried, answeredAt: at, answeredSeq: seq });
     });
   }
@@ -760,27 +765,29 @@ export class Turn<I> {
     const ledger = this.#ledger;
     return ledger.lock.run(async () => {
       this.#checkWritable();
-      const n = ledger.next;
-      const added = made(n);
       const sql = `INSERT INTO ${STEPS} (n, turn, seq, item, reply, agent) VALUES (?, ?, ?, ?, ?, ?)`;
-      const rows = added.map((e, i) => [
-        e.n,
-        this.n,
-        ledger.seq + i + 1,
-        ledger.items.dump(e.item),
-        e.reply ?? null,
-        e.agent ?? null,
-      ]);
-      if (rows.length === 1) {
-        // One statement commits on its own.
-        await ledger.db.execute(sql, rows[0]);
-      } else if (rows.length > 1) {
-        await ledger.db.transaction(async (tx) => {
-          for (const row of rows) await tx.execute(sql, row);
-        });
-      }
-      ledger.seq += rows.length;
-      ledger.next = n + rows.length;
+      let n = ledger.next;
+      let added: Entry<I>[] = [];
+      // The positions and seqs taken as the write runs: a framework's copy
+      // into the turn (`copyIn`, in a transaction of its own, which this one
+      // may wait for) takes those after them, so that they go in the order
+      // the rows commit in, as a follower's cursor needs.
+      await ledger.db.transaction(async (tx) => {
+        n = ledger.next;
+        added = made(n);
+        for (const [i, e] of added.entries()) {
+          await tx.execute(sql, [
+            e.n,
+            this.n,
+            ledger.seq + i + 1,
+            ledger.items.dump(e.item),
+            e.reply ?? null,
+            e.agent ?? null,
+          ]);
+        }
+        ledger.seq += added.length;
+        ledger.next = n + added.length;
+      });
       this.#add(added);
       return n;
     });
