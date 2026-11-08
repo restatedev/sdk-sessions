@@ -8,11 +8,13 @@ conversation model this package is moving to, the one the Python SDK's
 [restatedev/sdk-python#296](https://github.com/restatedev/sdk-python/pull/296),
 and the plan to get there.
 
-**Status: target design.** The code does not follow these pages yet:
-[the plan](plan.md) says what changes, in which order, and how each step is
-checked. Once its last step lands, these pages describe the code and replace
-[`TURN-SEMANTICS.md`](../TURN-SEMANTICS.md), which describes the code as it
-is today.
+**Status: implemented.** These pages describe the code, after
+[the plan](plan.md)'s steps (its Status lists them). Where these pages say "today", they mean v0.3.0, before the port: kept to
+explain why the model is as it is. Where the
+code differs from the design: OpenCode left the package (the plan's D6, see
+[The frameworks](frameworks.md#opencode)); snapshots are not ported (D3);
+DeepSeek's harness has no compaction mounted, and a pi provider's outage
+still ends its turn (both in [The frameworks](frameworks.md)).
 
 ## In brief
 
@@ -31,7 +33,7 @@ is today.
 - **What the model gets is composed in one place,** `history()`: a summary,
   the earlier turns' messages and answers within a budget, and the latest
   turns whole (the turn projection). A framework that cannot be handed a list
-  of messages (pi, DeepSeek, OpenCode) keeps its own history, and the turn
+  of messages (pi, DeepSeek) keeps its own history, and the turn
   holds copies of its messages (framework-owned history).
 - **Every write is the turn's own, made once:** the prompt by its id, a
   tool's Restate calls by idempotency keys. A retried attempt resumes from
@@ -125,7 +127,7 @@ chain here, `Stop.guard` is a race with the turn's `AbortSignal`
 ### Where this package differs on purpose
 
 - **Framework-owned history** is a way of its own here. Three of this
-  package's frameworks (pi, DeepSeek, OpenCode) are durable engines with their
+  package's frameworks (pi, DeepSeek) are durable engines with their
   own stores, which cannot be handed a list of messages: each keeps its
   history, and its turns hold copies of its messages
   ([The conversation](conversation.md#framework-owned-history)). The Python

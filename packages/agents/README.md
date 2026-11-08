@@ -15,8 +15,9 @@ once, and each tool call is made once.
 - [Your own session object](#your-own-session-object)
 - [Build your own](#build-your-own)
 - [Words](#words)
-- [Turn semantics](TURN-SEMANTICS.md): how a message is answered, retried,
-  stopped or killed, and what a client sees meanwhile
+- [The conversation of turns](docs/README.md): how a message is answered,
+  retried, stopped or killed, how the conversation is stored, what the model
+  sees, and what a client sees meanwhile
 
 ## Start here
 
@@ -121,6 +122,13 @@ Every agent takes these too, beside its framework's options:
 | `description` | What it is, for the UI, and for a parent's model: `subagent(agent)` tells it                                                                     |
 | `background`  | It works unwatched (a subagent, say): its turn tells its `signals` at its end only, not at each step, so a follower sees each turn once it ended |
 | `schema`      | Tables of your own in its database ([Build your own](#build-your-own))                                                                           |
+| `window`      | How many of the latest answered turns its model sees whole, with their tool calls and results (default 1), or `'all'`                            |
+| `budget`      | How many tokens of the turns before the window its model sees, as their messages and answers (default 32 000); `summarize` summarizes the rest   |
+
+`window` and `budget` bound what Claude's and LangGraph's model is sent
+([what the model gets](docs/conversation.md)); pi and the DeepSeek Harness
+keep their own history, and compact it themselves. An object holds one
+framework's conversation: its turns are that framework's messages.
 
 ## Calling an agent
 
@@ -133,7 +141,7 @@ curl localhost:8080/assistant/alice/chat -d 'Hi, I am Alice'       # "Hello Alic
 ```
 
 A key answers one message at a time: a message sent while another is
-answered waits for it ([turn semantics](TURN-SEMANTICS.md) spells out how a
+answered waits for it ([turn semantics](docs/turns.md) spells out how a
 turn starts, ends, and is retried). A message that fails for good answers with an error:
 HTTP 424 if the model's provider refused it (a missing or wrong API key, an
 unknown model), 500 otherwise. A refused message is over: the next message
@@ -235,15 +243,17 @@ curl localhost:8080/assistant/alice/messages
 }
 ```
 
-The conversation as clients read it is a log in the object's database,
-which each change the agent publishes goes into. A message's `id` never
-changes; `cursor` is where the log is now. `limit` caps a page; `before` an
-id gives older messages (scrolling back, while `more` says there are older
-ones still); and `cursor` gives the messages new or changed since it, by
-when they changed, with the next cursor: a message that grew (a tool call
-with its output) comes again, with its `id`. A compacted or reset
-conversation keeps what was said, and the summary or handoff after it (the
-model's context is what changed):
+The conversation as clients read it is the agent's conversation of turns,
+in the object's database ([docs/conversation.md](docs/conversation.md)). A
+message's `id` is its position, and never changes; `cursor` is where the
+conversation is now. `limit` caps a page; `before` an id gives older
+messages (scrolling back, while `more` says there are older ones still);
+and `cursor` gives the messages new or changed since it, by when they
+changed, with the next cursor: a message that grew (a tool call with its
+output) comes again, with its `id`. `view: "summary"` gives each turn's
+message and answer alone, under the same ids. A conversation whose earliest
+turns are summarized, or that the framework compacted, keeps every turn as
+it was said (only the model's context changed):
 
 ```sh
 curl localhost:8080/assistant/alice/messages --json '{"limit": 20, "before": 40}'

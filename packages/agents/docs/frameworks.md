@@ -505,7 +505,7 @@ The Anthropic SDK's tool runner (`@anthropic-ai/sdk` 0.133.0).
 
 ## OpenCode
 
-`@opencode/*` 2.0.32, with `effect` 4.0.1. [`src/opencode/`](../src/opencode).
+`@opencode/*` 2.0.32, with `effect` 4.0.1. `src/opencode/` (removed in step 8).
 
 ### Today
 

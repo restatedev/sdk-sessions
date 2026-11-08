@@ -456,7 +456,7 @@ it; `pnpm --filter e2e crash` passes either way.
 ### Step 10: the docs, the examples, the template
 
 - These pages describe the code: the status lines go, and each page is
-  checked against the code. [`TURN-SEMANTICS.md`](../TURN-SEMANTICS.md) goes;
+  checked against the code. `TURN-SEMANTICS.md` goes;
   the README links here.
 - The README: the `messages` section (ids are positions; `view`; "a
   compacted or reset conversation keeps…" changes), the tables named in
@@ -473,33 +473,33 @@ it; `pnpm --filter e2e crash` passes either way.
 The guarantees of [Turn semantics](turns.md#guarantees-and-limits), each with
 a test:
 
-- [ ] Every row belongs to one turn; only the latest turn, while it has no
+- [x] Every row belongs to one turn; only the latest turn, while it has no
       answer, is written, by its own run; closing a dead turn writes only its
-      closing record.
-- [ ] At most one turn has no answer, and a new turn is refused while
-      another has none.
-- [ ] A turn ends once, with a status, and always with an assistant message
+      closing record. (`conversation.test.ts`: "is written only while it is being answered", "has open calls of its own")
+- [x] At most one turn has no answer, and a new turn is refused while
+      another has none. (`conversation.test.ts`: "is written only while it is being answered" (never overlap))
+- [x] A turn ends once, with a status, and always with an assistant message
       (its last reply, the note that closed it, or its answer stored as its
-      reply), whose position is `answered_at`.
-- [ ] A retried attempt of an answered turn reads only its answer, by the
+      reply), whose position is `answered_at`. (`conversation.test.ts`: "answered with nothing to say", "that ends with a tool after a message"; `messages.test.ts`: the summary's ids)
+- [x] A retried attempt of an answered turn reads only its answer, by the
       prompt's id; a retried attempt of an unfinished turn carries on from
-      its stored steps, without asking the model again for a stored reply.
-- [ ] A turn on the turn projection reads a bounded part of the
-      conversation: the transcript the budget holds, and the window.
-- [ ] The window holds every turn its framework didn't answer (the one being
+      its stored steps, without asking the model again for a stored reply. (`conversation.test.ts`: "answers a prompt once", "asks again within itself, once across attempts"; each framework's "answers a stored final reply without asking the model again")
+- [x] A turn on the turn projection reads a bounded part of the
+      conversation: the transcript the budget holds, and the window. (`conversation.test.ts`: "loads the transcript, and only the latest turns whole", "reads only the turns its budget holds")
+- [x] The window holds every turn its framework didn't answer (the one being
       answered, and any that another invocation ended), then the latest
-      `window` answered turns.
-- [ ] A dead turn is closed, never finished, by `settle` or the next
+      `window` answered turns. (`conversation.test.ts`: "keeps a turn another invocation ended in the window")
+- [x] A dead turn is closed, never finished, by `settle` or the next
       message, with a result for each open call: the call's error, "done,
       but not recorded" if its Restate call returned, or the note; in every
-      framework, the framework's own store included.
-- [ ] Message ids are positions; `seq` only grows, and a client reading from
+      framework, the framework's own store included. (`conversation.test.ts`: "a turn left without an answer"; each framework's "closes a turn its gone invocation left"; `turns.test.ts`: settle)
+- [x] Message ids are positions; `seq` only grows, and a client reading from
       a cursor gets each new or changed message once; `clear` keeps where
-      ids and cursors got to.
-- [ ] Each Restate call of a tool is made once per tool call; a framework's
-      wait is its tool call's alone; an approval is never the call's outcome.
-- [ ] Every framework's next model sees how a closed turn ended.
-- [ ] The e2e crash test passes for every framework the package keeps.
+      ids and cursors got to. (`messages.test.ts`: cursors, drops, "goes on from its ids and cursors once cleared"; `turns.test.ts`: erase)
+- [x] Each Restate call of a tool is made once per tool call; a framework's
+      wait is its tool call's alone; an approval is never the call's outcome. (`calls.test.ts`; `turns.test.ts`: "a closed turn's calls")
+- [x] Every framework's next model sees how a closed turn ended. (Claude, LangGraph: the closed turn in the window; DeepSeek, pi: the note (their tests))
+- [x] The e2e crash test passes for every framework the package keeps. (`pnpm --filter e2e crash`, for pi, LangGraph, Claude and DeepSeek)
 
 ## The tests that define it
 
@@ -632,4 +632,4 @@ own).
 - [x] Step 7: pi (spike, then port)
 - [x] Step 8: OpenCode (spike, then port or remove)
 - [x] Step 9: the old way goes
-- [ ] Step 10: the docs, the examples, the template
+- [x] Step 10: the docs, the examples, the template

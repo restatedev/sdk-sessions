@@ -68,7 +68,16 @@ handler does. A retried attempt opens the Harness again and carries on:
   `Infinity`: Restate's retry policy decides);
 - a tool's error fails the attempt, and Restate retries it (pi-durable would
   hand it to the model); a `restate.TerminalError` of a `@restatedev/agents`
-  tool is its answer to the model.
+  tool is its answer to the model;
+- a run a killed invocation left is aborted, never finished: its turn is
+  closed (`ended`) in the agent's conversation of turns, and the next
+  prompt tells the model how it ended.
+
+pi keeps its own history (and compacts it); each pi commit of a prompt's run
+copies its new entries (the model's replies, the tools' results) into the
+agent's conversation of turns, in the same transaction: what `messages`
+shows ([docs/conversation.md](../../docs/conversation.md)). The views show
+each turn as it was asked and answered, not pi's summaries and handoffs.
 
 The files of a `workspace` are not in the database: they last as long as the
 disk does, and a coding tool a crash cut off is not run again (the model is

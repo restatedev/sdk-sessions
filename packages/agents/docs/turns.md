@@ -6,12 +6,10 @@ what `status`, `messages` and a follower see along the way. What a turn
 stores and what the model gets are in [The conversation](conversation.md);
 how each framework plugs in, in [The frameworks](frameworks.md).
 
-**Status: target design** ([the plan](plan.md)). The turn's outer life (the
-companion, `start` and `close`, `stop`, the views) is today's, as
-[`TURN-SEMANTICS.md`](../TURN-SEMANTICS.md) describes it; what is new is the
-conversation it writes, how a turn ends in it, and dead turns.
+**Status: implemented** ([the plan](plan.md)). Where these pages say "today", they mean v0.3.0, before the port: kept to
+explain why the model is as it is.
 
-The code, once ported:
+The code:
 
 - [`src/common.ts`](../src/common.ts): `chatHandler`, the turn's wrapper:
   start and close in the companion, cancellation, attempts; and `answering`,
@@ -172,7 +170,7 @@ conversation first (`Turn.close`): each tool call without a result gets one
 returned, or else the note that ends the turn), then the note is the turn's
 last reply, and its answer. So the next turn's model never sees a tool call
 without a result, and knows how the turn ended. Today each framework does
-this its own way, and some not at all (pi, DeepSeek and OpenCode show the
+this its own way, and some not at all (pi and DeepSeek showed the
 next model no note); with the store, every framework does it the same way.
 
 Whoever closes a turn in the companion, a close does the same: it clears the
@@ -280,7 +278,7 @@ sequenceDiagram
 | `settle`, from the next turn's `start` | after the next turn, which closed it first | (the next turn did)                                   |
 | the next turn's `answerOnce`           | before its prompt                          | read, if still stored (the next turn stored none yet) |
 
-A framework with its own history (pi, DeepSeek, OpenCode) must also not
+A framework with its own history (pi, DeepSeek) must also not
 resume a dead turn's run in its own store, and must give its next model
 request the closing record
 ([Framework-owned history](conversation.md#framework-owned-history)).
@@ -334,7 +332,7 @@ sequenceDiagram
   invocation and its call id, `<invocation>:<call id>`. Restate's own tools
   (`call`, `send`, `workflow`, `subagent`, `signal`) make their call once
   however often the tool call runs: a framework that gives a cut-off call a
-  new id (DeepSeek and OpenCode tell the model its call was cut off, and the
+  new id (DeepSeek tells the model its call was cut off, and the
   model makes it again) gets the earlier call's id back
   ([Tool calls, once](conversation.md#tool-calls-once-the-call-records)).
 - **Waits survive.** A tool waiting for a signal waits in the companion

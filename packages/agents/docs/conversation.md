@@ -4,15 +4,16 @@ What an agent's conversation is made of, how it is stored, which part of it a
 turn reads, and what the model gets. The turn itself (its life, its end,
 attempts, stops, dead turns) is in [Turn semantics](turns.md).
 
-**Status: target design** ([the plan](plan.md)). Today each framework keeps
-its own conversation, in its own tables, and `restate_agent_log`
-([`src/log.ts`](../src/log.ts)) is a copy of it that clients read. All of that
-is replaced by the store below, the same for every framework, and the same
+**Status: implemented** ([the plan](plan.md)). Where these pages say "today", they mean v0.3.0, before the port: kept to
+explain why the model is as it is. In v0.3.0 each
+framework kept its own conversation, in its own tables, and
+`restate_agent_log` was a copy of it that clients read. All of that is
+replaced by the store below, the same for every framework, and the same
 as the Python SDK's
 ([its `conversation.md`](https://github.com/restatedev/sdk-python/blob/434bb6fe05ab17f3384709b48f060a47e68f5fb7/docs/agents/conversation.md)).
 
-The code, once ported: `src/conversation.ts` (the tables, `Conversation`,
-`Turn`, `answerOnce`, `settle`, `compact`), `src/messages.ts` (the
+The code: [`src/conversation.ts`](../src/conversation.ts) (the tables, `Conversation`,
+`Turn`, `answerOnce`, `settle`, `compact`), [`src/messages.ts`](../src/messages.ts) (the
 `messages` view) and [`src/calls.ts`](../src/calls.ts) (the call records).
 
 ## Conversation and turns
@@ -161,9 +162,8 @@ const SCHEMA = new Schema('restate_agents.turns', [
 | `restate_langgraph_checkpoints`, `restate_langgraph_channel_values`, `restate_langgraph_writes` (schema `restate-agents.langgraph`) | a LangGraph graph's checkpoints, channel values by version, and pending writes, per thread and namespace                                                                                                                        | `SqlCheckpointSaver`, for a graph of your own; the built-in agent uses none                                 |
 | pi-durable's `restate_pi_*` tables (its own migrations, `restate_pi_durable_schema`)                                                | pi's conversation, tasks and documents ([The frameworks](frameworks.md#pi))                                                                                                                                                     | pi, through [`src/pi/storage.ts`](../src/pi/storage.ts)                                                     |
 | `restate_deepseek_sessions`, `restate_deepseek_events` (schema `restate-agents.deepseek`)                                           | the DeepSeek Harness's event log ([The frameworks](frameworks.md#deepseek-harness))                                                                                                                                             | the harness, through [`src/deepseek/persistence.ts`](../src/deepseek/persistence.ts)                        |
-| OpenCode's own database `restate-agents.opencode`, beside the key's                                                                 | OpenCode's sessions, messages, events ([The frameworks](frameworks.md#opencode))                                                                                                                                                | OpenCode, through [`src/opencode/db.ts`](../src/opencode/db.ts)                                             |
 
-`clear` empties the key's database (every table above), OpenCode's database,
+`clear` empties the key's database (every table above),
 the companion's waits and kept signals, and keeps where the ids and cursors
 got to.
 
@@ -377,10 +377,10 @@ sequenceDiagram
 
 ## Framework-owned history
 
-Three frameworks here are durable engines of their own, which keep a
+Two frameworks here are durable engines of their own, which keep a
 conversation in their own store and read only that: pi (pi-durable's
-entries), the DeepSeek Harness (its event log) and OpenCode (its own
-database). None of them can be handed a list of messages as its history. Their
+entries) and the DeepSeek Harness (its event log). (OpenCode, the third,
+left the package: [The frameworks](frameworks.md#opencode).) None of them can be handed a list of messages as its history. Their
 turns are stored as every framework's are, but the model's history is the
 framework's:
 
@@ -390,24 +390,23 @@ framework's:
   failures end the turn as for any framework.
 - **The turn's items are copies.** The run copies each message the framework
   stores (its replies, tool calls and results) into the turn as items
-  (`append`, `appendReply`), keyed by the framework's own id, so that copying
-  again after a crash adds nothing. Where the framework writes to the key's
-  database (pi, DeepSeek), the copy is written in the same transaction as
-  the framework's own write; where it does not (OpenCode), right after it.
+  (`Turn.copyIn`), in the same transaction as the framework's own write of
+  them (pi's commit, DeepSeek's flush), so that a crash copies nothing twice
+  and loses nothing copied.
 - **What the framework says to itself is not the conversation.** Messages
-  the framework makes for its own loop (DeepSeek's `CONTINUE`, OpenCode's
-  restart note, runtime context) are not copied, or are items whose `read`
+  the framework makes for its own loop (DeepSeek's `CONTINUE`, runtime
+  context) are not copied, or are items whose `read`
   says nothing; and the framework's own copy of the prompt is not copied
   (the turn's row is the prompt).
 - **The model's input is the framework's.** `history()`, `window`, `budget`
   and summaries do not apply: the framework compacts its history itself (pi
-  and OpenCode do on their own; DeepSeek once `dsh-compaction-basic` is
-  mounted).
+  does on its own; DeepSeek once `dsh-compaction-basic` is mounted, not
+  yet).
 - **Closing reaches the framework too.** A turn that closes (stopped,
   refused, failed, ended) gets its closing record in the store, as any turn
   does, and the framework's next model request must see how the turn ended:
-  the closing note is handed to the framework, as a message of its own kind
-  or injected into its next run.
+  the closing note starts the framework's next prompt (`(<note>)`, then the
+  prompt), while the views show the prompt as asked.
 - **A dead turn is not resumed by the framework.** The framework must not
   finish another invocation's run: before it resumes anything, a dead turn's
   run is aborted, or closed in the framework's own store.
@@ -434,7 +433,7 @@ update of its row, by `answered`, also when the turn is closed:
 
 The next turn resumes with them when its window holds none of their source.
 No framework of this package needs either yet: Claude and LangGraph's
-built-in agent carry nothing, and pi, DeepSeek and OpenCode keep their state
+built-in agent carry nothing, and pi and DeepSeek keep their state
 in their own stores. The columns are there for one that does (a Claude
 server tool's container id, say), and for the Python SDK's layout.
 
@@ -461,7 +460,7 @@ invocation (the next invocation's first call replaces it):
   tool's own), and each keeps its own record. If it has none, a tool built on
   Restate takes the call that an earlier attempt made with the same tool and
   input (`rejoin`): a framework that tells the model its call was cut off
-  (DeepSeek, OpenCode) gets the call again under a new id, and that is the
+  (DeepSeek) gets the call again under a new id, and that is the
   same Restate call, with the same idempotency key, which it waits for again
   or whose result it gets. Today `callOf` matches by id alone.
 - **A framework's own wait is its tool call's alone** (`waitFor`, which never
