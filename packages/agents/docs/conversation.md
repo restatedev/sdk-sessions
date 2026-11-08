@@ -470,7 +470,7 @@ invocation (the next invocation's first call replaces it):
   that prompts twice, its second prompt making the call its first made (the
   same tool and input), makes a call of its own, also after a crash that left
   the first's record unforgotten (its turn's end forgets it after the answer
-  is stored).
+  is stored). Today `callOf` matches by id alone.
 - **A framework's own wait is its tool call's alone** (`waitFor`, which never
   rejoins). The framework stored the tool call before it waits, so a retried
   attempt waits again under the same id; a new call with the same input (the

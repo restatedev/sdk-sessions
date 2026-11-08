@@ -400,7 +400,8 @@ transaction; `CONTINUE` only for this invocation's own prompt, a step of its
 turn, not copied; a dead turn closed in the store (`settle`, or the next
 message), never continued, and its note given to the harness's next turn;
 the CANCELLED and UNANSWERED notes given to it too; `dsh-compaction-basic`
-mounted; a context overflow terminal.
+mounted (not done: it is not a dependency yet, so the harness's input still
+grows with the conversation); a context overflow terminal.
 
 **Tests**: invert `:228-236`; the copy across crashes (`crashedAnywhere`):
 each message once in `messages`; `CONTINUE` not in the views; a dead turn
@@ -637,3 +638,14 @@ own).
 - [x] Step 8: OpenCode (spike, then port or remove)
 - [x] Step 9: the old way goes
 - [x] Step 10: the docs, the examples, the template
+- [x] Fixes after the review of the steps, each with a test that fails
+      without it: each reply its own message in the views; a stopped run
+      stores nothing after its turn's close, which is one transaction; a
+      424 closes its turn refused, and a retry of a closed turn fails as it
+      ended; call records kept per prompt; one framework per agent (D7)
+      enforced; Claude goes on from a paused reply; DeepSeek answers an ask
+      again; pi aborts a dead run as `withPi` opens (and only another
+      prompt's input), fails with a cancellation its work ended, and never
+      takes a tool's error for a refusal; an empty reply is sent back as
+      `(no answer)`; the fakes' tool ids are unique; `sync` reads its page
+      after its revision.
