@@ -268,6 +268,13 @@ export const SAID = [
 ].map((m, id) => ({ id, role: m.role, parts: m.parts }));
 
 /**
+ * {@link SAID} as a framework on the conversation of turns gives it: each
+ * message's id is its position, and the rows that only add to a message
+ * (tool results) take positions of their own.
+ */
+export const SAID_IN_TURNS = SAID.map(({ role, parts }, i) => ({ id: [0, 1, 3, 4, 5, 7][i]!, role, parts }));
+
+/**
  * What goes wrong when `prompt` crashes at a state request of a message and
  * is retried, at every `stride`th request (CRASH_STRIDE, default 3), some at
  * once, until it answers without crashing: each should answer it, with one transfer, and one

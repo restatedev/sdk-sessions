@@ -80,6 +80,40 @@ export async function answerWith<O extends z.ZodObject>(
 }
 
 /**
+ * The check of an answer that must be a value of `output`: what asks again
+ * for one, if it is not (`answerOnce`'s `check`, which asks within the turn).
+ */
+export const recheck =
+  (output: z.ZodObject) =>
+  (reply: string): string | undefined => {
+    const answer = parsed(output, reply);
+    return 'wrong' in answer
+      ? `Your reply is not the answer asked for: ${answer.wrong}\nReply again, with the JSON only.`
+      : undefined;
+  };
+
+/**
+ * `prompt` (a framework's on the conversation of turns, of `options`),
+ * answering with a value of `options.output` if it has one, or else with the
+ * agent's text. A reply that is not the value is asked again within its
+ * turn, once (`check`), and the reply to that must be one, or the prompt
+ * fails, terminal.
+ */
+export const withChecked = async <T extends { system?: string; output?: z.ZodObject }>(
+  text: string,
+  options: T,
+  prompt: (text: string, options: T, check?: (answer: string) => string | undefined) => Promise<string>,
+): Promise<Answer<T['output']>> => {
+  const { output } = options;
+  if (!output) return prompt(text, options) as Promise<Answer<T['output']>>;
+  const asked = { ...options, system: [options.system, format(output)].filter(Boolean).join('\n\n') };
+  const answer = parsed(output, await prompt(text + reminder, asked, recheck(output)));
+  if ('wrong' in answer)
+    throw new restate.TerminalError(`The agent's reply is not the answer asked for: ${answer.wrong}`);
+  return answer.value as Answer<T['output']>;
+};
+
+/**
  * `prompt` (a framework's, of `options`), answering with a value of
  * `options.output` if it has one, or else with the agent's text.
  */

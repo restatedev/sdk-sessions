@@ -626,7 +626,7 @@ own).
 - [x] Step 1: the call records
 - [x] Step 2: LangGraph's checkpointer
 - [x] Step 3: the store, on a made-up framework
-- [ ] Step 4: Claude
+- [x] Step 4: Claude
 - [ ] Step 5: LangGraph's built-in agent
 - [ ] Step 6: DeepSeek
 - [ ] Step 7: pi (spike, then port)
