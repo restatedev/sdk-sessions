@@ -4,6 +4,11 @@ How an agent of `@restatedev/agents` answers its messages: what a turn is, how
 it starts and ends, what happens when it is retried, stopped or killed, and
 what `status`, `pending` and a follower see along the way.
 
+This page describes the code as it is. The conversation is moving to one
+store of turns for every framework, as the Python SDK's: the design and the
+plan are in [`docs/`](docs/README.md), which replace this page once the plan
+is done.
+
 The code lives in [`src/common.ts`](src/common.ts) (`chatHandler`, the turn),
 [`src/signals.ts`](src/signals.ts) (the companion) and
 [`src/object.ts`](src/object.ts) (the views: `status`, `stop`, `clear`,
