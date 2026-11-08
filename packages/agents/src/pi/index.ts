@@ -76,7 +76,7 @@ import {
   toolCallEnded,
   toolCallStarted,
 } from '../common.ts';
-import { answerOnce, type Items, type Parsed, type Turn } from '../conversation.ts';
+import { answerOnce, invocationOf, type Items, type Parsed, type Turn } from '../conversation.ts';
 import { conversationView } from '../messages.ts';
 import { type Answer, withChecked } from '../output.ts';
 import { type Definition, sessionObject } from '../object.ts';
@@ -333,6 +333,19 @@ export const withPi = async <T>(
   turn?.addEventListener('abort', onStop, { once: true });
   // The root conversation, once the Harness is open (below).
   const conversation = () => rootOn(harness, context, model);
+  /**
+   * Abort the run of a live input of the root conversation that `kept` does
+   * not keep: a run a prompt left, whose turn is closed (or the next prompt
+   * closes it), is aborted, never finished. pi's own writes (a compaction's)
+   * are not runs, and an input without a request id is not a prompt's.
+   */
+  const abortLeft = async (kept: (requestId: string) => boolean) => {
+    const { submissions } = await harness.inspect(context);
+    const left = submissions.filter((s) => s.type === 'input' && s.requestId !== undefined && !kept(s.requestId));
+    if (left.length === 0) return;
+    const root = await conversation();
+    if (left.some((s) => s.conversationId === root.id)) await root.abort(context);
+  };
   // A tool call's error: the attempt fails, and the call never returns.
   const stopped = (error: unknown, task: Context): Promise<never> => {
     // The turn was cancelled, and the abort ended the call: pi-durable records it.
@@ -389,9 +402,8 @@ export const withPi = async <T>(
         // The turn's own request: its prompt, or the message that asked again within it.
         const again = current.latestAsk() !== current.prompt;
         const requestId = again ? `${id}:again` : id;
-        // A run another invocation left (it is gone: its turn is closed) is aborted, never finished.
-        const { submissions } = await harness.inspect(context);
-        if (submissions.some((s) => s.requestId !== id && s.requestId !== `${id}:again`)) await root.abort(context);
+        // A run an earlier prompt of this invocation left (its turn failed, say).
+        await abortLeft((r) => r === id || r === `${id}:again`);
         // Once stopped, the turn's close says how it ended: not pi's abort of its tools.
         database.onCommit = copying(
           current,
@@ -427,8 +439,15 @@ export const withPi = async <T>(
     }
   };
 
+  // Whatever `work` does (a prompt, a compaction, a wait) has pi schedule
+  // what it has: a run another invocation left is aborted first. This
+  // invocation's own (a retried attempt's) goes on.
+  const working = async () => {
+    await abortLeft((r) => invocationOf(r) === ctx.request.id);
+    return work({ harness, context, conversation, prompt });
+  };
   try {
-    return await Promise.race([abortOn(), work({ harness, context, conversation, prompt })]);
+    return await Promise.race([abortOn(), working()]);
   } finally {
     turn?.removeEventListener('abort', onStop);
     await harness.close(withoutAbortSignal(context));

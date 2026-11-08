@@ -487,9 +487,14 @@ The Anthropic SDK's tool runner (`@anthropic-ai/sdk` 0.133.0).
   dispatches nothing: scheduling starts paused, until a call that asks for
   progress. `Conversation.abort()` commits its abort marks first, so the
   dead run's tasks run their abort handlers, never their progress. The
-  integration aborts the root conversation when pi has a live submission
-  of another request than the turn's (`harness.inspect`); a test checks
-  the dead run's transfer is not made again under the new invocation.
+  integration aborts the root conversation when it has a live input of
+  another invocation (`harness.inspect`), as `withPi` opens, before its
+  work, whatever that is (a prompt, a compaction, a wait), can have pi
+  schedule anything; and, as a prompt starts, a live input of another of
+  the invocation's prompts (one that failed, say). pi's own writes (a
+  background compaction's) and a retried attempt's own input go on. Tests
+  check the dead run's transfer is not made again under the new
+  invocation, by a prompt or by a handler that only waits for pi.
 - **The closing note** reaches pi as the start of the next prompt's input
   (`(<note>)` then the prompt), as for DeepSeek; the views show the prompt
   as asked. No pi extension is needed.
