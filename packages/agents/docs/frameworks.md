@@ -381,6 +381,9 @@ The Anthropic SDK's tool runner (`@anthropic-ai/sdk` 0.133.0).
   transaction: the new message events of the running turn, as its items.
 - **One turn**: the harness turns of one prompt (a resumed attempt's
   `CONTINUE`) are steps of one turn.
+- **Asking again** (`output`'s check): the harness is asked the turn's latest
+  ask (`prompt:<id>:again`), and its reply to that is the answer; its events
+  are copied from there.
 - **Dead turns**: never `CONTINUE` another invocation's prompt. `settle`
   writes the closing record in the store; the next boot's `resumeWith` closes
   the harness's turn; the next harness turn is given the closing note

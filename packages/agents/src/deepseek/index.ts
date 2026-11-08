@@ -324,7 +324,7 @@ function promptOf(turn: Turn<Message>, before: { status?: string; answer?: strin
 }
 
 /**
- * Copy the events of `batch` that are `turn`'s (after its prompt, at seq
+ * Copy the events of `batch` that are `turn`'s (after its latest ask, at seq
  * `from()` of the log) into it, in `tx`: the model's replies, and the
  * tools' results. Not the requests to continue (a step of the run's own),
  * nor anything once the run stopped or `failed()` (the harness's result of a
@@ -345,7 +345,11 @@ const copying =
     if (copied.length > 0) await turn.copyIn(tx, copied);
   };
 
-/** The run of the harness of `options`, on the conversation: its turn's prompt asked once, and continued after a crash. */
+/**
+ * The run of the harness of `options`, on the conversation: its turn's
+ * latest ask (its prompt, or the message that asked again) asked once, and
+ * continued after a crash.
+ */
 const runOf =
   (ctx: restate.SessionContext, { model: named, system, tools = [] }: Options): Run<Message> =>
   async (conversation) => {
@@ -367,8 +371,11 @@ const runOf =
     const onStop = () => fail(stop!.reason);
     stop?.addEventListener('abort', onStop, { once: true });
     let agent: Agent | undefined;
-    const id = promptId(turn.id);
-    // Where the turn's prompt is in the log, once it is.
+    // The turn asked again (its output's check, say): the harness is asked that, and answers it.
+    const asked = turn.latestAsk();
+    const again = asked !== turn.prompt;
+    const id = again ? MessageId(`prompt:${turn.id}:again`) : promptId(turn.id);
+    // Where the turn's latest ask is in the log, once it is.
     let from: number | undefined;
     try {
       const sessionId = SessionId(ctx.key);
@@ -405,7 +412,8 @@ const runOf =
           if (failedHere) throw turnError(end.error);
         }
         if ('answer' in end && end.answer !== undefined) return end.answer;
-        agent.followup(end.asked ? message(`continue:${events.length}`, CONTINUE) : promptOf(turn, before));
+        const ask = again ? message(id, textOf(asked.item)) : promptOf(turn, before);
+        agent.followup(end.asked ? message(`continue:${events.length}`, CONTINUE) : ask);
         await Promise.race([agent.whenIdle(), failed]);
         await harness.sessions.flush(agent.session);
       }
