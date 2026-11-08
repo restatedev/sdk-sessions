@@ -4,7 +4,7 @@
 // the `messages` handler with its `Transcript`.
 import * as restate from '@restatedev/sessions';
 import { cancelCalls, cancelled, definitionOf, Link, ScopeKey } from '@restatedev/sessions/internal';
-import { settle } from './calls.ts';
+import { settleCalls } from './calls.ts';
 import * as log from './log.ts';
 import type { Said } from './log.ts';
 import { signals, signalsOf } from './signals.ts';
@@ -236,7 +236,7 @@ export async function toolCallStarted(ctx: restate.SessionContext) {
   const read = READING.get(ctx);
   if (read) {
     const transcript = await read();
-    await settle(ctx, (id, failed) => transcript.answered(id, failed));
+    await settleCalls(ctx, (id, failed) => transcript.answered(id, failed));
   }
 }
 
@@ -526,7 +526,7 @@ function logged(ctx: restate.SessionContext, read: Read): Promise<void> {
     const transcript = await read();
     await log.sync(ctx, transcript.messages());
     // The calls whose results the framework stored are made: see calls.ts.
-    await settle(ctx, (id, failed) => transcript.answered(id, failed));
+    await settleCalls(ctx, (id, failed) => transcript.answered(id, failed));
   };
   const done = (WRITING.get(ctx) ?? Promise.resolve()).then(write, write);
   WRITING.set(ctx, done);

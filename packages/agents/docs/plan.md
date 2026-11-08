@@ -623,7 +623,7 @@ own).
 ## Status
 
 - [x] Step 0: these pages
-- [ ] Step 1: the call records
+- [x] Step 1: the call records
 - [ ] Step 2: LangGraph's checkpointer
 - [ ] Step 3: the store, on a made-up framework
 - [ ] Step 4: Claude

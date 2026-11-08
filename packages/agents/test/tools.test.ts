@@ -6,7 +6,7 @@ import { type AttemptContext, contextOf, invoke } from '@restatedev/sessions/int
 import { fakeContext, type Made, memoryDatabase } from '@restatedev/sessions/test/support';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { settle } from '../src/calls.ts';
+import { settleCalls as settle } from '../src/calls.ts';
 import { alsoClearing, messagesHandler, Transcript } from '../src/common.ts';
 
 const orders = restate.service({ name: 'orders', handlers: { status: async (_ctx, _order: string) => 'shipped' } });
