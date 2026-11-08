@@ -649,6 +649,47 @@ export class Turn<I> {
     await this.answered(note, status);
   }
 
+  /** Whether the turn can be written: the latest, without an answer, of a conversation not sealed. */
+  get writable() {
+    return !this.#ledger.closed && this.#ledger.latest === this && this.status === undefined;
+  }
+
+  /**
+   * Copy a framework's own messages into the turn, in `tx`, a transaction of
+   * the framework's own store (its write of these messages): the rows commit
+   * with it, so the copy is made once, however often the attempt crashes.
+   * Each of `items` is a reply of the model (`reply`, from `agent`) or
+   * another item (a tool's result). For a framework that keeps its own
+   * history: nothing else writes the turn while it runs, so the copy takes
+   * its positions without waiting for other writes (it cannot wait inside
+   * `tx`, which holds the database).
+   */
+  async copyIn(tx: DatabaseWriter, items: { item: I; reply?: boolean; agent?: string }[]) {
+    this.#checkWritable();
+    const ledger = this.#ledger;
+    const n = ledger.next;
+    const added: Entry<I>[] = items.map(({ item, reply, agent }, i) => ({
+      n: n + i,
+      item,
+      ...(reply ? { reply: n + i, agent } : {}),
+    }));
+    // Taken at once: a rolled back transaction fails its attempt, whose state goes with it.
+    ledger.next = n + added.length;
+    const seq = ledger.seq;
+    ledger.seq += added.length;
+    for (const [i, e] of added.entries()) {
+      await tx.execute(`INSERT INTO ${STEPS} (n, turn, seq, item, reply, agent) VALUES (?, ?, ?, ?, ?, ?)`, [
+        e.n,
+        this.n,
+        seq + i + 1,
+        ledger.items.dump(e.item),
+        e.reply ?? null,
+        e.agent ?? null,
+      ]);
+    }
+    this.#add(added);
+  }
+
   /** Refuse a write unless this is the latest turn, without an answer: only its run (or its close) writes it. */
   #checkWritable() {
     this.#ledger.checkOpen();

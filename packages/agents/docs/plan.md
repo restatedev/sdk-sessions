@@ -628,7 +628,7 @@ own).
 - [x] Step 3: the store, on a made-up framework
 - [x] Step 4: Claude
 - [x] Step 5: LangGraph's built-in agent
-- [ ] Step 6: DeepSeek
+- [x] Step 6: DeepSeek
 - [ ] Step 7: pi (spike, then port)
 - [ ] Step 8: OpenCode (spike, then port or remove)
 - [ ] Step 9: the old way goes
