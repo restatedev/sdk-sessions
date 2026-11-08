@@ -300,8 +300,8 @@ export const items: Items<Message> = {
       const calls = m.content.flatMap((c) =>
         c.type === 'tool-call' ? [{ id: c.id, name: c.name, input: parsedJson(c.arguments) }] : [],
       );
-      const text = textOf(m);
-      return text || calls.length === 0 ? { said: ['assistant', text], calls } : { calls };
+      // Each reply is a message of its own, its tool calls' too.
+      return { said: ['assistant', textOf(m)], calls };
     }
     if (m.role === 'tool') return { results: [{ id: m.toolCallId, output: textOf(m), error: m.isError === true }] };
     return {};

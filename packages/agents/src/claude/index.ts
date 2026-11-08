@@ -104,8 +104,9 @@ export const items: Items<MessageParam> = {
         ? [{ id: b.tool_use_id, output: storedText(b.content as never), error: b.is_error === true }]
         : [],
     );
-    // A reply of tool calls only says nothing; a message of results says nothing.
-    const said = texts.length > 0 || (role === 'assistant' && calls.length === 0 && results.length === 0);
+    // Each reply of the model is a message of its own, its tool calls' too (as
+    // the views gave them before); a message of results only says nothing.
+    const said = role === 'assistant' || texts.length > 0;
     return {
       ...(said ? { said: [role, texts.map((b) => b.text).join('')] as ['user' | 'assistant', string] } : {}),
       calls,

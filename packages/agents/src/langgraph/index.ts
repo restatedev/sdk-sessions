@@ -100,8 +100,8 @@ export const items: Items<BaseMessage> = {
     if (HumanMessage.isInstance(message)) return { said: ['user', message.text] };
     if (AIMessage.isInstance(message)) {
       const calls = (message.tool_calls ?? []).map((c) => ({ id: c.id ?? '', name: c.name, input: c.args }));
-      // A reply of tool calls only says nothing.
-      return message.text || calls.length === 0 ? { said: ['assistant', message.text], calls } : { calls };
+      // Each reply is a message of its own, its tool calls' too.
+      return { said: ['assistant', message.text], calls };
     }
     if (ToolMessage.isInstance(message)) {
       return { results: [{ id: message.tool_call_id, output: message.text, error: message.status === 'error' }] };
