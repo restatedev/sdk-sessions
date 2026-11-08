@@ -85,7 +85,8 @@ export const items: Items<BaseMessage> = {
   dump: (message) => JSON.stringify(message.toDict()),
   load: (stored) => mapStoredMessagesToChatMessages([JSON.parse(stored) as StoredMessage])[0]!,
   prompt: (text) => new HumanMessage(text),
-  reply: (text) => new AIMessage(text),
+  // A provider may refuse an empty message: an empty answer, as the model sees it later, says so.
+  reply: (text) => new AIMessage(text.trim() ? text : NO_ANSWER),
   results: (results) =>
     results.map(
       ([call, output]) =>
@@ -109,6 +110,24 @@ export const items: Items<BaseMessage> = {
     return {};
   },
 };
+
+/** What an empty answer says, as the model sees it later. */
+const NO_ANSWER = '(no answer)';
+
+/** Whether `message` is a reply of the model with nothing in it: no text, no tool call, no other content. */
+const blank = (message: AIMessage) =>
+  (message.tool_calls ?? []).length === 0 &&
+  (typeof message.content === 'string'
+    ? !message.content.trim()
+    : message.content.every((b) => b.type === 'text' && !(typeof b.text === 'string' && b.text.trim())));
+
+/**
+ * `messages` as a provider takes them: a reply of the model with nothing in
+ * it (stored as it came) says so, as an empty answer does. Anthropic's API
+ * refuses an empty message but the last.
+ */
+const sendable = (messages: BaseMessage[]) =>
+  messages.map((m) => (AIMessage.isInstance(m) && blank(m) ? new AIMessage(NO_ANSWER) : m));
 
 /** `t`, its errors given to `failed`, but for its input's (arguments that do not fit) and LangGraph's interrupts. */
 const failing = (
@@ -259,7 +278,7 @@ const runOf =
     const app = graph(ctx, turn, model, tools, system).compile();
     try {
       const { messages } = await app.invoke(
-        { messages: conversation.history() },
+        { messages: sendable(conversation.history()) },
         { signal: stopSignalOf(ctx), recursionLimit },
       );
       return messages.at(-1)!.text;

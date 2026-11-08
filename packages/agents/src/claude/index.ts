@@ -61,6 +61,23 @@ export const callId = (context?: BetaToolRunContext) => {
   return context.toolUse.id;
 };
 
+/** What an empty answer says, as the model sees it later: the API refuses an empty text. */
+const NO_ANSWER = '(no answer)';
+
+/**
+ * `messages` as the API takes them: it refuses an empty text, and an
+ * assistant's message with no content but the last. The model may reply
+ * with nothing (stored as it came): sent back, such a reply says so.
+ */
+const sendable = (messages: MessageParam[]): MessageParam[] =>
+  messages.map((m) => {
+    if (m.role !== 'assistant') return m;
+    if (typeof m.content === 'string') return m.content.trim() ? m : { ...m, content: NO_ANSWER };
+    const content = m.content.filter((b) => b.type !== 'text' || b.text.trim() !== '');
+    if (content.length === 0) return { ...m, content: NO_ANSWER };
+    return content.length === m.content.length ? m : { ...m, content };
+  });
+
 /** The text of stored content, without its tool calls and results. */
 const storedText = (content: string | readonly { type: string; text?: string }[] | undefined) =>
   typeof content === 'string' ? content : (content ?? []).flatMap((b) => (b.type === 'text' ? [b.text] : [])).join('');
@@ -77,7 +94,7 @@ export const items: Items<MessageParam> = {
   load: (stored) => JSON.parse(stored) as MessageParam,
   prompt: (text) => ({ role: 'user', content: text }),
   // The API refuses an empty text: an empty answer, as the model sees it later, says so.
-  reply: (text) => ({ role: 'assistant', content: text.trim() ? text : '(no answer)' }),
+  reply: (text) => ({ role: 'assistant', content: text.trim() ? text : NO_ANSWER }),
   // Every result of a reply in one message, as the API wants them.
   results: (results) =>
     results.length === 0
@@ -181,7 +198,7 @@ const runOf =
           ...(effort === undefined ? {} : { output_config: { effort } }),
           ...(system === undefined ? {} : { system }),
           tools,
-          messages: conversation.history(),
+          messages: sendable(conversation.history()),
         },
         { signal: stopSignalOf(ctx) },
       );

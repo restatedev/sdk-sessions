@@ -131,6 +131,23 @@ describe('the LangGraph agent', () => {
     expect(messages[1]!.parts).toEqual([{ type: 'text', text: UNANSWERED }]);
   });
 
+  it('sends a reply of the model with nothing in it back as one that says so: a provider may refuse it empty', async () => {
+    // The teller, but for `Hello`, which it answers with nothing; and, as Anthropic's API, it refuses an empty message.
+    class BadRequestError extends Error {}
+    const model = new (class extends Teller {
+      override reply(...args: Parameters<Teller['reply']>) {
+        const [messages] = args;
+        if (messages.slice(0, -1).some((m) => !m.text.trim() && !(m as AIMessage).tool_calls?.length)) {
+          throw new BadRequestError('all messages must have non-empty content');
+        }
+        return messages.at(-1)!.text === 'Hello' ? new AIMessage('') : super.reply(...args);
+      }
+    })({});
+    const c = conversation(langgraph.chat({ model }), 'empty');
+    expect(await c.attempt('inv1', 'Hello')).toBe('');
+    expect(await c.attempt('inv2', 'Hello again')).toBe('Ask me to "move 5 from 1 to 2", or to "audit" the books.');
+  });
+
   it('gives the model its system prompt', async () => {
     const c = conversation(langgraph.chat({ system: 'You are Ada.' }), 'ada');
     expect(await c.attempt('inv1', 'Who are you?')).toBe('You are Ada.');

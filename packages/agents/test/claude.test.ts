@@ -317,6 +317,26 @@ describe('the Claude agent', () => {
     expect(asked[1]!.at(-1)).toEqual({ role: 'assistant', content: [{ type: 'text', text: 'Searching...' }] });
   });
 
+  it('sends a reply of the model with nothing in it back as one that says so: the API refuses it empty', async () => {
+    const c = conversation(prompt, 'empty');
+    const reply = teller.reply;
+    teller.reply = (messages) => {
+      // As the API: only the last message may be empty.
+      const empty = messages
+        .slice(0, -1)
+        .some((m) => (typeof m.content === 'string' ? !m.content.trim() : m.content.length === 0));
+      if (empty) throw new HttpError(400, 'invalid_request_error', 'all messages must have non-empty content');
+      return messages.length === 1 ? { ...reply(messages), content: [] } : reply(messages);
+    };
+    const answers: string[] = [];
+    try {
+      answers.push(await c.attempt('inv1', 'Hello'), await c.attempt('inv2', 'Hello again'));
+    } finally {
+      teller.reply = reply;
+    }
+    expect(answers).toEqual(['', 'Ask me to "move 5 from 1 to 2", or to "audit" the books.']);
+  });
+
   it('ends a prompt the provider refused, and answers the next message afresh', async () => {
     const c = conversation(prompt, 'refused');
     const reply = teller.reply;
