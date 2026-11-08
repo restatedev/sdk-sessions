@@ -600,6 +600,28 @@ describe('a turn left without an answer', () => {
   });
 });
 
+describe('a retry of a closed turn', () => {
+  it('fails as the prompt did: failed for good, cancelled, or ended by another invocation', async () => {
+    const { ask } = asking(async (conversation) => {
+      const text = conversation.turn.prompt.item.text;
+      if (text === 'boom') throw new restate.TerminalError('boom');
+      if (text === 'stop') throw new restate.CancelledError();
+      await conversation.turn.appendReply([calling('c1')]);
+      throw new Error('the invocation is gone');
+    });
+    await expect(ask('boom', 'inv_boom')).rejects.toThrow('boom');
+    // Retried (a crash right after the close): not the note as an answer.
+    await expect(ask('boom', 'inv_boom')).rejects.toThrow('boom');
+    await expect(ask('boom', 'inv_boom')).rejects.not.toThrow(/^Error: /);
+    await expect(ask('stop', 'inv_stop')).rejects.toBeInstanceOf(restate.CancelledError);
+    await expect(ask('stop', 'inv_stop')).rejects.toBeInstanceOf(restate.CancelledError);
+    await expect(ask('gone', 'inv_gone')).rejects.toThrow('gone');
+    // The next message closes it, ended; the gone invocation, run again, fails with the note.
+    await expect(ask('boom', 'inv_next')).rejects.toThrow('boom');
+    await expect(ask('gone', 'inv_gone')).rejects.toThrow(ENDED);
+  });
+});
+
 describe('the turns', () => {
   it('each have the time they were asked', async () => {
     const { ask, inAttempt } = asking(async () => 'fine');

@@ -251,7 +251,7 @@ describe('the DeepSeek Harness agent', () => {
     expect(messages[2]!.parts).toEqual([{ type: 'text', text: ENDED }]);
     // The views show the prompt as asked, without the note.
     expect(messages[3]!.parts).toEqual([{ type: 'text', text: 'Please move 2 from 0 to 1' }]);
-    expect(await c.attempt('inv1', 'Please move 1 from 0 to 1')).toBe(ENDED);
+    await expect(c.attempt('inv1', 'Please move 1 from 0 to 1')).rejects.toThrow(ENDED);
   });
 
   it('tells the next model that a turn was refused', async () => {

@@ -57,6 +57,7 @@ import {
   ENDED,
   nextPromptId,
   refusalOf,
+  REFUSED,
   settingsOf,
   stopSignalOf,
   storedAnswer,
@@ -254,10 +255,14 @@ export async function restart(tx: DatabaseWriter, start: Start) {
   ]);
 }
 
-/** The stored answer of prompt `promptId`, if it has one: one read, of the turn's row. */
-export async function answerIn(db: DatabaseReader, promptId: string): Promise<string | undefined> {
-  const row = await db.get(`SELECT answer FROM ${TURNS} WHERE prompt = ?`, [promptId]);
-  return row ? str(row.answer) : undefined;
+/** The stored answer of prompt `promptId`, and how its turn ended, if it has one: one read, of the turn's row. */
+export async function answerIn(
+  db: DatabaseReader,
+  promptId: string,
+): Promise<{ answer: string; status: Status } | undefined> {
+  const row = await db.get(`SELECT answer, status FROM ${TURNS} WHERE prompt = ?`, [promptId]);
+  const answer = row ? str(row.answer) : undefined;
+  return answer === undefined ? undefined : { answer, status: (str(row!.status) ?? 'answered') as Status };
 }
 
 /**
@@ -1151,7 +1156,8 @@ export async function answerOnce<I>(
   const promptId = nextPromptId(ctx);
   await SCHEMA.ensure(ctx.db);
   const stored = await answerIn(ctx.db, promptId);
-  if (stored !== undefined) return storedAnswer(stored);
+  // Answered (or closed) already: a retry answers, or fails, as the turn ended.
+  if (stored !== undefined) return storedAnswer(stored.answer, stored.status);
   const conversation = await Conversation.load(ctx.db, items, window, budget);
   const answered = await answering(
     ctx,
@@ -1209,16 +1215,21 @@ async function answerTurn<I>(
       await conversation.seal();
       throw error;
     }
+    // Refused for good (a wrong API key, say): closed unanswered, and a
+    // terminal error. A framework's own 424 is one (a model it cannot take,
+    // its provider's refusal), as is an error a retry would meet again.
+    const refused =
+      error instanceof restate.TerminalError ? (error.code === REFUSED ? error : undefined) : refusalOf(ctx, error);
+    if (refused) {
+      await turn.close(ctx, 'refused', UNANSWERED);
+      throw refused;
+    }
     if (error instanceof restate.TerminalError) {
       // Failed for good: closed with the error, so that the next prompt does not run into it again.
       await turn.close(ctx, 'failed', `Error: ${error.message}`);
       throw error;
     }
-    // Refused for good (a wrong API key, say): closed unanswered, and a terminal error.
-    const refused = refusalOf(ctx, error);
-    if (!refused) throw error;
-    await turn.close(ctx, 'refused', UNANSWERED);
-    throw refused;
+    throw error;
   }
   await turn.answered(answered);
   return storedAnswer(answered);

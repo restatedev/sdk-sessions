@@ -337,8 +337,8 @@ describe('the Claude agent', () => {
     const { messages } = await c.read(claude.messages());
     expect(messages[1]!.parts[1]).toMatchObject({ type: 'tool', output: ENDED, error: true });
     expect(messages[2]!.parts).toEqual([{ type: 'text', text: ENDED }]);
-    // Its invocation's answer is the note, should it come again.
-    expect(await c.attempt('inv1', 'Please move 1 from 0 to 1')).toBe(ENDED);
+    // Its invocation, should it come again, fails with the note.
+    await expect(c.attempt('inv1', 'Please move 1 from 0 to 1')).rejects.toThrow(ENDED);
     expect(c.ledger.transfers.size).toBe(2);
   });
 

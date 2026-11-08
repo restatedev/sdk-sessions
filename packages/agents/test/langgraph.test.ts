@@ -196,7 +196,7 @@ describe('the LangGraph agent', () => {
     const { messages } = await c.read(langgraph.messages());
     expect(messages[1]!.parts[1]).toMatchObject({ type: 'tool', output: ENDED, error: true });
     expect(messages[2]!.parts).toEqual([{ type: 'text', text: ENDED }]);
-    expect(await c.attempt('inv1', 'Please move 1 from 0 to 1')).toBe(ENDED);
+    await expect(c.attempt('inv1', 'Please move 1 from 0 to 1')).rejects.toThrow(ENDED);
   });
 
   it('answers a stored final reply without asking the model again', async () => {

@@ -517,13 +517,20 @@ export function refusal(error: unknown): restate.TerminalError | undefined {
 }
 
 /**
- * A prompt's stored answer, as the prompt returns it: {@link UNANSWERED},
- * stored as its provider refused it, fails as the prompt did then
- * ({@link REFUSED}), also in a retry after a crash right after it was stored.
+ * A prompt's stored answer, as the prompt returns it, by how its turn ended
+ * (`status`): a turn refused ({@link UNANSWERED}) fails with
+ * {@link REFUSED}, one failed for good with its error, one cancelled with
+ * the cancellation, one another invocation ended with its note; so that a
+ * retry after a crash right after the close fails as the prompt did.
  */
-export function storedAnswer(answer: string): string {
-  if (answer !== UNANSWERED) return answer;
-  throw new restate.TerminalError(`the model's provider refused the request: ${CHECK_MODEL}`, { errorCode: REFUSED });
+export function storedAnswer(answer: string, status = 'answered'): string {
+  if (status === 'refused') {
+    throw new restate.TerminalError(`the model's provider refused the request: ${CHECK_MODEL}`, { errorCode: REFUSED });
+  }
+  if (status === 'cancelled') throw new restate.CancelledError();
+  if (status === 'failed') throw new restate.TerminalError(answer.replace(/^Error: /, ''));
+  if (status === 'ended') throw new restate.TerminalError(answer);
+  return answer;
 }
 
 /** A message of a conversation, as an agent's `messages` handler returns it. */
