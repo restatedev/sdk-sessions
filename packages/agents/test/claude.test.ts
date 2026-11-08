@@ -296,6 +296,27 @@ describe('the Claude agent', () => {
     expect(c.ledger.calls).toEqual([]);
   });
 
+  it("goes on from a reply the API paused (a server tool's long turn), in the same turn", async () => {
+    const c = conversation(prompt, 'paused');
+    const reply = teller.reply;
+    const asked: MessageParam[][] = [];
+    teller.reply = (messages) => {
+      asked.push(messages);
+      const [text, stop] = asked.length === 1 ? ['Searching...', 'pause_turn'] : ['Found it.', 'end_turn'];
+      return { ...reply(messages), content: [{ type: 'text', text }], stop_reason: stop } as never;
+    };
+    let answer: string;
+    try {
+      answer = await c.attempt('inv1', 'Hello');
+    } finally {
+      teller.reply = reply;
+    }
+    expect(answer).toBe('Found it.');
+    // Asked again with the paused reply, to go on from.
+    expect(asked).toHaveLength(2);
+    expect(asked[1]!.at(-1)).toEqual({ role: 'assistant', content: [{ type: 'text', text: 'Searching...' }] });
+  });
+
   it('ends a prompt the provider refused, and answers the next message afresh', async () => {
     const c = conversation(prompt, 'refused');
     const reply = teller.reply;

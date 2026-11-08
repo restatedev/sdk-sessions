@@ -204,12 +204,15 @@ const runOf =
         // A reply that cannot go on ends the turn, whose tool calls do not run.
         const stopped = stoppedShort(message, maxTokens);
         if (stopped) throw new restate.TerminalError(stopped);
-        await turn.appendReply([{ role: 'assistant', content: message.content }]);
-        // Paused (a server tool's long turn): the reply is a step, and the model goes on from it.
+        const said: MessageParam = { role: 'assistant', content: message.content };
+        // Paused (a server tool's long turn): a step of the turn, not a reply to
+        // end it with, and the model goes on from it.
         if (message.stop_reason === 'pause_turn') {
+          await turn.append(said);
           paused = true;
           break;
         }
+        await turn.appendReply([said]);
         if (!message.content.some((c) => c.type === 'tool_use')) return textOf(message.content);
         await toolCallStarted(ctx);
         const results = await runner.generateToolResponse();
