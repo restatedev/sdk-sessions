@@ -11,7 +11,7 @@ export {
   type MessagesRequest,
   type Part,
   REFUSED,
-  type Turn,
+  type Answering,
   UNANSWERED,
   type Configure,
 } from './common.ts';

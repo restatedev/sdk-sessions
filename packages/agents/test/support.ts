@@ -19,8 +19,10 @@ export class Following {
   revision = 0;
   /** Each turn closed, by its invocation id. */
   readonly closed: string[] = [];
-  /** The message being answered, from its turn's start to its close. */
-  answering: { invocationId: string; since: string } | null = null;
+  /** The message being answered, from its turn's start to its close, and whether its agent settles it. */
+  answering: { invocationId: string; since: string; settles?: boolean } | null = null;
+  /** Each turn the companion would have its agent `settle`: closed as gone, by its invocation id. */
+  readonly settled: string[] = [];
 }
 
 /** The following of each object's state. */
@@ -56,22 +58,38 @@ const made = (c: Made): Made => ({
  * of following over `map`: `ctx`, a handler's context, and `view`, a view's.
  * `route` answers the calls to anything but `signals`.
  */
-export function sqlAttempt(options: AttemptOptions & { route?: (call: Made) => Promise<unknown> }) {
+export function sqlAttempt(
+  options: AttemptOptions & {
+    route?: (call: Made) => Promise<unknown>;
+    /** What the companion's `wait` answers a wait with: by default, it waits forever. */
+    signal?: (wait: { id: string; name: string; input?: unknown }) => unknown;
+  },
+) {
   const following = followingOf(options.map);
   const base = baseAttempt(options);
   // The `signals` object, as the agents call it.
   const signals: Record<string, (input: never) => unknown> = {
     publish: () => ({ revision: ++following.revision }),
-    start: (turn: { invocationId: string; since: string }) => {
-      if (following.answering?.invocationId !== turn.invocationId) following.answering = turn;
+    start: (turn: { invocationId: string; since: string; settles?: boolean }) => {
+      if (following.answering?.invocationId === turn.invocationId) return;
+      if (following.answering) closed(following.answering.invocationId, true);
+      following.answering = turn;
     },
     // As the companion's: a turn's close publishes it.
-    close: (turn: string) => {
-      if (following.answering?.invocationId === turn) following.answering = null;
-      following.closed.push(turn);
-      following.revision++;
-    },
+    close: (turn: string) => closed(turn),
+    ended: (turn: string) => closed(turn, true),
+    wait: (wait: { id: string; name: string; input?: unknown }) =>
+      options.signal ? options.signal(wait) : new Promise(() => {}),
   };
+  /** As the companion's close: a gone turn that settles is sent to its agent's `settle`. */
+  function closed(turn: string, gone = false) {
+    if (following.answering?.invocationId === turn) {
+      if (gone && following.answering.settles) following.settled.push(turn);
+      following.answering = null;
+    }
+    following.closed.push(turn);
+    following.revision++;
+  }
   const route = (c: Made) => {
     if (c.service !== 'signals') {
       if (options.route) return options.route(made(c));
