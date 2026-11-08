@@ -24,15 +24,15 @@ that put them together. New to it all? Begin with
 
 ### Intermediate
 
-| File                                      | What                                                                                                                                     |
-| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| [`support.ts`](intermediate/support.ts)   | A support agent whose tools are Restate itself: a service call, a signal (a manager's approval) and a workflow                           |
-| [`triage.ts`](intermediate/triage.ts)     | Agents as steps of a workflow: classify a ticket, draft a reply, and wait for a person's review                                          |
-| [`router.ts`](intermediate/router.ts)     | A front desk of your own: a handler asks a model which team handles a message (`pi.prompt`), then calls that team's agent                |
-| [`team.ts`](intermediate/team.ts)         | A team on three frameworks: an editor (pi) hands research to a researcher (LangGraph) and drafting to a writer (Claude)                  |
-| [`followup.ts`](intermediate/followup.ts) | An agent that schedules a check-in for a day later: `send` with a delay                                                                  |
-| [`harness.ts`](intermediate/harness.ts)   | An agent each user configures: its model and persona from the object's database (`pi.chat(options)`), and `compact` and `reset` handlers |
-| [`ui/`](ui/app.ts)                        | A chat page for `support.ts` on Restate's own client: the conversation as the agent works, Approve and Reject, Stop (`npx vite ui`)      |
+| File                                      | What                                                                                                                                       |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| [`support.ts`](intermediate/support.ts)   | A support agent whose tools are Restate itself: a service call, a signal (a manager's approval) and a workflow                             |
+| [`triage.ts`](intermediate/triage.ts)     | Agents as steps of a workflow: classify a ticket, draft a reply, and wait for a person's review                                            |
+| [`router.ts`](intermediate/router.ts)     | A front desk of your own: a handler asks a model which team handles a message (`pi.prompt`), then calls that team's agent                  |
+| [`team.ts`](intermediate/team.ts)         | A team on three frameworks: an editor (pi) hands research to a researcher (LangGraph) and drafting to a writer (Claude)                    |
+| [`followup.ts`](intermediate/followup.ts) | An agent that schedules a check-in for a day later: `send` with a delay                                                                    |
+| [`harness.ts`](intermediate/harness.ts)   | An agent each user configures: its model and persona from the object's database (`pi.chat(options)`), and `summarize` and `reset` handlers |
+| [`ui/`](ui/app.ts)                        | A chat page for `support.ts` on Restate's own client: the conversation as the agent works, Approve and Reject, Stop (`npx vite ui`)        |
 
 ### Advanced
 
