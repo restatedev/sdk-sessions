@@ -70,6 +70,9 @@ function render<I>(items: Items<I>, rows: unknown[][]): Rendered[] {
 
 const chat = ({ id, role, parts }: Rendered): ChatMessage => ({ id, role, parts });
 
+/** The latest `limit` of `messages`: none for a limit of 0 (`slice(-0)` would be all of them). */
+const latestOf = (messages: Rendered[], limit: number) => (limit > 0 ? messages.slice(-limit) : []);
+
 /**
  * A page of the conversation in `db`, whose items are `items`'. With a
  * `cursor`: the messages that changed since it, in the order they changed,
@@ -142,7 +145,7 @@ async function latest<I>(
   const messages = render(items, await rowsFrom(db, Number(first))).filter((m) => m.id < end);
   const earlier = await one(db, `SELECT EXISTS (SELECT 1 FROM ${TURNS} WHERE n < ?)`, [first]);
   return {
-    messages: messages.slice(-limit).map(chat),
+    messages: latestOf(messages, limit).map(chat),
     more: messages.length > limit || Boolean(Number(earlier)),
     cursor,
   };
@@ -205,7 +208,7 @@ async function summaryLatest<I>(
   const first = rows.length > 0 ? Number(rows.at(-1)![0]) : end;
   const earlier = await one(db, `SELECT EXISTS (SELECT 1 FROM ${TURNS} WHERE n < ?)`, [first]);
   return {
-    messages: messages.slice(-limit).map(chat),
+    messages: latestOf(messages, limit).map(chat),
     more: messages.length > limit || Boolean(Number(earlier)),
     cursor,
   };

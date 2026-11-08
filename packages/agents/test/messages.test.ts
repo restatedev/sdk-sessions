@@ -103,6 +103,19 @@ describe('messages', () => {
     expect(first.more).toBe(false);
   });
 
+  it('reads no messages with a limit of 0: the cursor, and whether there are any', async () => {
+    const chat = rendered();
+    for (let n = 0; n < 2; n++) {
+      await chat.ask(`question ${n}`);
+      await chat.reply({ role: 'assistant', text: `answer ${n}` });
+    }
+    const all = await chat.read();
+    for (const view of ['full', 'summary'] as const) {
+      const none = await chat.read({ limit: 0, view });
+      expect([view, none.messages, none.more, none.cursor]).toEqual([view, [], true, all.cursor]);
+    }
+  });
+
   it("marks an error output, which is a call's result only if it is its own error", async () => {
     const chat = rendered();
     await chat.ask('Charge me');
