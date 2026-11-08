@@ -86,7 +86,7 @@ const WAITS = { inactivityTimeout: { minutes: 5 } } satisfies restate.HandlerOpt
  * waits, `status`, what the object is doing, `stop`, which stops the message
  * it answers, and `notifications` and `watch`, the revision of its
  * conversation, and a wait for a newer one (an agent's
- * has `clear` and `sync` too: {@link followed}). Each asks the object's
+ * has `clear` and `sync` too: {@link FOLLOWED}). Each asks the object's
  * `signals` companion, which knows what the object does: they run while the
  * object's handler works.
  */
@@ -121,7 +121,7 @@ const BUILT_IN = {
  * conversation by sending each answer's `revision` and `cursor` back, at
  * once while it has `more`.
  */
-const followed = (messages: (ctx: restate.ViewContext, request: MessagesRequest) => Promise<Messages>) => ({
+const FOLLOWED = {
   /**
    * Forget the conversation: stop the message being answered (as `stop`),
    * then empty the key's database, and what its `signals` hold (waits and
@@ -152,13 +152,24 @@ const followed = (messages: (ctx: restate.ViewContext, request: MessagesRequest)
     ): Promise<Synced> => {
       if (revision !== undefined) await companion(ctx, 'watch').watch({ revision, timeoutSeconds });
       // The revision first: a change after it shows in the next sync. Then
-      // what the object does, and its conversation, as they are now.
+      // what the object does, and its conversation, in an invocation of its
+      // own, which starts after the revision: a view reads the database as
+      // committed when it started, and this one started before the revision
+      // (by the whole wait, when it waited). So the page has every change the
+      // revision counts.
       const now = await companion(ctx).notifications();
       const status = await companion(ctx).status();
-      return { revision: now.revision, status, ...(await messages(ctx, { cursor, limit, ...(view ? { view } : {}) })) };
+      const request: MessagesRequest = { cursor, limit, ...(view ? { view } : {}) };
+      const page = (await ctx.rpc({
+        service: ctx.request.target.service,
+        key: ctx.key,
+        handler: 'messages',
+        input: request,
+      })) as Messages;
+      return { revision: now.revision, status, ...page };
     },
   },
-});
+};
 
 /**
  * The agents' handlers that only their own views call (Restate's ingress
@@ -259,13 +270,13 @@ type Functions<H> = string extends keyof H ? unknown : { [K in keyof H]: H[K] ex
 /** The names of the handlers and views every object (or agent) has, which its own cannot take. */
 type Reserved = {
   [
-    name in keyof typeof BUILT_IN | keyof ReturnType<typeof followed> | keyof ReturnType<typeof internal>
+    name in keyof typeof BUILT_IN | keyof typeof FOLLOWED | keyof ReturnType<typeof internal>
   ]?: 'a handler every object has: name yours otherwise';
 };
 
 /** What an object with `handlers` and `views` has: those of every object, an agent's `clear` and `sync`, and its own. */
 type With<H, V> = Functions<typeof BUILT_IN> &
-  (V extends { messages: unknown } ? Functions<ReturnType<typeof followed>> : unknown) &
+  (V extends { messages: unknown } ? Functions<typeof FOLLOWED> : unknown) &
   Functions<H> &
   Functions<V>;
 
@@ -316,11 +327,7 @@ export const sessionObject = <
   if (!(Number.isInteger(budget) && budget >= 0)) {
     throw new Error(`${name}: budget must be a number of tokens (0 or more), not ${JSON.stringify(budget)}`);
   }
-  const own = [
-    ...Object.keys(BUILT_IN),
-    ...Object.keys(followed(async () => ({}) as Messages)),
-    ...Object.keys(internal(undefined)),
-  ];
+  const own = [...Object.keys(BUILT_IN), ...Object.keys(FOLLOWED), ...Object.keys(internal(undefined))];
   if ('messages' in handlers) {
     throw new Error(`${name}: \`messages\` is a view: put it in \`views\`, so that the object is an agent`);
   }
@@ -339,7 +346,7 @@ export const sessionObject = <
   const page = (typeof messages === 'function' ? messages : messages?.handler) as
     | ((ctx: restate.ViewContext, request: MessagesRequest) => Promise<Messages>)
     | undefined;
-  const agent = page === undefined ? {} : followed(page);
+  const agent = page === undefined ? {} : FOLLOWED;
   // A framework on the conversation of turns: its view carries its items.
   const items = (page && ITEMS.of(page)) as Items<unknown> | undefined;
   const { erase, ...stored } = internal(items);

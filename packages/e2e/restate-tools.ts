@@ -7,7 +7,8 @@
 // it is resolved by its id, then answers
 // with every tool's result; a signal no one waits for is dropped, unless it
 // is kept; a cancelled wait leaves `pending`; `stop` stops a message being
-// answered; `follow` gives the conversation as it changes; a message may be
+// answered; `follow` gives the conversation as it changes, and a `sync` that
+// waited has the change that ended its wait; a message may be
 // plain text; a webhook's delivery is a message of its own, once, answered
 // after the message being answered, also one that is stopped; `clear`
 // forgets a conversation, stopping its turn;
@@ -34,8 +35,10 @@ import {
 } from '@restatedev/agents';
 import * as clients from '@restatedev/restate-sdk-clients';
 import { agent, type ChatMessage, follow, type Followed } from '@restatedev/agents/client';
+import * as langgraph from '@restatedev/agents/langgraph';
 import * as pi from '@restatedev/agents/pi';
 import { z } from 'zod';
+import { Teller } from '@restatedev/agents/test/fakes/langgraph';
 import { callTools, fakeProvider, say, textOf } from '@restatedev/agents/test/fakes/pi';
 import { RESTATE_SERVER as SERVER } from './restate-server.ts';
 
@@ -89,6 +92,14 @@ const support = pi.agent({
   ],
 });
 
+// An agent on LangGraph, which stores a tool's result before it publishes the step: asked to audit, its
+// model (the teller) waits for a manager's approval, then reports it.
+const auditor = langgraph.agent({
+  name: 'auditor',
+  model: new Teller({}),
+  tools: [signal('approval', { name: 'audit', description: 'Wait for a manager' })],
+});
+
 // A workflow that calls the agent like any handler, as examples/intermediate/triage.ts does.
 const triage = restate.workflow({
   name: 'triage',
@@ -118,7 +129,7 @@ const server = spawn(SERVER, ['--base-dir', dir], {
   stdio: 'ignore',
 });
 try {
-  await restate.serve({ services: [orders, refund, support, triage, hooks, signals], port: PORT });
+  await restate.serve({ services: [orders, refund, support, auditor, triage, hooks, signals], port: PORT });
   for (
     let i = 0;
     !(await fetch(`${ADMIN}/health`).then(
@@ -421,6 +432,23 @@ try {
   );
   assert.deepEqual(last()?.parts[0], { type: 'text', text: 'order 103: delivered / approved / refunded 103' });
   assert.ok(seen.length < 20, `${seen.length} changes`);
+  // A sync that waited reads its page after the revision it returns: the
+  // change that ended its wait (here, the approval's result) is in it.
+  const olga = ingress.objectClient(agent('auditor'), 'olga');
+  const olgas = await ingress
+    .objectSendClient(agent('auditor'), 'olga')
+    .chat('audit the books', clients.rpc.sendOpts({ idempotencyKey: 'msg-olga' }));
+  await waits('auditor/olga');
+  const asOf = await olga.sync({});
+  const syncing = olga.sync({ cursor: asOf.cursor, revision: asOf.revision, timeoutSeconds: 30 });
+  await sleep(500); // the sync waits
+  await olga.signal({ name: 'approval', value: 'approved' });
+  const synced = await syncing;
+  assert.ok(synced.revision > asOf.revision, JSON.stringify(synced));
+  // (and what changed after it, if the turn went on: the next sync reads on from the cursor)
+  assert.deepEqual(lines(synced.messages)[0], ['assistant', 'audit({}): approved'], JSON.stringify(synced));
+  assert.equal(await ingress.result(olgas), 'Done: approved');
+
   // A watch with nothing new answers at its timeout, with the same revision.
   const mia = ingress.objectClient(agent('support'), 'mia');
   const now = await mia.notifications();
