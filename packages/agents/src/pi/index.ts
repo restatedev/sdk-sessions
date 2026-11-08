@@ -66,6 +66,7 @@ import {
   checkModelName,
   type Configure,
   configured,
+  fromTool,
   ModelError,
   modelOf,
   providerOf,
@@ -367,6 +368,8 @@ export const withPi = async <T>(
         await toolCallEnded(ctx);
         return result;
       } catch (error) {
+        // The tool's error: never taken for the model's provider refusing (a tool may call a model API).
+        fromTool(ctx, error);
         return stopped(error, task);
       }
     },

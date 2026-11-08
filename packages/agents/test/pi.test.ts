@@ -4,6 +4,8 @@ import * as restate from '@restatedev/sessions';
 import { CANCELLED, chatHandler, subagent, tool } from '@restatedev/agents';
 import { z } from 'zod';
 import * as pi from '@restatedev/agents/pi';
+import { Type } from '@earendil-works/pi-ai';
+import { defineTool } from '@earendil-works/pi-durable';
 import { describe, expect, it, vi } from 'vitest';
 import { callTools, fakeProvider, say, textOf } from './fakes/pi.ts';
 import { AttemptEnded } from '../src/common.ts';
@@ -298,6 +300,22 @@ describe('pi.chat', () => {
     expect(await alice.invoke(chat, 'inv1', 'Break it')).toBe('fixed');
     expect(calls).toHaveLength(2);
     expect(calls[1]).toBe(calls[0]);
+  });
+
+  it("never takes a pi tool's error for the provider refusing the model", async () => {
+    // A tool of pi's own, whose request fails as a provider's would (an HTTP library's 404, say).
+    class NotFoundError extends Error {}
+    const boom = defineTool({
+      name: 'boom',
+      description: 'Looks a page up.',
+      parameters: Type.Object({}),
+      execute: async () => {
+        throw new NotFoundError('no such page');
+      },
+    });
+    const failed = object('alice').invoke(pi.chat({ tools: [boom] }), 'inv1', 'Break it');
+    await expect(failed).rejects.toThrow('no such page');
+    await expect(failed).rejects.not.toBeInstanceOf(restate.TerminalError);
   });
 
   it('answers each prompt of an invocation, and each once', async () => {
