@@ -388,8 +388,11 @@ sequenceDiagram
   answer stands.
 - `answerOnce` races the run with the turn's stop signal: once it aborts,
   the turn is closed (`cancelled`) and the conversation sealed
-  (`Conversation.seal`), so a task of the run that is still going (a tool
-  call in parallel) can store nothing more; any write it tries fails.
+  (`Conversation.seal`). A promise cannot be cancelled, so the run goes on
+  in the background: closing a turn fences its run first (any write it
+  tries from then on fails, a framework's copy included), waits for the
+  writes under way, so that the calls they made get a result, and stores
+  the results, the note and the answer in one transaction.
 - A tool cut short by the stop throws the stop's reason (as `tool()` does
   today), so the model never carries on with it. A framework that aborts a
   tool's work and waits for it must see it end aborted; the turn ends

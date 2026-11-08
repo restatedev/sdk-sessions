@@ -9,8 +9,8 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { call, chatHandler, sessionObject, type Tool } from '@restatedev/agents';
 import { callOf } from '../src/calls.ts';
-import { CANCELLED, ENDED, RETURNED_UNRECORDED, toolCallEnded, toolCallStarted } from '../src/common.ts';
-import { answerOnce, Conversation, type Run, STEPS, SUMMARY } from '../src/conversation.ts';
+import { CANCELLED, ENDED, RETURNED_UNRECORDED, stopSignalOf, toolCallEnded, toolCallStarted } from '../src/common.ts';
+import { answerOnce, Conversation, type Run, STEPS, SUMMARY, type Turn } from '../src/conversation.ts';
 import { conversationView } from '../src/messages.ts';
 import { waitFor } from '../src/tools.ts';
 import { bank } from './bank.ts';
@@ -419,5 +419,129 @@ describe('a turn of a chat handler on the store', () => {
     expect(await ask('inv_b', 'hi')).toBe('fine');
     // The companion closed the gone turn as the next started, and would have its agent settle it.
     expect(followingOf(map).settled).toEqual(['inv_a']);
+  });
+});
+
+/** The turns of the object of state `map`, as stored. */
+async function storedTurns(map: Map<string, Uint8Array>) {
+  const read = sqlAttempt({ map, key: 'k', id: 'read' });
+  return (await read.end(() => Conversation.load(read.ctx.db, ITEMS))).turns;
+}
+
+/** The results the items of `turn` hold, by call id. */
+const turnResults = (turn: Turn<Item>) =>
+  turn.items.flatMap((e) => (e.item.result === undefined ? [] : [[e.item.result, e.item.output] as const]));
+
+/**
+ * `run` as a chat handler's turn on the made-up framework, in an attempt of
+ * its own over `map`: the attempt (to cancel), and its answer.
+ */
+function stopping(map: Map<string, Uint8Array>, run: (ctx: restate.SessionContext) => Run<Item>) {
+  const sql = sqlAttempt({ map, key: 'k', id: 'inv1' });
+  const chat = chatHandler((ctx, message) => answerOnce(ctx, message, ITEMS, run(ctx)));
+  const answer = sql.end(() => handlerOf(chat)(sql.ctx, 'Please move 5 from 1 to 2'));
+  return {
+    sql,
+    answer: answer.then(
+      () => 'answered',
+      (error: unknown) => error,
+    ),
+  };
+}
+
+describe("a stopped turn's run, left running", () => {
+  it('stores nothing after the close: a tool that ends as the stop comes leaves one result, before the note', async () => {
+    const map = new Map<string, Uint8Array>();
+    const started = Promise.withResolvers<void>();
+    const { sql, answer } = stopping(map, (ctx) => async (conversation) => {
+      const turn = conversation.turn;
+      await turn.appendReply([calling('c1')]);
+      const stop = stopSignalOf(ctx)!;
+      const stopped = new Promise((resolve) => stop.addEventListener('abort', resolve, { once: true }));
+      started.resolve();
+      await stopped;
+      // The tool, which does not heed the stop, ends just after it.
+      await turn.append({ result: 'c1', output: 'moved 5' }).catch(() => {});
+      return 'done';
+    });
+    await started.promise;
+    sql.cancel();
+    expect(await answer).toBeInstanceOf(restate.CancelledError);
+    await new Promise((resolve) => setTimeout(resolve, 20)); // the run left behind ends
+    const [turn] = await storedTurns(map);
+    expect(turnResults(turn!)).toHaveLength(1);
+    expect(turn!.items.at(-1)!.item).toEqual({ role: 'assistant', text: CANCELLED });
+    expect(turn!.prompt.answeredAt).toBe(turn!.items.at(-1)!.n);
+  });
+
+  it('closes the calls of a reply whose write was under way as the stop came', async () => {
+    const map = new Map<string, Uint8Array>();
+    const stop = { cancel: () => {} };
+    const { sql, answer } = stopping(map, () => async (conversation) => {
+      const writing = conversation.turn.appendReply([calling('c1')]);
+      stop.cancel();
+      await writing;
+      return new Promise<string>(() => {});
+    });
+    stop.cancel = () => sql.cancel();
+    expect(await answer).toBeInstanceOf(restate.CancelledError);
+    const [turn] = await storedTurns(map);
+    expect(turn!.openCalls()).toEqual([]);
+    expect(turnResults(turn!)).toEqual([['c1', CANCELLED]]);
+  });
+
+  it('takes no copy of a framework into a turn being closed', async () => {
+    const map = new Map<string, Uint8Array>();
+    const started = Promise.withResolvers<void>();
+    const gate = Promise.withResolvers<void>();
+    const copied: boolean[] = [];
+    const { sql, answer } = stopping(map, (ctx) => async (conversation) => {
+      const turn = conversation.turn;
+      // The call records loaded: a close reads them without the database.
+      await callOf(ctx, 'lookup', {}, 'c0');
+      await turn.appendReply([calling('c1')]);
+      // The framework's own write, which copies its messages into the turn.
+      await ctx.db.transaction(async (tx) => {
+        started.resolve();
+        await gate.promise;
+        copied.push(await turn.copyIn(tx, [{ item: { result: 'c1', output: 'copied' } }]));
+      });
+      return new Promise<string>(() => {});
+    });
+    await started.promise;
+    sql.cancel();
+    await new Promise((resolve) => setTimeout(resolve, 20)); // the close waits for the framework's write
+    gate.resolve();
+    expect(await answer).toBeInstanceOf(restate.CancelledError);
+    expect(copied).toEqual([false]);
+    const [turn] = await storedTurns(map);
+    expect(turnResults(turn!)).toEqual([['c1', CANCELLED]]);
+  });
+});
+
+/** A handler on the made-up framework whose message `die` leaves its turn open (its invocation gone). */
+const dying = (ctx: restate.SessionContext, message: string) =>
+  answerOnce(ctx, message, ITEMS, async (conversation) => {
+    if (message !== 'die') return 'fine';
+    await conversation.turn.appendReply([calling('c1')]);
+    throw new Error('the invocation is gone');
+  });
+
+describe('a close', () => {
+  it('closes a dead turn once, however a crash cuts it', async () => {
+    const handler = dying;
+    const dead = banking(handler, 'k');
+    await dead.attempt('inv1', 'die').catch(() => {});
+    let crashes = 0;
+    for (let at = 1; ; at++) {
+      const c = banking(handler, 'k', { state: dead.state, ledger: dead.ledger });
+      if ((await c.attempt('inv2', 'next', at)) !== 'crashed') break;
+      crashes++;
+      expect(await c.attempt('inv2', 'next')).toBe('fine');
+      const [first] = await c.read(async (ctx) => (await Conversation.load(ctx.db as never, ITEMS)).turns);
+      const notes = first!.items.filter((e) => e.item.text === ENDED);
+      expect([at, notes.length, turnResults(first!)]).toEqual([at, 1, [['c1', ENDED]]]);
+    }
+    expect(crashes).toBeGreaterThan(0);
   });
 });

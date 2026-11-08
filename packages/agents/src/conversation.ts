@@ -391,6 +391,11 @@ export class Turn<I> {
   #open: Call[] = [];
   /** What the turn carries to the turns after it, stored with its answer. */
   #carried: { agent?: string; carried?: string } = {};
+  /**
+   * Whether the turn is being closed: its run (left running once stopped,
+   * as a promise cannot be cancelled) stores nothing more.
+   */
+  #fenced = false;
 
   /** The turn's row: its prompt, and once it has them, its status, answer and what it carried. */
   readonly prompt: Entry<I>;
@@ -637,21 +642,59 @@ export class Turn<I> {
    */
   async close(ctx: restate.SessionContext, status: Status, note: string) {
     if (this.status !== undefined) return;
-    const items = this.#ledger.items;
+    // The run stores nothing more: a write it makes from here fails. Those
+    // under way are stored first, so that the calls they make are open here,
+    // and the results they hold are not.
+    this.#fenced = true;
+    const ledger = this.#ledger;
+    await ledger.lock.run(async () => {});
+    if (this.status !== undefined) return;
+    const { items } = ledger;
     const calls = this.openCalls();
     const returned = await outcomes(
       ctx,
       calls.map((call) => call.id),
       invocationOf(this.id),
     );
-    const results = items.results(calls.map((call) => [call, cutOffResult(returned, call.id, note)]));
-    await this.append(...results, items.reply(note));
-    await this.answered(note, status);
+    const closing = [
+      ...items.results(calls.map((call) => [call, cutOffResult(returned, call.id, note)])),
+      items.reply(note),
+    ];
+    // The results, the note and the answer in one transaction: a crash
+    // between them would close the turn again, with a second note.
+    await ledger.lock.run(async () => {
+      this.#checkWritable(true);
+      const n = ledger.next;
+      const seq = ledger.seq;
+      const added: Entry<I>[] = closing.map((item, i) => ({ n: n + i, item }));
+      const at = n + added.length - 1; // the note: the turn's last message, and its answer
+      const answeredSeq = seq + added.length + 1;
+      const agent = this.#agent();
+      const carried = 'carried' in this.#carried ? this.#carried.carried : ledger.carried()[1];
+      await ledger.db.transaction(async (tx) => {
+        for (const [i, e] of added.entries()) {
+          await tx.execute(`INSERT INTO ${STEPS} (n, turn, seq, item, reply, agent) VALUES (?, ?, ?, ?, NULL, NULL)`, [
+            e.n,
+            this.n,
+            seq + i + 1,
+            items.dump(e.item),
+          ]);
+        }
+        await tx.execute(
+          `UPDATE ${TURNS} SET status = ?, answer = ?, agent = ?, carried = ?, answered_at = ?, answered_seq = ? WHERE n = ?`,
+          [status, note, agent ?? null, carried ?? null, at, answeredSeq, this.n],
+        );
+      });
+      ledger.next = n + added.length;
+      ledger.seq = answeredSeq;
+      this.#add(added);
+      Object.assign(this.prompt, { status, answer: note, agent, carried, answeredAt: at, answeredSeq });
+    });
   }
 
-  /** Whether the turn can be written: the latest, without an answer, of a conversation not sealed. */
+  /** Whether the turn's run can write it: the latest, without an answer, not being closed, of a conversation not sealed. */
   get writable() {
-    return !this.#ledger.closed && this.#ledger.latest === this && this.status === undefined;
+    return !this.#ledger.closed && !this.#fenced && this.#ledger.latest === this && this.status === undefined;
   }
 
   /**
@@ -660,23 +703,26 @@ export class Turn<I> {
    * with it, so the copy is made once, however often the attempt crashes.
    * Each of `items` is a reply of the model (`reply`, from `agent`) or
    * another item (a tool's result). For a framework that keeps its own
-   * history: nothing else writes the turn while it runs, so the copy takes
-   * its positions without waiting for other writes (it cannot wait inside
-   * `tx`, which holds the database).
+   * history. It cannot wait for the turn's other writes inside `tx`, which
+   * holds the database: it takes its positions, and adds its entries, at
+   * once, so that a close after it sees them and writes after them. A turn
+   * being closed (or closed) takes no copy: its close says how it ended.
+   * Whether it copied.
    */
-  async copyIn(tx: DatabaseWriter, items: { item: I; reply?: boolean; agent?: string }[]) {
-    this.#checkWritable();
+  async copyIn(tx: DatabaseWriter, items: { item: I; reply?: boolean; agent?: string }[]): Promise<boolean> {
+    if (!this.writable) return false;
     const ledger = this.#ledger;
     const n = ledger.next;
+    const seq = ledger.seq;
     const added: Entry<I>[] = items.map(({ item, reply, agent }, i) => ({
       n: n + i,
       item,
       ...(reply ? { reply: n + i, agent } : {}),
     }));
-    // Taken at once: a rolled back transaction fails its attempt, whose state goes with it.
+    // A rolled back transaction fails its attempt, whose state goes with it.
     ledger.next = n + added.length;
-    const seq = ledger.seq;
     ledger.seq += added.length;
+    this.#add(added);
     for (const [i, e] of added.entries()) {
       await tx.execute(`INSERT INTO ${STEPS} (n, turn, seq, item, reply, agent) VALUES (?, ?, ?, ?, ?, ?)`, [
         e.n,
@@ -687,12 +733,17 @@ export class Turn<I> {
         e.agent ?? null,
       ]);
     }
-    this.#add(added);
+    return true;
   }
 
-  /** Refuse a write unless this is the latest turn, without an answer: only its run (or its close) writes it. */
-  #checkWritable() {
+  /**
+   * Refuse a write unless this is the latest turn, without an answer: only
+   * its run (or its close, `byClose`) writes it, and its run not once the
+   * turn is being closed.
+   */
+  #checkWritable(byClose = false) {
     this.#ledger.checkOpen();
+    if (!byClose && this.#fenced) throw new Error('the run was stopped: it stores nothing more');
     if (this.#ledger.latest !== this || this.status !== undefined) {
       throw new Error(`turn ${this.id} is not the turn being answered: only that turn is written`);
     }
