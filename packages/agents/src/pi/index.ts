@@ -447,7 +447,10 @@ export const withPi = async <T>(
     return work({ harness, context, conversation, prompt });
   };
   try {
-    return await Promise.race([abortOn(), working()]);
+    const done = await Promise.race([abortOn(), working()]);
+    // Work the cancellation's abort ended (a wait for pi, say) fails with it, as a prompt does.
+    if (cancelled) throw cancelled;
+    return done;
   } finally {
     turn?.removeEventListener('abort', onStop);
     await harness.close(withoutAbortSignal(context));

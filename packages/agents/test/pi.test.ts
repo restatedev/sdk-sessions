@@ -1,7 +1,7 @@
 // pi's chat without a Restate server or an API key: Anthropic's provider is a
 // fake model (../fakes/pi.ts).
 import * as restate from '@restatedev/sessions';
-import { CANCELLED, subagent, tool } from '@restatedev/agents';
+import { CANCELLED, chatHandler, subagent, tool } from '@restatedev/agents';
 import { z } from 'zod';
 import * as pi from '@restatedev/agents/pi';
 import { describe, expect, it, vi } from 'vitest';
@@ -187,6 +187,33 @@ describe('pi.chat', () => {
     expect(closed).toEqual([]);
     // This model answers with the tool results: the transfer's alone.
     expect(answer).toBe('moved 5 from account 1 to account 2');
+  });
+
+  it('fails with the cancellation of work that is not a prompt, as a prompt does', async () => {
+    const started = Promise.withResolvers<void>();
+    const lookup = tool({
+      name: 'lookup',
+      description: 'Look it up.',
+      input: z.object({}),
+      run: async () => {
+        started.resolve();
+        return new Promise<string>(() => {});
+      },
+    });
+    // Its work hands pi a message of its own, and waits for pi to be idle: the cancellation's abort ends that.
+    const waiting = chatHandler((ctx) =>
+      pi.withPi(ctx, { tools: [lookup] }, async (session) => {
+        const root = await session.conversation();
+        await root.submit({ type: 'input', content: 'Look it up' }, session.context);
+        await root.waitForIdle(session.context);
+        return 'idle';
+      }),
+    );
+    const sql = sqlAttempt({ map: new Map(), key: 'k', id: 'inv1' });
+    const answer = sql.end(() => handlerOf(waiting)(sql.ctx, 'Look it up'));
+    await started.promise;
+    sql.cancel();
+    await expect(answer).rejects.toBeInstanceOf(restate.CancelledError);
   });
 
   it('ends a cancelled turn, and answers the next message afresh', async () => {
