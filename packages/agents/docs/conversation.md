@@ -454,6 +454,7 @@ invocation (the next invocation's first call replaces it):
 | `attempt`        | the attempt that last made it                                                                      |
 | `done`, `failed` | whether the Restate call returned, and the terminal error it returned (`Error: <message>`), if any |
 | `approval`       | the call is an approval that its tool call waited for (`waitFor(..., { approval: true })`)         |
+| `prompt`         | the prompt whose turn made it (`answerOnce`'s)                                                     |
 
 - **Matching a call.** A tool call finds the record it made before by its id
   _and_ its tool: one tool call may make two calls (an approval, then the
@@ -462,7 +463,12 @@ invocation (the next invocation's first call replaces it):
   input (`rejoin`): a framework that tells the model its call was cut off
   (DeepSeek) gets the call again under a new id, and that is the
   same Restate call, with the same idempotency key, which it waits for again
-  or whose result it gets. Today `callOf` matches by id alone.
+  or whose result it gets. Both look only at the calls of the prompt being
+  answered (`forPrompt`, which `answerOnce` wraps the turn in): a handler
+  that prompts twice, its second prompt making the call its first made (the
+  same tool and input), makes a call of its own, also after a crash that left
+  the first's record unforgotten (its turn's end forgets it after the answer
+  is stored).
 - **A framework's own wait is its tool call's alone** (`waitFor`, which never
   rejoins). The framework stored the tool call before it waits, so a retried
   attempt waits again under the same id; a new call with the same input (the
@@ -481,7 +487,8 @@ invocation (the next invocation's first call replaces it):
   again.") if it returned, or else the note that closes the turn. An approval
   returning is not the call (`outcomes` leaves approvals out): a denied call
   is closed with the note. `settle` reads the dead invocation's records,
-  while the key's next invocation hasn't replaced them.
+  while the key's next invocation hasn't replaced them. Either way, the
+  records read are the closing turn's prompt's (`outcomes(..., prompt)`).
 
 ## The schemas, and the database
 

@@ -8,12 +8,13 @@ import { fakeContext, type Made } from '@restatedev/sessions/test/support';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { call, chatHandler, sessionObject, type Tool } from '@restatedev/agents';
-import { callOf } from '../src/calls.ts';
+import { callOf, forPrompt, outcomes } from '../src/calls.ts';
 import { CANCELLED, ENDED, RETURNED_UNRECORDED, stopSignalOf, toolCallEnded, toolCallStarted } from '../src/common.ts';
 import { answerOnce, Conversation, type Run, STEPS, SUMMARY, type Turn } from '../src/conversation.ts';
 import { conversationView } from '../src/messages.ts';
 import { waitFor } from '../src/tools.ts';
 import { bank } from './bank.ts';
+import { ledger } from '@restatedev/sessions/test/ledger';
 import { calling, type Item, ITEMS } from './fakes/items.ts';
 import { conversation as banking, followingOf, handlerOf, sqlAttempt } from './support.ts';
 
@@ -63,6 +64,15 @@ describe("a closed turn's calls", () => {
         (await callOf(ctx, 'lookup', {}, 'c1')).answered('Error: no'),
       ),
     ).toBe('Error: no');
+  });
+
+  it('do not report a call another prompt of the invocation made, with the same id, as theirs', async () => {
+    const sql = sqlAttempt({ map: new Map(), key: 'k', id: 'inv1' });
+    const found = await sql.end(async () => {
+      await forPrompt(sql.ctx, 'inv1', async () => (await callOf(sql.ctx, 'lookup', {}, 'c1')).answered());
+      return outcomes(sql.ctx, ['c1'], 'inv1', 'inv1:2');
+    });
+    expect([...found]).toEqual([]);
   });
 
   it('report a call that never returned as cancelled', async () => {
@@ -156,9 +166,10 @@ describe("a closed turn's calls", () => {
  * A made-up framework's run, with `tools` and a model that, asked with the
  * conversation's history, calls the tool its prompt asks for or answers with
  * the last result: a stored final reply is answered without asking the model,
- * and the open calls of a cut-off reply run again with their ids.
+ * and the open calls of a cut-off reply run again with their ids. Its tool
+ * calls publish as they end, unless `quiet` (as an agent in the background).
  */
-function teller(tools: Tool[], asked: { count: number } = { count: 0 }) {
+function teller(tools: Tool[], asked: { count: number } = { count: 0 }, quiet = false) {
   const model = (history: Item[]): Item => {
     asked.count += 1;
     const last = history.at(-1)!;
@@ -186,7 +197,7 @@ function teller(tools: Tool[], asked: { count: number } = { count: 0 }) {
           await toolCallStarted(ctx);
           const output = await tools.find((t) => t.name === c.name)!.run(c.input, { ctx, callId: c.id });
           await turn.append({ result: c.id, output });
-          await toolCallEnded(ctx);
+          if (!quiet) await toolCallEnded(ctx);
         }
       }
     };
@@ -263,6 +274,35 @@ describe('the bank agent on the made-up framework', () => {
     const next = sqlAttempt({ map, key: 'k', id: 'inv_final' });
     expect(await next.end(() => answerOnce(next.ctx, 'hello', ITEMS, run(next.ctx)))).toBe('Hi there');
     expect(asked.count).toBe(0);
+  });
+});
+
+/** The books' audit, as a Restate call: made once, however often its tool call runs. */
+const audit = call(ledger, 'audit', { name: 'audit', description: 'Check the books.', key: 'bank' });
+
+describe('an invocation that prompts twice', () => {
+  it("makes each prompt's call, the same tool and input, as its own, however a crash cuts it", async () => {
+    // Its tool calls do not publish as they end (as an agent in the background's): a call is forgotten
+    // as its turn ends, after its answer is stored.
+    const run = teller([audit], undefined, true);
+    const handler = async (ctx: restate.SessionContext, message: string) => {
+      const first = await answerOnce(ctx, message, ITEMS, run(ctx));
+      return `${first} / ${await answerOnce(ctx, `${message}, again`, ITEMS, run(ctx))}`;
+    };
+    const done = 'Done: {"accounts":8,"total":8000,"transfers":0,"inconsistent":0}';
+    const wrong: string[] = [];
+    let crashes = 0;
+    for (let n = 1; ; n += 1) {
+      const c = banking(handler, 'anywhere');
+      if ((await c.attempt('inv1', 'audit the books', n)) !== 'crashed') break;
+      crashes++;
+      const answer = await c.attempt('inv1', 'audit the books');
+      // Each prompt's audit is a tool call of its own (`a1`, then `a5`), with its own idempotency key.
+      const keys = [...new Set(c.calls.map((m) => m.idempotencyKey))];
+      if (answer !== `${done} / ${done}` || keys.join() !== 'inv1:a1,inv1:a5') wrong.push(`${n}: ${keys.join()}`);
+    }
+    expect(crashes).toBeGreaterThan(0);
+    expect(wrong).toEqual([]);
   });
 });
 

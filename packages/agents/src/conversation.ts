@@ -44,7 +44,7 @@
 import * as restate from '@restatedev/sessions';
 import type { Database, DatabaseReader, DatabaseWriter } from '@restatedev/sessions';
 import { definitionOf, Schema } from '@restatedev/sessions/internal';
-import { outcomes } from './calls.ts';
+import { forPrompt, outcomes } from './calls.ts';
 import {
   answering,
   AttemptEnded,
@@ -660,6 +660,7 @@ export class Turn<I> {
       ctx,
       calls.map((call) => call.id),
       invocationOf(this.id),
+      this.id,
     );
     const closing = [
       ...items.results(calls.map((call) => [call, cutOffResult(returned, call.id, note)])),
@@ -1159,15 +1160,17 @@ export async function answerOnce<I>(
   // Answered (or closed) already: a retry answers, or fails, as the turn ended.
   if (stored !== undefined) return storedAnswer(stored.answer, stored.status);
   const conversation = await Conversation.load(ctx.db, items, window, budget);
-  const answered = await answering(
-    ctx,
-    // The Restate calls of this invocation are its turn's: the latest, answered
-    // or not (its end forgets the calls whose results it stored).
-    (callId, failedWith) => {
-      const turn = conversation.turns.at(-1);
-      return turn !== undefined && turn.id === promptId && turn.stored(callId, failedWith);
-    },
-    () => answerTurn(ctx, conversation, promptId, text, run, options.check),
+  const answered = await forPrompt(ctx, promptId, () =>
+    answering(
+      ctx,
+      // The Restate calls of this invocation are its turn's: the latest, answered
+      // or not (its end forgets the calls whose results it stored).
+      (callId, failedWith) => {
+        const turn = conversation.turns.at(-1);
+        return turn !== undefined && turn.id === promptId && turn.stored(callId, failedWith);
+      },
+      () => answerTurn(ctx, conversation, promptId, text, run, options.check),
+    ),
   );
   const definition = definitionOf(ctx) as { name: string } | undefined;
   if (settings.summarize && conversation.overflowing() && definition) {

@@ -41,6 +41,11 @@ interface Call {
   failed?: string;
   /** An approval its tool call waited for ({@link waitFor}): its answer is not the tool call's. */
   approval?: true;
+  /**
+   * The prompt whose turn made it (`answerOnce`'s), if any: an invocation
+   * that prompts more than once keeps the calls of each apart.
+   */
+  prompt?: string;
 }
 
 /** The calls an invocation's tools made that the transcript has no result of yet. */
@@ -99,6 +104,27 @@ function canonical(value: unknown): string {
   );
 }
 
+/** The prompt whose turn the tools of `ctx` run for, while `answerOnce` answers it. */
+const PROMPT = new ScopeKey<string>('the prompt of the calls');
+
+/**
+ * Run `work` (a turn's) with the calls its tools make kept as prompt
+ * `prompt`'s: they are matched, and rejoined, within it only. An invocation
+ * that prompts twice, its second prompt making the call its first made
+ * (the same tool and input), would otherwise take the first's after a crash
+ * (its record not yet forgotten), and never make its own.
+ */
+export async function forPrompt<T>(ctx: restate.SessionContext, prompt: string, work: () => Promise<T>): Promise<T> {
+  const outer = PROMPT.get(ctx);
+  PROMPT.set(ctx, prompt);
+  try {
+    return await work();
+  } finally {
+    if (outer === undefined) PROMPT.delete(ctx);
+    else PROMPT.set(ctx, outer);
+  }
+}
+
 /**
  * The call of tool `tool` with `input` that tool call `callId` makes: the
  * one it made to `tool` before (a run again), or else, if `rejoin`, the one
@@ -116,17 +142,20 @@ export async function callOf(
   const attempt = attemptOf(ctx);
   const state = await attempt.calls;
   const json = canonical(input);
+  const prompt = PROMPT.get(ctx);
+  const ours = state.calls.filter((c) => c.prompt === prompt);
   // A tool call may make more than one call (an approval, then the tool's
   // own), each to a tool of its own.
   let call =
-    state.calls.find((c) => c.ids.includes(callId) && c.tool === tool) ??
-    (rejoin ? state.calls.find((c) => c.attempt !== attempt.id && c.tool === tool && c.input === json) : undefined);
+    ours.find((c) => c.ids.includes(callId) && c.tool === tool) ??
+    (rejoin ? ours.find((c) => c.attempt !== attempt.id && c.tool === tool && c.input === json) : undefined);
   if (call) {
     call.attempt = attempt.id;
     if (!call.ids.includes(callId)) call.ids.push(callId);
   } else {
     call = { tool, input: json, ids: [callId], attempt: attempt.id };
     if (approval) call.approval = true;
+    if (prompt !== undefined) call.prompt = prompt;
     state.calls.push(call);
   }
   await store(ctx, state);
@@ -171,12 +200,13 @@ export async function settleCalls(ctx: restate.SessionContext, stored: (id: stri
  *
  * An earlier `invocation`'s calls are read only while they are still
  * stored, until an invocation of the key makes calls of its own; read,
- * never changed.
+ * never changed. With `prompt`, the calls of its turn only.
  */
 export async function outcomes(
   ctx: restate.SessionContext,
   callIds: Iterable<string>,
   invocation?: string,
+  prompt?: string,
 ): Promise<Map<string, string | undefined>> {
   const state =
     invocation !== undefined && invocation !== ctx.request.id
@@ -186,6 +216,8 @@ export async function outcomes(
   const found = new Map<string, string | undefined>();
   for (const call of state.calls) {
     if (!call.done || call.approval) continue;
+    // Another prompt's call, of the same invocation: not this turn's.
+    if (prompt !== undefined && call.prompt !== undefined && call.prompt !== prompt) continue;
     for (const id of call.ids) if (wanted.has(id)) found.set(id, call.failed);
   }
   return found;

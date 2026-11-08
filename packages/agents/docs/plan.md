@@ -125,11 +125,15 @@ rules to [`src/calls.ts`](../src/calls.ts) and
   find the record by the call's id **and** its tool; if none and `rejoin`,
   the record another attempt made with the same tool and input; else a new
   one, marked `approval` if it is one. The input is JSON with sorted keys.
+  Only the records of the prompt being answered count (`forPrompt`, around
+  `answerOnce`'s turn): a second prompt of the invocation that makes the
+  first's call again makes its own.
 - Restate's own tools (`call`, `send`, `workflow`, `subagent`, `signal`)
   rejoin; a framework's own wait does not.
-- `outcomes(ctx, callIds, invocation?)`: which of the calls returned, each
-  with its terminal error or nothing, from this invocation's records or, read
-  only, from `invocation`'s while they are still stored; approvals left out.
+- `outcomes(ctx, callIds, invocation?, prompt?)`: which of the calls
+  returned, each with its terminal error or nothing, from this invocation's
+  records or, read only, from `invocation`'s while they are still stored, of
+  `prompt`'s turn if given; approvals left out.
   Step 3's `Turn.close` and `settle` use it.
 - `waitFor(ctx, callId, signal, input?, { approval })` in `tools.ts`, as the
   Python SDK's `wait_for`: the companion's `wait`, as `<invocation>:<call

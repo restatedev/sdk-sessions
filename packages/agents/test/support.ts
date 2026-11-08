@@ -162,6 +162,8 @@ export function conversation(
   // Ends the attempt before: Restate fences it once the next one starts.
   let abort: (() => void) | undefined;
   const ledger: FakeLedger = { transfers: new Map(), calls: [], crashNext: 0, failNext: 0, crashed: () => {} };
+  /** Each call the attempts made, but a fenced one's. */
+  const calls: Made[] = [];
   // The books as an attempt calls them: a fenced (crashed) attempt's calls
   // never reach them, as a dead process's do not.
   const booksOf = (attempt: { closed: boolean }) => ({
@@ -188,6 +190,8 @@ export function conversation(
   if (from) for (const [id, transfer] of from.ledger.transfers) ledger.transfers.set(id, transfer);
   return {
     ledger,
+    /** Each call the attempts made to the books (`transfer` or else `audit`), but a fenced attempt's. */
+    calls: calls as readonly Made[],
     /** The object's state. */
     state: map as ReadonlyMap<string, Uint8Array>,
     /**
@@ -209,8 +213,12 @@ export function conversation(
         throw new Error('crash at a state request');
       };
       const books = booksOf(current);
-      const route = async ({ method, parameter, idempotencyKey }: Made) =>
-        method === 'transfer' ? books.transfer(parameter as Transfer, idempotencyKey) : books.audit();
+      const route = async (call: Made) => {
+        if (!current.closed) calls.push(call);
+        return call.method === 'transfer'
+          ? books.transfer(call.parameter as Transfer, call.idempotencyKey)
+          : books.audit();
+      };
       const sql = sqlAttempt({ map, fence, key, id: requestId, onRequest, route });
       abort = sql.abort;
       const answer = sql.end(() => handlerOf(handler)(sql.ctx, prompt));
