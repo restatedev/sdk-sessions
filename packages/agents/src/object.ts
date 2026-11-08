@@ -17,7 +17,6 @@ import {
   type Window,
 } from './common.ts';
 import { compact, type Items, nextStart, restart, SCHEMA, settle } from './conversation.ts';
-import * as log from './log.ts';
 import {
   type Notifications,
   type Resolved,
@@ -126,8 +125,8 @@ const followed = (messages: (ctx: restate.ViewContext, request: MessagesRequest)
   /**
    * Forget the conversation: stop the message being answered (as `stop`),
    * then empty the key's database, and what its `signals` hold (waits and
-   * kept signals). The log's ids and cursors go on (see
-   * log.ts), so a follower reads on, and drops the messages before `first`.
+   * kept signals). The conversation's ids and cursors go on (see
+   * conversation.ts), so a follower reads on, and drops the messages before `first`.
    * A message sent before it is answered first, then forgotten too; one sent
    * after starts anew.
    */
@@ -166,27 +165,19 @@ const followed = (messages: (ctx: restate.ViewContext, request: MessagesRequest)
  * refuses them), and their types leave out: `erase`, `clear`'s work, once
  * the handlers before it are done. It empties the key's database and its
  * signals', and the conversation's ids and cursors go on where they got to
- * (conversation.ts, or the log's of a framework not on it yet: log.ts).
+ * (conversation.ts).
  */
 const internal = (items: Items<unknown> | undefined) => ({
   erase: {
     ingressPrivate: true,
     handler: async (ctx: restate.SessionContext) => {
-      if (items) {
-        // Read first, which also makes the reset apply the conversation's schema again.
-        await SCHEMA.ensure(ctx.db);
-        const start = await nextStart(ctx.db);
-        await ctx.db.transaction(async (tx) => {
-          await reset(tx);
-          await restart(tx, start);
-        });
-      } else {
-        const start = startAfter(await log.page(ctx.db, { limit: 1 }));
-        await ctx.db.transaction(async (tx) => {
-          await reset(tx);
-          await log.restart(tx, start);
-        });
-      }
+      // Read first, which also makes the reset apply the conversation's schema again.
+      await SCHEMA.ensure(ctx.db);
+      const start = await nextStart(ctx.db);
+      await ctx.db.transaction(async (tx) => {
+        await reset(tx);
+        await restart(tx, start);
+      });
       await cleared(ctx);
       await ctx.rpc(signals, signalsOf(ctx), { idempotencyKey: `${ctx.request.id}:reset` }).reset();
     },
@@ -212,12 +203,6 @@ const internal = (items: Items<unknown> | undefined) => ({
     ingressPrivate: true,
     handler: async (ctx: restate.SessionContext) => (items ? compact(ctx, items) : false),
   },
-});
-
-/** Where the log starts after `latest`, its latest message: past its ids and cursor. */
-const startAfter = ({ messages: [latest], cursor, first = 0 }: Messages): log.Start => ({
-  seq: cursor,
-  id: latest ? latest.id + 1 : first,
 });
 
 /**

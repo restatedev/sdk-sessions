@@ -1,12 +1,11 @@
 // What the frameworks share: their options (`Configure`, the model), the
 // ids of an invocation's prompts, the `chat` handler with its turn (status,
-// cancellation, publishing for the clients that follow it), and
-// the `messages` handler with its `Transcript`.
+// cancellation, publishing for the clients that follow it), and what the
+// conversation of turns (conversation.ts) takes: its notes, window and
+// budget.
 import * as restate from '@restatedev/sessions';
 import { cancelCalls, cancelled, definitionOf, Link, ScopeKey } from '@restatedev/sessions/internal';
 import { settleCalls } from './calls.ts';
-import * as log from './log.ts';
-import type { Said } from './log.ts';
 import { signals, signalsOf } from './signals.ts';
 
 /**
@@ -295,16 +294,15 @@ const unfollowed = (ctx: restate.SessionContext) => agentOf(ctx)?.background ===
 const signalsOfAgent = (ctx: restate.SessionContext) => ctx.rpc(signals, signalsOf(ctx));
 
 /**
- * The conversation of `ctx` changed (see `watch` in object.ts): its log takes
- * the change (while a framework answers: {@link transcribing}), its revision
- * increases, and the clients that follow it read it again. It is a call to
- * Restate, so it also sends what the handler wrote before, for them to read.
+ * The conversation of `ctx` changed (see `watch` in object.ts): its revision
+ * increases, and the clients that follow it read it again; while a framework
+ * answers ({@link answering}), the calls whose results it stored are
+ * forgotten first. It is a call to Restate, so it also sends what the
+ * handler wrote before, for them to read.
  */
 export const publish = async (ctx: restate.SessionContext) => {
   const stored = ANSWERING.get(ctx);
-  const read = READING.get(ctx);
   if (stored) await settled(ctx, stored);
-  else if (read) await logged(ctx, read);
   await signalsOfAgent(ctx).publish();
 };
 
@@ -322,12 +320,7 @@ const stepped = async (ctx: restate.SessionContext) => {
 export async function toolCallStarted(ctx: restate.SessionContext) {
   if (!unfollowed(ctx)) return publish(ctx);
   const stored = ANSWERING.get(ctx);
-  const read = READING.get(ctx);
   if (stored) await settled(ctx, stored);
-  else if (read) {
-    const transcript = await read();
-    await settleCalls(ctx, (id, failed) => transcript.answered(id, failed));
-  }
 }
 
 /** A tool call of the turn of `ctx` (a `chat` handler's) ended: {@link publish} it, unless the agent runs in the background. */
@@ -423,9 +416,7 @@ export const chatHandler = <A = string>(answer: (ctx: restate.SessionContext, me
     // waits for, so that it is done before the turn ends (see `awaitTurn`).
     const end = async () => {
       const stored = ANSWERING.get(ctx);
-      const read = READING.get(ctx);
       if (stored) await settled(ctx, stored);
-      else if (read) await logged(ctx, read);
       await signalsOfAgent(ctx).close(invocationId);
     };
     const turn = new AbortController();
@@ -589,130 +580,3 @@ export interface Messages {
    */
   first?: number;
 }
-
-/**
- * A conversation as `messages` gives it, built from a framework's transcript:
- * each message is started by `say`, a tool call goes to the assistant's
- * message, and its result to its call. Messages without parts are left out.
- *
- * A message, once given out by `messages()`, is never changed: a change
- * makes a new one in its place. So a framework can keep its transcript and
- * add to it as its conversation grows, and the log stores only the messages
- * that are not the ones it stored last (see log.ts).
- */
-export class Transcript {
-  #messages: Said[] = [];
-  /** The message of each tool call, by the call's id: its index. */
-  #calls = new Map<string, number>();
-
-  /** A new message of `role`, with `text` if there is any. */
-  say(role: ChatMessage['role'], text = '') {
-    this.#messages.push({ role, parts: text.trim() ? [{ type: 'text', text }] : [] });
-  }
-
-  /** Tool call `id` of the assistant's message. */
-  call(id: string, name: string, input: unknown) {
-    if (this.#messages.at(-1)?.role !== 'assistant') this.say('assistant');
-    const at = this.#messages.length - 1;
-    this.#change(at, (parts) => [...parts, { type: 'tool', id, name, input }]);
-    this.#calls.set(id, at);
-  }
-
-  /** The output of tool call `id`; an error's if the framework says so, or it is a tool's `Error: <message>`. */
-  result(id: string, output: string, error = false) {
-    const at = this.#calls.get(id);
-    if (at === undefined) return;
-    const failed = error || output.startsWith('Error: ');
-    this.#change(at, (parts) =>
-      parts.map((p) => (p.type === 'tool' && p.id === id ? { ...p, output, ...(failed ? { error: true } : {}) } : p)),
-    );
-  }
-
-  /**
-   * Whether tool call `id` has its output: not an error's, unless it is
-   * `failed`, the error the call answered with.
-   */
-  answered(id: string, failed?: string) {
-    const at = this.#calls.get(id);
-    return (
-      at !== undefined &&
-      this.#messages[at]!.parts.some(
-        (p) => p.type === 'tool' && p.id === id && p.output !== undefined && (!p.error || p.output === failed),
-      )
-    );
-  }
-
-  /** Its messages, in order: those with parts. */
-  messages(): Said[] {
-    return this.#messages.filter((m) => m.parts.length > 0);
-  }
-
-  /** Message `at` with its parts as `change` makes them: a new message, in its place. */
-  #change(at: number, change: (parts: Part[]) => Part[]) {
-    const message = this.#messages[at]!;
-    this.#messages[at] = { ...message, parts: change(message.parts) };
-  }
-}
-
-/**
- * A framework's transcript as it stands, while it answers (see
- * {@link transcribing}): a new one, or the one it keeps and adds to.
- */
-export type Read = () => Promise<Transcript>;
-
-/** The transcript of the attempt's turn, while it answers. */
-const READING = new ScopeKey<Read>('transcribing');
-
-/** The attempt's log writes, one after another: tool calls in parallel publish at once. */
-const WRITING = new ScopeKey<Promise<void>>('the log');
-
-/** The log of the conversation of `ctx` takes its transcript as `read` gives it. */
-function logged(ctx: restate.SessionContext, read: Read): Promise<void> {
-  const write = async () => {
-    const transcript = await read();
-    await log.sync(ctx, transcript.messages());
-    // The calls whose results the framework stored are made: see calls.ts.
-    await settleCalls(ctx, (id, failed) => transcript.answered(id, failed));
-  };
-  const done = (WRITING.get(ctx) ?? Promise.resolve()).then(write, write);
-  WRITING.set(ctx, done);
-  return done;
-}
-
-/**
- * Run `work`, a framework's turn (or a compaction, a reset), with `read`
- * giving the framework's transcript as it stands, from the framework as
- * `work` holds it open: each publish meanwhile (a tool call's start and end)
- * takes it into the conversation's log, and so does `work`'s end, before the
- * framework closes. `messages` and `sync` read the log.
- */
-export async function transcribing<T>(ctx: restate.SessionContext, read: Read, work: () => Promise<T>): Promise<T> {
-  const outer = READING.get(ctx);
-  READING.set(ctx, read);
-  let failed = false;
-  try {
-    return await work();
-  } catch (error) {
-    failed = !(error instanceof restate.TerminalError);
-    throw error;
-  } finally {
-    try {
-      // A failed attempt stores nothing more: its retry runs again.
-      if (!failed) await logged(ctx, read);
-    } finally {
-      if (outer) READING.set(ctx, outer);
-      else READING.delete(ctx);
-    }
-  }
-}
-
-/**
- * The handler of an agent's conversation as clients read it, from its log:
- * a page of it (`{limit, before}`), or what is new or changed since a cursor
- * (`{cursor}`). It is a view: it answers while a message is answered, with
- * what was stored so far, and stores nothing.
- */
-export const messagesHandler =
-  () =>
-  async (ctx: restate.ViewContext, request?: MessagesRequest): Promise<Messages> =>
-    log.page(ctx.db, request ?? {});
