@@ -3,8 +3,8 @@
 // a call is made once, however often its tool call runs.
 //
 // A crash or a suspension restarts the handler. pi, Claude and LangGraph then
-// run a tool call that was cut off again, with its id. OpenCode and the
-// DeepSeek Harness tell the model it was interrupted instead, and the model
+// run a tool call that was cut off again, with its id. The DeepSeek Harness
+// tells the model it was interrupted instead, and the model
 // makes it again with a new id: made with the same tool and input, it is the
 // call an earlier attempt made, so it takes that call's id, and so the same
 // idempotency key: the same Restate call (a wait for a signal, a sub-agent's
@@ -14,8 +14,8 @@
 // last id it was made with ({@link settleCalls}, at each publish, and before each
 // tool call): one that answered just before a crash, whose result the
 // framework had not stored, is made again as the same call. An error there
-// is not its result (OpenCode gives the call it interrupted one, and the
-// model makes it again), unless the call answered with that error: a
+// is not its result (the DeepSeek Harness gives the call it interrupted
+// one, and the model makes it again), unless the call answered with that error: a
 // terminal error is its result too. Once stored, the model has its result,
 // and an identical call it makes later is a call of its own.
 //

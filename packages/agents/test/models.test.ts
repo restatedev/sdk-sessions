@@ -6,7 +6,6 @@ import * as restate from '@restatedev/restate-sdk';
 import { chatHandler, sessionObject, REFUSED, tool } from '@restatedev/agents';
 import * as deepseek from '@restatedev/agents/deepseek';
 import * as langgraph from '@restatedev/agents/langgraph';
-import * as opencode from '@restatedev/agents/opencode';
 import * as pi from '@restatedev/agents/pi';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
@@ -38,7 +37,6 @@ const answer = (model: Teller) => conversation(langgraph.chat({ model }), 'k').a
 describe('a wrong model', () => {
   it('that is not provider/model-id fails at the definition', () => {
     expect(() => pi.chat({ model: 'claude' })).toThrow(/not provider\/model-id/);
-    expect(() => opencode.chat({ model: 'claude' })).toThrow(/not provider\/model-id/);
   });
 
   it("of another provider fails at the definition, for an agent of one provider's models", () => {

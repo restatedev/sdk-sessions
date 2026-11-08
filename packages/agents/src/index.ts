@@ -1,6 +1,5 @@
 // @restatedev/agents: agent frameworks in Restate session objects. Each framework
-// is a subpath (@restatedev/agents/pi, /opencode, /langgraph, /claude,
-// /deepseek); this is what they share: session objects, tools for
+// is a subpath (@restatedev/agents/pi, /langgraph, /claude, /deepseek); this is what they share: session objects, tools for
 // any of them, and the tools that are Restate itself.
 
 export {

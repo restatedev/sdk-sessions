@@ -308,8 +308,7 @@ type With<H, V> = Functions<typeof BUILT_IN> &
  * `schema`, optional: tables of your own, beside the agent's (which are its
  * own business), made in each key's database as a session object makes
  * them. Any name is yours but those starting with `restate_`, the agent's
- * (`restate_pi_tasks`, `restate_claude_messages`, `restate_agent_log`...);
- * OpenCode's tables are in a database of their own.
+ * (`restate_pi_tasks`, `restate_agent_turns`, `restate_agent_items`...).
  *
  * `options` and `metadata` add to (or replace) the ones set here, such as
  * `options: { retryPolicy: ... }`.

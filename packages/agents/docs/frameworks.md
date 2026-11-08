@@ -575,6 +575,16 @@ The Anthropic SDK's tool runner (`@anthropic-ai/sdk` 0.133.0).
   (`examples/basic/opencode.ts`, `examples/intermediate/coding.ts`,
   `review.ts`, `team.ts`, `examples/advanced/factory/factory.ts`), its
   devDependencies, and its rows in the READMEs.
+- **The spike's finding (step 8): it cannot.** A turn crashed in its
+  transfer, then OpenCode booted with `resume: false`, and its public
+  `session.interrupt` called: the call succeeds, but releases nothing (no
+  turn of the session is active in that process). The next prompt's boot
+  resumes the dead turn, and its transfer is made again under the new
+  invocation's idempotency key (`inv2:call_…`). No other public call ends a
+  claimed turn. So OpenCode left the package (D6): its subpaths, sources,
+  tests, fakes, the e2e agent, the OpenCode-only examples (`basic/opencode.ts`,
+  `intermediate/coding.ts`, `review.ts`); `team.ts`'s writer is a Claude
+  agent now, and the factory's coder a pi one.
 - **Risks**: three copies of each conversation (OpenCode's events, its
   messages, our items); drift when `withOpenCode` reverts, forks, compacts
   or switches models; messages updated in place against items appended once;

@@ -200,7 +200,7 @@ describe("Restate's tools", () => {
     const state = new Map<string, Uint8Array>();
     const first = context(state);
     await t.run({ order: '103' }, { ctx: first.ctx, callId: 'call_1' });
-    // Resumed, OpenCode gives the call an error, which is not its result: the model makes it again.
+    // Resumed, the DeepSeek Harness gives the call an error, which is not its result: the model makes it again.
     const next = context(state);
     const transcript = new Transcript();
     transcript.call('call_1', 'status', { order: '103' });

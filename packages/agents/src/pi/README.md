@@ -83,8 +83,8 @@ cd packages/examples && OPENAI_API_KEY=… node basic/chat.ts
 With a Restate server, and the agent registered with it: see
 [Run an example](../../../examples/README.md#run-an-example).
 [`examples/basic/chat.ts`](../../../examples/basic/chat.ts) is a chat agent with a
-tool, and [`examples/intermediate/coding.ts`](../../../examples/intermediate/coding.ts) a pi
-coordinator that hands coding tasks to OpenCode coders.
+tool, and [`examples/intermediate/team.ts`](../../../examples/intermediate/team.ts) a pi
+editor that hands tasks to agents of other frameworks.
 
 ## Tests
 

@@ -36,7 +36,7 @@ export const nextPromptId = (ctx: restate.SessionContext) => {
   return n === 1 ? ctx.request.id : `${ctx.request.id}:${n}`;
 };
 
-/** The default model of pi, OpenCode and LangGraph, with OPENAI_API_KEY. */
+/** The default model of pi and LangGraph, with OPENAI_API_KEY. */
 export const DEFAULT_MODEL = 'openai/gpt-6-sol';
 
 /** The default model of Claude agents, with ANTHROPIC_API_KEY. */
@@ -242,7 +242,7 @@ export const ITEMS = new Link<object>('restate-agents.items');
 
 /**
  * The `messages` view `view` of a framework that keeps a conversation apart
- * (OpenCode, in a database of its own): `clear` empties it too, as an agent
+ * (in a database of its own, say): `clear` empties it too, as an agent
  * with this view is cleared.
  */
 export const alsoClearing = <V extends object>(view: V, clear: Clear) => {

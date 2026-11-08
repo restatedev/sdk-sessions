@@ -630,6 +630,6 @@ own).
 - [x] Step 5: LangGraph's built-in agent
 - [x] Step 6: DeepSeek
 - [x] Step 7: pi (spike, then port)
-- [ ] Step 8: OpenCode (spike, then port or remove)
+- [x] Step 8: OpenCode (spike, then port or remove)
 - [ ] Step 9: the old way goes
 - [ ] Step 10: the docs, the examples, the template
