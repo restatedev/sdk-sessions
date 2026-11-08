@@ -1137,7 +1137,8 @@ export const invocationOf = (promptId: string) => promptId.split(':', 1)[0]!;
  * the invocation's (`nextPromptId`), so a retried attempt returns the stored
  * answer (reading only it), or goes on with the turn. A turn an earlier
  * invocation left without an answer is closed first ({@link ENDED}): that
- * invocation is gone.
+ * invocation is gone. `items` must be the agent's `messages` view's, if it
+ * has one: one framework per agent.
  *
  * `window` and `budget` are the agent's unless given. With `check`, the
  * answer is checked: a message it returns asks the model again with it,
@@ -1152,6 +1153,12 @@ export async function answerOnce<I>(
   options: { window?: Window; budget?: number; check?: Check } = {},
 ): Promise<string> {
   const settings = settingsOf(ctx);
+  // One framework per agent (D7): its conversation holds its `messages` view's items, which another can't read.
+  if (settings.items !== undefined && settings.items !== items) {
+    throw new restate.TerminalError(
+      "this agent's `messages` view is another framework's: an agent's conversation holds one framework's items",
+    );
+  }
   const window = checkWindow(options.window ?? settings.window);
   const budget = options.budget ?? settings.budget;
   const promptId = nextPromptId(ctx);

@@ -15,7 +15,7 @@ import { conversationView } from '../src/messages.ts';
 import { waitFor } from '../src/tools.ts';
 import { bank } from './bank.ts';
 import { ledger } from '@restatedev/sessions/test/ledger';
-import { calling, type Item, ITEMS } from './fakes/items.ts';
+import { calling, FakeItems, type Item, ITEMS } from './fakes/items.ts';
 import { conversation as banking, followingOf, handlerOf, sqlAttempt } from './support.ts';
 
 /** The results a turn stored, by their calls' ids. */
@@ -335,6 +335,17 @@ function storeAgent(
   return { agent, run, calls, sends, map };
 }
 
+/** What an agent whose `messages` view is on the made-up framework's items answers on `items`. */
+function answeredWith(items: FakeItems) {
+  const agent = sessionObject({
+    name: 'mixed',
+    handlers: { chat: chatHandler((ctx, message) => answerOnce(ctx, message, items, async () => 'fine')) },
+    views: { messages: conversationView(ITEMS) },
+  });
+  const ctx = fakeContext({ map: new Map(), service: 'mixed', key: 'alice', id: 'inv1', calls: [], sends: [] });
+  return invoke(agent, 'chat', ctx, 'hi') as Promise<string>;
+}
+
 /** An agent of `options`, to define. */
 const make = (options: object) => () =>
   sessionObject({ name: 'x', ...options, views: { messages: conversationView(ITEMS) } });
@@ -424,6 +435,12 @@ describe('an agent on the conversation of turns', () => {
     // The rows stay: the views show every turn.
     const rows = await sqlAttempt({ map, key: 'alice', id: 'read' }).ctx.db.values(`SELECT COUNT(*) FROM ${STEPS}`);
     expect(Number(rows[0]![0])).toBeGreaterThan(0);
+  });
+
+  it("refuses to answer with items other than its `messages` view's: one framework per agent", async () => {
+    expect(await answeredWith(ITEMS)).toBe('fine');
+    await expect(answeredWith(new FakeItems())).rejects.toThrow("another framework's");
+    await expect(answeredWith(new FakeItems())).rejects.toBeInstanceOf(restate.TerminalError);
   });
 
   it('refuses a window or budget that is not a number of turns or tokens', () => {

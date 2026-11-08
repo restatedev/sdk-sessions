@@ -142,6 +142,8 @@ const SCHEMA = new Schema('restate_agents.turns', [
 - **Each item is the framework's own** (a message, an event), stored and
   loaded by the framework (`Items.dump`, `Items.load`). The core reads it
   only through `Items.read`: what was said, the tool calls, the results.
+  So an agent's conversation is one framework's: `answerOnce` refuses
+  items other than its `messages` view's (D7).
 - **`reply`** groups the items of one model reply (a reply that is several
   items, say), so that the full view shows it as one message, and `drop`
   removes it whole.
