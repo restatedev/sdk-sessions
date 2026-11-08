@@ -82,7 +82,7 @@ describe('the Claude agent', () => {
         { type: 'text', text: 'On it.' },
         {
           type: 'tool',
-          id: 'toolu_1',
+          id: expect.stringMatching(/^toolu_/),
           name: 'transfer',
           input: { from: 1, to: 2, amount: 5 },
           output: CANCELLED,
@@ -120,7 +120,7 @@ describe('the Claude agent', () => {
       [{ type: 'text', text: 'Please move 5 from 1 to 2' }],
       [
         { type: 'text', text: 'On it.' },
-        { type: 'tool', id: 'toolu_1', name: 'transfer', input: { from: 1, to: 2, amount: 5 } },
+        { type: 'tool', id: expect.stringMatching(/^toolu_/), name: 'transfer', input: { from: 1, to: 2, amount: 5 } },
       ],
     ]);
     gate.resolve();
@@ -185,7 +185,7 @@ describe('the Claude agent', () => {
     // Its attempt retried: the same answer, no new transfer.
     expect(await c.attempt('inv1', 'Please move 5 from 1 to 2')).toEqual(first);
     expect(c.ledger.calls).toHaveLength(1);
-    expect([...c.ledger.transfers.keys()]).toEqual(['ClaudeAgent/a/toolu_1']);
+    expect([...c.ledger.transfers.keys()]).toEqual([expect.stringMatching(/^ClaudeAgent\/a\/toolu_/)]);
     // The next prompt goes on in the same thread.
     const audit = await c.attempt('inv3', 'audit the books');
     expect(audit).toMatch(/^Done: .*"transfers":1/);
@@ -237,9 +237,11 @@ describe('the Claude agent', () => {
       teller.reply = reply;
     }
     // The same transfer id and idempotency key both times: the money moved once.
+    const id = c.ledger.calls[0]!.id.split('/').at(-1)!;
+    expect(id).toMatch(/^toolu_/);
     expect(c.ledger.calls).toEqual([
-      { name: 'transfer', id: 'ClaudeAgent/b/toolu_1', key: 'inv1:toolu_1' },
-      { name: 'transfer', id: 'ClaudeAgent/b/toolu_1', key: 'inv1:toolu_1' },
+      { name: 'transfer', id: `ClaudeAgent/b/${id}`, key: `inv1:${id}` },
+      { name: 'transfer', id: `ClaudeAgent/b/${id}`, key: `inv1:${id}` },
     ]);
     expect(c.ledger.transfers.size).toBe(1);
   });

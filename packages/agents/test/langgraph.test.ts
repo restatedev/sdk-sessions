@@ -70,7 +70,7 @@ describe('the LangGraph agent', () => {
         { type: 'text', text: 'On it.' },
         {
           type: 'tool',
-          id: 'call_1',
+          id: expect.stringMatching(/^call_/),
           name: 'transfer',
           input: { from: 1, to: 2, amount: 5 },
           output: CANCELLED,
@@ -160,7 +160,7 @@ describe('the LangGraph agent', () => {
     // Its attempt retried: the same answer, no new transfer.
     expect(await c.attempt('inv1', 'Please move 5 from 1 to 2')).toEqual(first);
     expect(c.ledger.calls).toHaveLength(1);
-    expect([...c.ledger.transfers.keys()]).toEqual(['GraphAgent/a/call_1']);
+    expect([...c.ledger.transfers.keys()]).toEqual([expect.stringMatching(/^GraphAgent\/a\/call_/)]);
     // The next prompt goes on in the same thread.
     const audit = await c.attempt('inv3', 'audit the books');
     expect(audit).toMatch(/^Done: .*"transfers":1/);
@@ -180,9 +180,11 @@ describe('the LangGraph agent', () => {
       reply.mockRestore();
     }
     // The same transfer id and idempotency key both times: the money moved once.
+    const id = c.ledger.calls[0]!.id.split('/').at(-1)!;
+    expect(id).toMatch(/^call_/);
     expect(c.ledger.calls).toEqual([
-      { name: 'transfer', id: 'GraphAgent/b/call_1', key: 'inv1:call_1' },
-      { name: 'transfer', id: 'GraphAgent/b/call_1', key: 'inv1:call_1' },
+      { name: 'transfer', id: `GraphAgent/b/${id}`, key: `inv1:${id}` },
+      { name: 'transfer', id: `GraphAgent/b/${id}`, key: `inv1:${id}` },
     ]);
     expect(c.ledger.transfers.size).toBe(1);
   });
