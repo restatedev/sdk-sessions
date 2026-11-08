@@ -624,7 +624,7 @@ own).
 
 - [x] Step 0: these pages
 - [x] Step 1: the call records
-- [ ] Step 2: LangGraph's checkpointer
+- [x] Step 2: LangGraph's checkpointer
 - [ ] Step 3: the store, on a made-up framework
 - [ ] Step 4: Claude
 - [ ] Step 5: LangGraph's built-in agent
