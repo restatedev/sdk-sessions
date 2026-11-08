@@ -2,7 +2,8 @@
 // the handler (see ../testing.ts). Its model is the teller (../fakes/pi.ts).
 // `pnpm --filter @restatedev/agents test pi`.
 import { describe, expect, it, vi } from 'vitest';
-import { conversation, crashedAnywhere, handlerOf, SAID } from './support.ts';
+import { ENDED } from '../src/common.ts';
+import { conversation, crashedAnywhere, handlerOf, SAID_IN_TURNS as SAID } from './support.ts';
 import type * as restate from '@restatedev/sessions';
 import * as pi from '@restatedev/agents/pi';
 import { prompt } from './pi.ts';
@@ -53,5 +54,19 @@ describe('the bank agent on pi', () => {
     await c.attempt('inv1', 'Please move 5 from 1 to 2');
     await c.attempt('inv2', 'audit the books');
     expect(await c.read(pi.messages(), {})).toEqual({ messages: SAID, more: false, cursor: expect.any(Number) });
+  });
+
+  it('closes a turn its gone invocation left, by the next message: aborts its run, never finishes it', async () => {
+    const c = conversation(prompt, 'dead');
+    // Killed in its transfer: its invocation is gone, and the next message comes.
+    await c.crash('inv1', 'Please move 1 from 0 to 1');
+    expect(await c.attempt('inv2', 'Please move 2 from 0 to 1')).toBe('Done: moved 2 from account 0 to account 1');
+    // The dead run's transfer was not made again under the new invocation.
+    expect(c.ledger.calls.map((call) => call.key?.split(':')[0])).toEqual(['inv1', 'inv2']);
+    const { messages } = await c.read(pi.messages());
+    expect(messages[1]!.parts[1]).toMatchObject({ type: 'tool', output: ENDED, error: true });
+    expect(messages[2]!.parts).toEqual([{ type: 'text', text: ENDED }]);
+    expect(messages[3]!.parts).toEqual([{ type: 'text', text: 'Please move 2 from 0 to 1' }]);
+    expect(await c.attempt('inv1', 'Please move 1 from 0 to 1')).toBe(ENDED);
   });
 });

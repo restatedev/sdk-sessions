@@ -477,6 +477,32 @@ The Anthropic SDK's tool runner (`@anthropic-ai/sdk` 0.133.0).
   the stop and refusal notes in the next model's context; the copy across
   crashes.
 
+### The spike's findings (step 7)
+
+- **A dead run can be aborted before pi resumes it.** `Harness.open` loads
+  live tasks and turns surviving `running` ones back to `pending`, but
+  dispatches nothing: scheduling starts paused, until a call that asks for
+  progress. `Conversation.abort()` commits its abort marks first, so the
+  dead run's tasks run their abort handlers, never their progress. The
+  integration aborts the root conversation when pi has a live submission
+  of another request than the turn's (`harness.inspect`); a test checks
+  the dead run's transfer is not made again under the new invocation.
+- **The closing note** reaches pi as the start of the next prompt's input
+  (`(<note>)` then the prompt), as for DeepSeek; the views show the prompt
+  as asked. No pi extension is needed.
+- **A pi run's end is its submission's**: `done` with its answer entry
+  (the turn's answer), or `unanswered` (a cancellation, a refusal, a
+  failure), which `answerOnce` closes. Asking again within the turn is a
+  second submission, `<prompt id>:again`.
+- **The copy**: each pi commit is one transaction of the storage facade
+  (`SqlKvDatabase`), whose `onCommit` copies, in it, the root
+  conversation's entries after the turn's user entry (its submission's
+  `entry`) and after the last copied: `pi.assistant` and `pi.tool-result`,
+  each item keeping its entry id.
+- **Not done**: a provider's outage still ends the turn (pi settles the
+  submission `unanswered`, and a retry finds it settled): retrying it would
+  take a new request id per attempt.
+
 ## OpenCode
 
 `@opencode/*` 2.0.32, with `effect` 4.0.1. [`src/opencode/`](../src/opencode).

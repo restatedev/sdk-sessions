@@ -1,7 +1,7 @@
 // pi's chat without a Restate server or an API key: Anthropic's provider is a
 // fake model (../fakes/pi.ts).
 import * as restate from '@restatedev/sessions';
-import { subagent, tool } from '@restatedev/agents';
+import { CANCELLED, subagent, tool } from '@restatedev/agents';
 import { z } from 'zod';
 import * as pi from '@restatedev/agents/pi';
 import { describe, expect, it, vi } from 'vitest';
@@ -192,8 +192,9 @@ describe('pi.chat', () => {
   it('ends a cancelled turn, and answers the next message afresh', async () => {
     const { failed, answer, parts } = await afterCancel(pi.chat({ tools: [cancelledTransfer] }), pi.messages());
     expect(failed).toBeInstanceOf(restate.CancelledError);
-    expect(answer).toBe('Please move 5 from 1 to 2 / Hello');
-    // pi-durable's abort ends the tool call, as its own error.
+    // The next model is told how the turn before ended, with the message.
+    expect(answer).toBe(`Please move 5 from 1 to 2 / (${CANCELLED})\n\nHello`);
+    // The turn's close ends the tool call, and the turn, as cancelled.
     expect(parts).toEqual([
       [{ type: 'text', text: 'Please move 5 from 1 to 2' }],
       [
@@ -203,12 +204,13 @@ describe('pi.chat', () => {
           id: expect.any(String),
           name: 'transfer',
           input: { from: 1, to: 2, amount: 5 },
-          output: expect.stringContaining('Tool transfer was aborted'),
+          output: CANCELLED,
           error: true,
         },
       ],
+      [{ type: 'text', text: CANCELLED }],
       [{ type: 'text', text: 'Hello' }],
-      [{ type: 'text', text: 'Please move 5 from 1 to 2 / Hello' }],
+      [{ type: 'text', text: `Please move 5 from 1 to 2 / (${CANCELLED})\n\nHello` }],
     ]);
   });
 
