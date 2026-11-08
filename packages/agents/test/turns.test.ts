@@ -346,6 +346,12 @@ function answeredWith(items: FakeItems) {
   return invoke(agent, 'chat', ctx, 'hi') as Promise<string>;
 }
 
+/** A summary, as an agent's `summarize` gives one. */
+const summarize = async () => 'a summary';
+
+/** A `messages` view of your own, not the conversation of turns'. */
+const yours = async () => ({ messages: [], more: false, cursor: 0 });
+
 /** An agent of `options`, to define. */
 const make = (options: object) => () =>
   sessionObject({ name: 'x', ...options, views: { messages: conversationView(ITEMS) } });
@@ -441,6 +447,15 @@ describe('an agent on the conversation of turns', () => {
     expect(await answeredWith(ITEMS)).toBe('fine');
     await expect(answeredWith(new FakeItems())).rejects.toThrow("another framework's");
     await expect(answeredWith(new FakeItems())).rejects.toBeInstanceOf(restate.TerminalError);
+  });
+
+  it("refuses `summarize` without the conversation of turns, whose `compact` uses it: a framework's `messages` view", () => {
+    const chat = chatHandler((ctx, message) => answerOnce(ctx, message, ITEMS, async () => 'fine'));
+    expect(() => sessionObject({ name: 'x', summarize, handlers: { chat } })).toThrow(/summarize/);
+    expect(() => sessionObject({ name: 'x', summarize, handlers: { chat }, views: { messages: yours } })).toThrow(
+      /summarize/,
+    );
+    expect(() => make({ summarize, handlers: { chat } })()).not.toThrow();
   });
 
   it('refuses a window or budget that is not a number of turns or tokens', () => {

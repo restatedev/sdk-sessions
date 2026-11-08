@@ -349,6 +349,12 @@ export const sessionObject = <
   const agent = page === undefined ? {} : FOLLOWED;
   // A framework on the conversation of turns: its view carries its items.
   const items = (page && ITEMS.of(page)) as Items<unknown> | undefined;
+  // Its `compact` summarizes: without the conversation of turns, it has none, and nothing would.
+  if (summarize && !items) {
+    throw new Error(
+      `${name}: \`summarize\` needs the conversation of turns: a framework's \`messages\` view (\`claude.messages()\`, say)`,
+    );
+  }
   const { erase, ...stored } = internal(items);
   const privates: Record<string, restate.Entry<restate.SessionContext>> = messages === undefined
     ? {}
