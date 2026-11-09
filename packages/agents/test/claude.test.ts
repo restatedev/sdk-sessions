@@ -26,6 +26,7 @@ import {
   handlerOf,
   type PromptHandler,
   sqlAttempt,
+  steeredAtAStep,
   withoutIds,
 } from './support.ts';
 import { HttpError, reply as tellerReply, teller } from './fakes/claude.ts';
@@ -682,5 +683,62 @@ describe("the Claude agent's output", () => {
     expect(answer).toBeInstanceOf(restate.TerminalError);
     expect((answer as Error).message).toBe('the model declined to answer (cyber)');
     expect(requests).toHaveLength(1);
+  });
+});
+
+describe('the Claude agent, steered', () => {
+  it('takes a message steered while a tool runs at its next step: the next request ends with it', async () => {
+    const { answer, said, audits, taken } = await steeredAtAStep((tools) => claude.chat({ tools }), claude.messages());
+    expect(answer).toBe('Done: the books are fine');
+    expect(said).toEqual([
+      ['user', 'Please move 5 from 1 to 2'],
+      ['assistant', 'On it. + transfer'],
+      ['user', 'audit the books'],
+      ['assistant', 'audit'],
+      ['assistant', 'Done: the books are fine'],
+    ]);
+    expect(audits).toBe(1);
+    expect(taken).toEqual(['steer-1']);
+  });
+
+  it('retries a turn that failed after it took the message with the message, once', async () => {
+    const { answer, failed, said, audits, taken } = await steeredAtAStep(
+      (tools) => claude.chat({ tools }),
+      claude.messages(),
+      {
+        failAudit: true,
+      },
+    );
+    expect(failed).toBeInstanceOf(Error);
+    expect(answer).toBe('Done: the books are fine');
+    expect(said).toEqual([
+      ['user', 'Please move 5 from 1 to 2'],
+      ['assistant', 'On it. + transfer'],
+      ['user', 'audit the books'],
+      ['assistant', 'audit'],
+      ['assistant', 'Done: the books are fine'],
+    ]);
+    expect(audits).toBe(2);
+    expect(taken).toEqual(['steer-1']);
+  });
+
+  it("puts the message after the tools' results, in a request the API takes, and every request after it keeps it", async () => {
+    const requests: MessageParam[][] = [];
+    const reply = teller.reply;
+    teller.reply = (messages, request) => {
+      requests.push(structuredClone(messages));
+      return reply(messages, request);
+    };
+    try {
+      await steeredAtAStep((tools) => claude.chat({ tools }), claude.messages());
+    } finally {
+      teller.reply = reply;
+    }
+    const steered = (messages: MessageParam[]) => messages.filter((m) => m.content === 'audit the books').length;
+    expect(requests.map(steered)).toEqual([0, 1, 1]);
+    // After the transfer's result: the request's last two messages.
+    const [result, said] = requests[1]!.slice(-2);
+    expect(Array.isArray(result!.content) && result!.content[0]!.type).toBe('tool_result');
+    expect(said).toEqual({ role: 'user', content: 'audit the books' });
   });
 });
