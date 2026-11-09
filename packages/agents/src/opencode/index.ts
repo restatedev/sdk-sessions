@@ -1,0 +1,830 @@
+// OpenCode 2.2 agents in Restate virtual objects: OpenCode for each
+// invocation, with its database beside the object's.
+//
+//   const coder = opencode.agent({ name: 'coder', workspace: (ctx) => `/work/${ctx.key}` });
+//
+// or a handler of an object of your own: `handlers: { chat: opencode.chat() }`,
+// with options for each invocation: `opencode.chat(async (ctx) => ({ workspace }))`
+//
+// or, for more than a prompt:
+//
+//   review: (ctx, task) => withOpenCode(ctx, { tools }, async ({ prompt }) => [await prompt(task), await prompt('Review it')]),
+//
+// The model is `model`, MODEL, or else openai/gpt-6-sol, which OpenCode's
+// own providers serve, with the provider's API key (such as OPENAI_API_KEY).
+//
+// OpenCode keeps the model's history in a database of the key's own, beside
+// `ctx.db` (db.ts): OpenCode boots only on a database that is empty or its
+// own. Each prompt is a turn of the object's conversation (../conversation.ts):
+// what clients read, and how turns end. What OpenCode stores of a turn (the
+// model's replies, the tools' results) is copied into the turn after each of
+// OpenCode's commits, in a `ctx.db` transaction of its own, idempotently (by
+// OpenCode's message and part ids), and caught up before each publish, the
+// answer, and any close of the turn. OpenCode boots lazily, as a turn runs:
+// an answered prompt's retry boots nothing.
+//
+// OpenCode records an execution claim as a turn starts, and every boot sweeps
+// the claims left behind. Whose claim it is comes from `ctx.db`: the last
+// prompt submitted to OpenCode is recorded there before its submit
+// (`restate_agents_opencode`). A boot for that prompt (a retried attempt)
+// resumes its turn, as OpenCode does; a boot for any other closes it without
+// asking the model (OpenCode's resume budget, `maxAttempts: 0`), and the sweep
+// is awaited before anything is submitted. A turn another invocation left
+// (killed) is closed in OpenCode first, then the copy catches up, then the
+// conversation closes it (`settleOwn` of the items). The next prompt tells the
+// model how the turn before it ended, and which of its calls did happen.
+//
+// A tool's error fails the attempt rather than hand the error to the model:
+// from then on the attempt stores nothing (its fence closes), and the next
+// attempt resumes the turn, in which OpenCode gives the cut-off call an
+// "interrupted" result and the model makes it again under a new id.
+//
+// v1 leaves out OpenCode's background work: its subagent and question tools,
+// and background shell jobs. TODO: steering (`delivery: 'steer'`, the spike
+// showed it joins at the next step), OpenCode's `session.retry` hook, and
+// permissions asked through Restate.
+import * as restate from '@restatedev/sessions';
+import { database, reset } from '@restatedev/sessions/internal';
+import { mkdir } from 'node:fs/promises';
+import type { Plugin } from '@opencode/plugin';
+import type { StandardSchemaV1 } from '@standard-schema/spec';
+import type { z } from 'zod';
+import {
+  AttemptEnded,
+  chatHandler,
+  CHECK_MODEL,
+  type Check,
+  checkModelName,
+  type Configure,
+  configured,
+  fromTool,
+  modelOf,
+  providerOf,
+  refusal,
+  REFUSED,
+  RETURNED_UNRECORDED,
+  stopSignalOf,
+  toolCallEnded,
+  toolCallStarted,
+} from '../common.ts';
+import { answerOnce, invocationOf, type Call, type Items, type Parsed, STEPS, type Turn } from '../conversation.ts';
+import { conversationView } from '../messages.ts';
+import { type Definition, sessionObject } from '../object.ts';
+import { type Answer, withChecked } from '../output.ts';
+import { isTool, type Tool as AnyTool } from '../tools.ts';
+import { type Fence, type Host, openOpenCode, type Restart } from './db.ts';
+
+/** An OpenCode model reference. */
+export interface ModelRef {
+  providerID: string;
+  id: string;
+}
+
+/** `provider/model-id` as OpenCode names it. */
+const modelRef = (name: string): ModelRef => {
+  const [providerID, id] = providerOf(name);
+  return { providerID, id };
+};
+
+/** An OpenCode tool of your own: `execute` gets the input and the tool call's id. */
+export interface OpenCodeTool<Input = unknown> {
+  name: string;
+  description: string;
+  input: StandardSchemaV1<unknown, Input>;
+  execute(input: Input, callId: string): Promise<string>;
+}
+
+/**
+ * `t` as an OpenCode tool. OpenCode checks the arguments against `t.input`,
+ * and answers the model with what is wrong; those that fit reach `t.run` as
+ * the model gave them, which parses them itself.
+ */
+const native = (t: AnyTool, ctx: restate.SessionContext): OpenCodeTool => {
+  const standard = t.input['~standard'];
+  const input: StandardSchemaV1 = {
+    '~standard': {
+      ...standard,
+      validate: (args) => {
+        const result = standard.validate(args) as StandardSchemaV1.Result<unknown>;
+        return result.issues ? result : { value: args };
+      },
+    },
+  };
+  return { name: t.name, description: t.description, input, execute: (args, callId) => t.run(args, { ctx, callId }) };
+};
+
+/** The session every prompt goes to. */
+const SESSION = 'ses_root' as never;
+
+/** The key's database where OpenCode's tables are, apart from `ctx.db`. */
+const DATABASE = 'restate-agents.opencode';
+
+/** The table of `ctx.db` where the last prompt submitted to OpenCode is recorded: one row. */
+const SUBMITTED = 'restate_agents_opencode';
+
+/** OpenCode's message id of prompt `id`: letters, digits, `_` and `-`. */
+export const messageIdOf = (id: string) => `msg_${id.replace(/[^\w-]/g, '_')}`;
+
+/** OpenCode's message id of the message that asks again within the turn of prompt `id`. */
+const againIdOf = (id: string) => `${messageIdOf(id)}_again`;
+
+// The items: OpenCode's messages as the conversation keeps them.
+
+/** A tool call's result, as an item holds it. */
+interface ItemResult {
+  id: string;
+  name: string;
+  output: string;
+  error?: boolean;
+}
+
+/**
+ * An item of the conversation: a user's message, an assistant's message (a
+ * step of OpenCode's: its text and tool calls), or tool calls' results. One
+ * copied from OpenCode has `from`: the id of its OpenCode message, and for
+ * a result the id of its part too (`<message>/<part>`), by which it is
+ * copied once.
+ */
+export type Item =
+  | { type: 'user'; text: string }
+  | { type: 'assistant'; text: string; calls?: Call[]; from?: string }
+  | { type: 'results'; results: ItemResult[]; from?: string };
+
+const KINDS = new Set(['user', 'assistant', 'results']);
+
+/** The current attempt's live work on a turn, by turn: what `settleOwn` does while the turn runs here. */
+const live = new WeakMap<object, (status: string) => Promise<void>>();
+
+/**
+ * OpenCode's items. A user's message is said by the user; an assistant's
+ * says its text, with its tool calls; results are results. OpenCode's
+ * synthetic messages, idle markers and compactions are never copied.
+ */
+export const items: Items<Item> = {
+  dump: (item) => JSON.stringify(item),
+  load: (stored) => {
+    const item = JSON.parse(stored) as Item;
+    if (typeof item !== 'object' || item === null || !KINDS.has(item.type)) {
+      throw new Error('not an OpenCode item (a user, assistant or results item)');
+    }
+    return item;
+  },
+  prompt: (text) => ({ type: 'user', text }),
+  reply: (text) => ({ type: 'assistant', text }),
+  results: (results) =>
+    [
+      {
+        type: 'results',
+        results: results.map(([call, output]) => ({
+          id: call.id,
+          name: call.name,
+          output,
+          ...(output === RETURNED_UNRECORDED ? {} : { error: true }),
+        })),
+      },
+    ] satisfies Item[],
+  read: (item): Parsed => {
+    if (item.type === 'user') return { said: ['user', item.text] };
+    if (item.type === 'assistant') return { said: ['assistant', item.text], calls: item.calls ?? [] };
+    return { results: item.results.map(({ id, output, error }) => ({ id, output, error })) };
+  },
+  // A turn another invocation left: OpenCode closes it first (its resume
+  // budget, no model), then what OpenCode has of it is copied.
+  settleOwn: async (ctx, turn, status) => {
+    const own = live.get(turn);
+    if (own) return own(status);
+    if (status !== 'ended') return;
+    const fence: Fence = { closed: false };
+    const host = await openOpenCode(database(ctx.db, DATABASE), fence, { restart: 'close' });
+    try {
+      await host.swept;
+      await copyInto(ctx, host, turn);
+    } finally {
+      await host.close();
+    }
+  },
+  erase: (ctx) => database(ctx.db, DATABASE).transaction((tx) => reset(tx)),
+};
+
+// OpenCode's messages, as the client gives them.
+
+/** A part of an assistant message: text, or a tool call (`id`, `name`, and its `state`). */
+interface Content {
+  type: string;
+  text?: string;
+  id?: string;
+  name?: string;
+  state?: {
+    status?: string;
+    input?: unknown;
+    content?: string | Content[];
+    output?: unknown;
+    error?: { message?: string };
+  };
+}
+
+/** A message of OpenCode's session, as far as the copy and a prompt's outcome go. */
+interface Message {
+  id: string;
+  type: string;
+  outcome?: string;
+  text?: string;
+  content?: Content[];
+  error?: { message?: string; type?: string; status?: number };
+  time?: { completed?: unknown; streamed?: unknown };
+}
+
+/** The text of `content`. */
+const textOf = (content: string | Content[] = []) =>
+  typeof content === 'string'
+    ? content
+    : content.flatMap((c) => (c.type === 'text' && c.text ? [c.text] : [])).join('');
+
+/** The output of a tool part that ended: its content, or its error. */
+const outputOf = (part: Content) => {
+  const state = part.state ?? {};
+  if (state.status === 'error') return state.error?.message ?? 'Error';
+  if (state.content !== undefined) return textOf(state.content);
+  return typeof state.output === 'string' ? state.output : JSON.stringify(state.output ?? '');
+};
+
+/** The prompts waiting in the session's inbox, until their turn starts, oldest first. */
+const inbox = (host: Host): Promise<{ id: string; payload: { text: string } }[]> =>
+  host.call(host.client.session.inbox.list({ sessionID: SESSION }));
+
+/** The session's messages, a page at a time, newest first. */
+async function* newestFirst(host: Host): AsyncGenerator<Message[]> {
+  for (let cursor: string | undefined; ;) {
+    const page: { data: unknown[]; cursor: { next?: string } } = await host.call(
+      host.client.message.list(
+        cursor === undefined ? { sessionID: SESSION, order: 'desc', limit: 50 } : { sessionID: SESSION, cursor },
+      ),
+    );
+    yield page.data as Message[];
+    cursor = page.cursor.next;
+    if (cursor === undefined) return;
+  }
+}
+
+/** The messages after message `messageId`, oldest first; undefined if the session does not have it. */
+async function messagesAfter(host: Host, messageId: string): Promise<Message[] | undefined> {
+  const after: Message[] = [];
+  for await (const page of newestFirst(host)) {
+    const at = page.findIndex((m) => m.id === messageId);
+    after.unshift(...(at < 0 ? page : page.slice(0, at)).toReversed());
+    if (at >= 0) return after;
+  }
+  return undefined;
+}
+
+/** Whether OpenCode's session exists. */
+const sessionExists = (host: Host) =>
+  host.call(host.client.session.get({ sessionID: SESSION })).then(
+    () => true,
+    () => false,
+  );
+
+/**
+ * Copy into `turn` what OpenCode has of it that the turn lacks: each step's
+ * assistant message once its stream ended (its text, its tool calls, before
+ * they run), and each tool call's result once it ended. Each once: by
+ * OpenCode's ids. Not the prompt, nor what asks again (the turn has them),
+ * nor OpenCode's synthetic messages, idle markers and compactions. In a
+ * `ctx.db` transaction of its own. The ids of the calls whose results it
+ * copied.
+ */
+async function copyInto(ctx: restate.SessionContext, host: Host, turn: Turn<Item>): Promise<string[]> {
+  if (!turn.writable) return [];
+  const after = await messagesAfter(host, messageIdOf(turn.id));
+  if (!after) return [];
+  const have = new Set(turn.items.flatMap((e) => ('from' in e.item && e.item.from ? [e.item.from] : [])));
+  const copied: { item: Item; reply?: boolean }[] = [];
+  const resulted: string[] = [];
+  for (const m of after) {
+    if (m.type !== 'assistant') continue;
+    const tools = (m.content ?? []).filter((c) => c.type === 'tool' && c.id !== undefined);
+    // A step's message is updated in place as it streams: copied once its stream ended, its calls' input whole.
+    const streamed =
+      m.time?.completed !== undefined ||
+      (m.time?.streamed !== undefined && tools.every((t) => t.state?.status !== 'streaming'));
+    if (!streamed) break;
+    if (!have.has(m.id)) {
+      const text = textOf(m.content);
+      const calls = tools.map((t) => ({ id: t.id!, name: t.name ?? '', input: t.state?.input ?? {} }));
+      // A step that failed (its provider refused, say) says nothing: its error ends the turn.
+      if (!text.trim() && calls.length === 0) continue;
+      copied.push({ item: { type: 'assistant', text, calls, from: m.id }, reply: true });
+      have.add(m.id);
+    }
+    for (const t of tools) {
+      const status = t.state?.status;
+      const from = `${m.id}/${t.id}`;
+      if ((status !== 'completed' && status !== 'error') || have.has(from)) continue;
+      const output = outputOf(t);
+      const result: ItemResult = {
+        id: t.id!,
+        name: t.name ?? '',
+        output,
+        ...(status === 'error' ? { error: true } : {}),
+      };
+      copied.push({ item: { type: 'results', results: [result], from } });
+      resulted.push(t.id!);
+      have.add(from);
+    }
+  }
+  if (copied.length === 0) return [];
+  const done = await ctx.db.transaction((tx) => turn.copyIn(tx, copied));
+  return done ? resulted : [];
+}
+
+/** Where a prompt is: not in the session, its turn running, or ended with an answer or a failure. */
+type Outcome =
+  | { state: 'absent' | 'running' }
+  | { state: 'answered'; text: string }
+  | { state: 'failed'; reason: string; type?: string; status?: number };
+
+/** Where prompt `messageId` is (see {@link Outcome}). */
+async function outcome(host: Host, messageId: string): Promise<Outcome> {
+  if ((await inbox(host)).some((item) => item.id === messageId)) return { state: 'running' };
+  const after = await messagesAfter(host, messageId);
+  return after ? turnOutcome(after) : { state: 'absent' };
+}
+
+/** How the turn of the messages `after` a prompt ended: at an idle marker, or where a next prompt starts. */
+function turnOutcome(after: Message[]): Outcome {
+  let last: Message | undefined;
+  for (const m of after) {
+    if (m.type === 'idle') return ended(last, m);
+    if (m.type === 'user' && last !== undefined) return ended(last, { id: '', type: 'idle', outcome: 'succeeded' });
+    if (m.type === 'assistant') last = m;
+  }
+  return { state: 'running' };
+}
+
+/** The outcome of a turn that ended at `idle`, with `last`, its last assistant message: its text, or its error. */
+function ended(last: Message | undefined, idle: Message): Outcome {
+  const error = last?.error ?? idle.error;
+  if (idle.outcome === 'succeeded' && last?.error === undefined)
+    return { state: 'answered', text: textOf(last?.content) };
+  return {
+    state: 'failed',
+    reason: error?.message ?? idle.outcome ?? 'failed',
+    type: error?.type,
+    status: error?.status,
+  };
+}
+
+/** Whether a turn of the session runs in this process. */
+const active = async (host: Host) => {
+  const turns: Record<string, unknown> = await host.call(host.client.session.active());
+  return turns[SESSION as string] !== undefined;
+};
+
+/** How long a prompt's turn may be neither running nor ended: one resumed at boot starts well within it. */
+const STALLED_MS = 5_000;
+
+/**
+ * The outcome of prompt `messageId`, once its turn has ended. A prompt left
+ * in the inbox with nothing to run it (a crash between its queueing and its
+ * turn's claim) is started again, by its id. A turn that neither runs nor
+ * ends for {@link STALLED_MS} fails the attempt: the retry boots OpenCode
+ * again, which resumes the turn of this prompt.
+ */
+async function settled(host: Host, messageId: string): Promise<Outcome> {
+  for (let idleSince = Date.now(); ;) {
+    const now = await outcome(host, messageId);
+    if (now.state !== 'running') return now;
+    if (!(await active(host))) {
+      const [first] = await inbox(host);
+      if (first !== undefined) {
+        await host.call(
+          host.client.session.prompt({
+            sessionID: SESSION,
+            id: first.id as never,
+            text: first.payload.text,
+            delivery: 'queue',
+            resume: true,
+          }),
+        );
+      }
+    }
+    await host.call(host.client.session.wait({ sessionID: SESSION }));
+    if (await active(host)) {
+      idleSince = Date.now();
+      continue;
+    }
+    if (Date.now() - idleSince > STALLED_MS) {
+      throw new Error(`prompt ${messageId}: its turn has neither run nor ended for ${STALLED_MS / 1000} s`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+/** The prompt last submitted to OpenCode, as recorded before its submit. */
+async function submittedOf(ctx: restate.SessionContext): Promise<string | undefined> {
+  await ctx.db.execute(
+    `CREATE TABLE IF NOT EXISTS ${SUBMITTED} (row INTEGER PRIMARY KEY CHECK (row = 0), prompt TEXT NOT NULL)`,
+  );
+  const row = await ctx.db.get<{ prompt: string }>(`SELECT prompt FROM ${SUBMITTED} WHERE row = 0`);
+  return row?.prompt;
+}
+
+/** Record prompt `promptId` as the last submitted to OpenCode: before it is. */
+const record = (ctx: restate.SessionContext, promptId: string) =>
+  ctx.db.execute(`INSERT OR REPLACE INTO ${SUBMITTED} (row, prompt) VALUES (0, ?)`, [promptId]);
+
+/**
+ * The note that tells the model how the turn before ended, if it was closed:
+ * its answer, and for a turn another invocation left, the calls that did
+ * happen (OpenCode's own history says only that they were interrupted).
+ */
+async function noteOf(ctx: restate.SessionContext, before: { n: number; answer?: string; status?: string }) {
+  if (!before.answer || before.status === 'answered' || before.status === undefined) return '';
+  if (before.status !== 'ended') return `(${before.answer})\n\n`;
+  const rows = await ctx.db.values(`SELECT item FROM ${STEPS} WHERE turn = ? ORDER BY n`, [before.n]);
+  const happened = rows.flatMap(([stored]) => {
+    const item = items.load(String(stored));
+    return item.type === 'results' ? item.results.filter((r) => r.output === RETURNED_UNRECORDED) : [];
+  });
+  const calls = happened.map((r) => `${r.name} (${r.id})`).join(', ');
+  return `(${before.answer}${calls ? ` These calls did happen: ${calls}.` : ''})\n\n`;
+}
+
+/** OpenCode's error types of a request its provider refused for good. */
+const REFUSALS = /^provider\.(no-route|auth|unauthorized|not-found)|auth/i;
+
+/** The error of prompt `id`, which ended unanswered (`failed`): {@link REFUSED} if its provider refused it. */
+function unanswered(id: string, failed: Extract<Outcome, { state: 'failed' }>, model: ModelRef) {
+  const message = `prompt ${id} unanswered: ${failed.reason}`;
+  const refused =
+    refusal(new Error(failed.reason)) ||
+    (failed.type !== undefined && REFUSALS.test(failed.type)) ||
+    failed.status === 401 ||
+    failed.status === 403;
+  if (!refused) return new restate.TerminalError(message);
+  const of = `the model ${model.providerID}/${model.id}: ${CHECK_MODEL}`;
+  return new restate.TerminalError(`${message} (${of})`, { errorCode: REFUSED });
+}
+
+/** What `work` gets: `prompt(text)`, and the OpenCode host for anything else. */
+export interface OpenCodeSession {
+  /** OpenCode, booted on its first use. */
+  host: () => Promise<Host>;
+  /**
+   * Answer `text`, once, with the answer's text: a turn of the object's
+   * conversation (each prompt of an invocation has an id of its own, the
+   * same on every attempt). With `check`, a reply it returns a message for
+   * is asked again within the turn, once. With `reminder`, the model is told
+   * it after the prompt, which the conversation keeps as it was asked.
+   */
+  prompt: (text: string, check?: Check, reminder?: string) => Promise<string>;
+}
+
+/** An agent's options: `chat`, `prompt` and `withOpenCode` take them. */
+export interface Options<O extends z.ZodObject | undefined = z.ZodObject | undefined> {
+  /** The model of the session, as `provider/model-id`: MODEL, or else openai/gpt-6-sol. */
+  model?: string | ModelRef;
+  /** The system prompt: who the agent is, and how it answers. */
+  system?: string;
+  /** The agent's tools, which replace OpenCode's own: `tool()`s, Restate's (`call`, `signal`...), or OpenCode tools of your own. */
+  tools?: (AnyTool | OpenCodeTool)[];
+  /**
+   * A directory of the local machine, made if missing: OpenCode keeps its own
+   * tools (read, write, edit, shell, glob, grep...) there, besides `tools`,
+   * and the session works in it. Or a function of the invocation's context
+   * that gives one: `(ctx) => \`/work/${ctx.key}\``.
+   */
+  workspace?: string | ((ctx: restate.SessionContext) => string | Promise<string>);
+  /** OpenCode plugins, such as the one of the model. */
+  plugins?: Plugin.Plugin[];
+  /**
+   * The answer as data: a zod object, whose JSON the agent replies with
+   * (checked), and `chat` and `prompt` answer with (see output.ts).
+   */
+  output?: O;
+}
+
+/** An OpenCode plugin that adds `system` to the session's system prompt. */
+const systemPlugin = (system: string): Plugin.Plugin => ({
+  id: 'restate-agents.system',
+  async setup(ctx) {
+    const hook = await ctx.session.hook('context', (request) => {
+      request.system.push({ type: 'text', text: system });
+    });
+    return () => hook.dispose();
+  },
+});
+
+/** OpenCode's tools of background work, which v1 leaves out: their recovery is not mapped onto turns. */
+const BACKGROUND = new Set(['subagent', 'question']);
+
+/**
+ * An OpenCode plugin whose tools are `tools`, and, with `builtins` (a
+ * workspace), OpenCode's own but those of background work.
+ */
+function toolsPlugin(
+  tools: OpenCodeTool[],
+  fail: (error: unknown) => Promise<never>,
+  builtins: boolean,
+): Plugin.Plugin {
+  return {
+    id: 'restate-agents.tools',
+    async setup(ctx) {
+      const transform = await ctx.tool.transform((editor) => {
+        for (const t of editor.list()) {
+          if (!builtins || BACKGROUND.has(t.name)) editor.remove(t.id);
+          else if (t.name === 'shell') {
+            // A shell command runs in the tool call, never as a background job.
+            editor.update(t.id, (shell) => {
+              const run = shell.execute;
+              shell.execute = (input, context) =>
+                (input as { background?: unknown } | undefined)?.background === true
+                  ? Promise.resolve({
+                      content: 'Error: background jobs are not available: run the command in the foreground.',
+                    })
+                  : run(input, context);
+            });
+          }
+        }
+        for (const t of tools) {
+          editor.add({
+            name: t.name,
+            description: t.description,
+            input: t.input,
+            // Offered to the model as a tool, not in a code-mode script.
+            options: { codemode: false },
+            execute: async (input, context) => {
+              try {
+                return { content: await t.execute(input, context.id) };
+              } catch (error) {
+                return fail(error);
+              }
+            },
+          });
+        }
+      });
+      return () => transform.dispose();
+    },
+  };
+}
+
+/**
+ * Run `work(opencode)` with OpenCode over the object's database: `model` is
+ * the session's model, `plugins` OpenCode plugins (such as the model's), and
+ * `tools` the agent's tools. `opencode` has `prompt(text)`, and the
+ * OpenCode host for anything else.
+ */
+export const withOpenCode = async <T>(
+  ctx: restate.SessionContext,
+  { plugins = [], model: named, system, tools = [], workspace: where }: Options,
+  work: (opencode: OpenCodeSession) => Promise<T>,
+): Promise<T> => {
+  const model = typeof named === 'object' ? named : modelRef(modelOf(named));
+  const workspace = typeof where === 'function' ? await where(ctx) : where;
+  if (workspace) await mkdir(workspace, { recursive: true });
+  const fence: Fence = { closed: false };
+  const { promise: failure, reject: failed } = Promise.withResolvers<never>();
+  failure.catch(() => {});
+  // A tool's error ends the attempt: nothing more is stored, and the tool
+  // call never returns. A cancellation (a tool's, or the turn's stop)
+  // interrupts OpenCode's turn instead, which then ends.
+  let cancelled: restate.CancelledError | undefined;
+  const fail = (error: unknown) => {
+    if (error instanceof restate.CancelledError) cancelled = error;
+    else {
+      fromTool(ctx, error);
+      fence.closed = true;
+    }
+    failed(error);
+    return new Promise<never>(() => {});
+  };
+  const stop = stopSignalOf(ctx);
+  const onStop = () => {
+    const reason: unknown = stop!.reason;
+    // An attempt that ends stores nothing more: the next goes on with the turn.
+    if (reason instanceof AttemptEnded) fence.closed = true;
+    else cancelled = reason as restate.CancelledError;
+    failed(reason);
+  };
+  stop?.addEventListener('abort', onStop, { once: true });
+
+  // The turn being answered, which the copy writes.
+  let turn: Turn<Item> | undefined;
+  // Once the turn is stopped, nothing more is copied: its close says how it ended.
+  let stopping = false;
+  // The calls that returned, whose ends are published once their results are copied.
+  const returned = new Set<string>();
+  // The copies, one after another.
+  let copying: Promise<unknown> = Promise.resolve();
+  const copy = () => {
+    const next = copying.then(async () => {
+      if (!turn || stopping || fence.closed) return undefined;
+      const resulted = await copyInto(ctx, await host(), turn);
+      if (resulted.some((id) => returned.delete(id))) await toolCallEnded(ctx);
+      return undefined;
+    });
+    copying = next.catch(() => {});
+    return next;
+  };
+  const copied = () => {
+    copy().catch((error: unknown) => void fail(error));
+  };
+
+  /** Publish a tool call's start, once the reply that makes it is copied. */
+  const followPlugin: Plugin.Plugin = {
+    id: 'restate-agents.follow',
+    async setup(plugin) {
+      const before = await plugin.tool.hook('execute.before', async () => {
+        await copy()
+          .then(() => toolCallStarted(ctx))
+          .catch(fail);
+      });
+      const after = await plugin.tool.hook('execute.after', (event) => {
+        returned.add(event.id);
+      });
+      return async () => {
+        await before.dispose();
+        await after.dispose();
+      };
+    },
+  };
+
+  let booted: Promise<Host> | undefined;
+  /** Boot OpenCode, once: for the prompt `promptId` if a prompt boots it. */
+  const boot = (promptId?: string) =>
+    (booted ??= (async () => {
+      const submitted = await submittedOf(ctx);
+      // A claim, if any, is the recorded prompt's: this one's goes on, another's is closed.
+      const mine =
+        submitted !== undefined &&
+        (promptId === undefined ? invocationOf(submitted) === ctx.request.id : submitted === promptId);
+      const restart: Restart = mine ? 'resume' : 'close';
+      const opened = await openOpenCode(database(ctx.db, DATABASE), fence, {
+        plugins: [
+          ...plugins,
+          followPlugin,
+          toolsPlugin(
+            tools.map((t) => (isTool(t) ? native(t, ctx) : t)),
+            fail,
+            workspace !== undefined,
+          ),
+          ...(system ? [systemPlugin(system)] : []),
+        ],
+        config: { default_agent: 'build' },
+        local: workspace !== undefined,
+        restart,
+        committed: copied,
+      });
+      await opened.swept;
+      return opened;
+    })());
+  const host = () => boot();
+
+  let interrupting: Promise<unknown> | undefined;
+  /**
+   * Stop OpenCode's turn, once: what it has of the turn is copied, then
+   * nothing more is (the turn's close says how it ended), and its turn is
+   * interrupted: it ends, and releases its claim.
+   */
+  const stopTurn = () =>
+    (interrupting ??= (async () => {
+      if (!booted) return;
+      await copy().catch(() => {});
+      stopping = true;
+      const opened = await booted;
+      await opened.call(opened.client.session.interrupt({ sessionID: SESSION }));
+    })());
+
+  const prompt = (text: string, check?: Check, reminder?: string) =>
+    answerOnce(
+      ctx,
+      text,
+      items,
+      async (store) => {
+        const current = store.turn;
+        const id = current.id;
+        const again = current.latestAsk() !== current.prompt;
+        const messageId = again ? againIdOf(id) : messageIdOf(id);
+        const opened = await boot(id);
+        // Before the turn closes here (stopped, refused, failed): OpenCode's turn first, then the copy.
+        live.set(current, async (status) => {
+          if (status === 'cancelled') await stopTurn();
+          else await copy();
+        });
+        if (!(await sessionExists(opened))) {
+          const location = workspace ? { location: { directory: workspace as never } } : {};
+          await opened.call(
+            opened.client.session.create({ id: SESSION, model: model as never, agent: 'build' as never, ...location }),
+          );
+        }
+        // From now on, each of OpenCode's commits is copied into the turn.
+        turn = current;
+        if ((await outcome(opened, messageId)).state === 'absent') {
+          // The model is told how the turn before this one ended, if its run did not answer it.
+          const before = store.transcript.at(-2);
+          const note = !again && before ? await noteOf(ctx, before) : '';
+          const said = items.read(current.latestAsk().item).said?.[1] ?? '';
+          const asked = said + (again ? '' : (current.reminder ?? ''));
+          await record(ctx, id);
+          await opened.call(
+            opened.client.session.prompt({
+              sessionID: SESSION,
+              id: messageId as never,
+              text: note + asked,
+              delivery: 'queue',
+              resume: true,
+            }),
+          );
+        }
+        const now = await settled(opened, messageId);
+        // A prompt the cancellation's interrupt ended fails with the cancellation.
+        if (cancelled) throw cancelled;
+        await copy();
+        if (now.state === 'answered') return now.text;
+        if (now.state !== 'failed') throw new Error(`prompt ${id} is not in the session`);
+        throw unanswered(id, now, model);
+      },
+      // OpenCode keeps the model's history: the conversation reads only its latest turns.
+      { check, reminder, ownHistory: true },
+    );
+
+  // `failure`, once it comes. A cancellation interrupts OpenCode's turn
+  // instead: the work ends with it (a prompt closes its turn, cancelled).
+  const interruptOn = async (): Promise<never> => {
+    try {
+      return await failure;
+    } catch (error) {
+      if (!(error instanceof restate.CancelledError)) throw error;
+      await stopTurn();
+      return new Promise<never>(() => {});
+    }
+  };
+
+  try {
+    const done = await Promise.race([interruptOn(), work({ host, prompt })]);
+    if (cancelled) throw cancelled;
+    return done;
+  } finally {
+    stop?.removeEventListener('abort', onStop);
+    if (turn) live.delete(turn);
+    if (booted) {
+      const opened = await booted.catch(() => undefined);
+      await interrupting?.catch(() => {});
+      await opened?.close();
+    }
+  }
+};
+
+/**
+ * Answer `text`, once: a retried attempt resumes the same prompt. Each prompt
+ * of an invocation is a prompt of its own. With `output`, it answers with the
+ * value the agent replies with (see output.ts), not its text.
+ */
+export const prompt = <O extends z.ZodObject | undefined = undefined>(
+  ctx: restate.SessionContext,
+  text: string,
+  options: Options<O> = {},
+): Promise<Answer<O>> =>
+  withChecked(text, options, (t, o, check, reminder) =>
+    withOpenCode(ctx, o, (session) => session.prompt(t, check, reminder)),
+  ) as Promise<Answer<O>>;
+
+/**
+ * A chat handler: each message an invocation, the session in the object's
+ * database, with `options`, or the options a function of the invocation's
+ * context gives (each user's workspace, say). It takes the message as plain
+ * text (`curl -d 'Hi'`) or as a JSON string (`curl --json '"Hi"'`).
+ */
+export const chat = <O extends z.ZodObject | undefined = undefined>(options: Configure<Options<O>> = {}) => {
+  if (typeof options === 'object' && typeof options.model !== 'object') checkModelName('opencode', options.model);
+  return chatHandler(async (ctx, message) => prompt(ctx, message, await configured(options, ctx)));
+};
+
+/**
+ * A view of the conversation as clients read it: a page at a time, or what
+ * is new or changed since a cursor; `view: 'summary'` for each turn's
+ * message and answer. It answers while a message is answered. `clear` also
+ * empties OpenCode's database.
+ */
+export const messages = () => conversationView(items);
+
+/** An agent: a virtual object `name`, one per key, whose `chat` handler is {@link chat}, and `messages` {@link messages}. */
+export const agent = <P extends string, O extends z.ZodObject | undefined = undefined>({
+  name,
+  description,
+  schema,
+  background,
+  window,
+  budget,
+  ...options
+}: Options<O> & Definition<P>) =>
+  sessionObject({
+    name,
+    description,
+    schema,
+    background,
+    window,
+    budget,
+    handlers: { chat: chat(options) },
+    views: { messages: messages() },
+  });

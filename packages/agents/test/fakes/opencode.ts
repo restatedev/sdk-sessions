@@ -4,6 +4,8 @@
 // each reply from the request's prompt and tools; a test sets it, and
 // replaces it with one that throws where the model must not be asked.
 // `script.requests` keeps each request's prompt, title requests apart.
+// `teller` is a reply of the bank's teller, for the agent's tests.
+import { randomUUID } from 'node:crypto';
 import type {
   LanguageModelV3,
   LanguageModelV3CallOptions,
@@ -140,3 +142,64 @@ export const scriptedPlugin: Plugin.Plugin = {
     };
   },
 };
+
+/** How OpenCode asks the model to go on with a turn a restart interrupted. */
+export const CONTINUE = /^The server restarted while you were working/;
+/** A tool result of a call a restart interrupted. */
+const INTERRUPTED = /Tool execution interrupted/;
+
+/**
+ * The teller's reply to the conversation `prompt`: it
+ * transfers and audits on request, and reports the tool's result. When
+ * OpenCode resumes a turn that a crash interrupted, it retries an
+ * interrupted transfer with `retryOf` naming the prompt's first transfer (so
+ * the money moves once), and reports a result that came before the crash.
+ */
+export function teller({ prompt }: Request): Reply {
+  const last = prompt.at(-1)!;
+  if (last.role === 'tool') return { text: `Done: ${textOf(last)}` };
+  // Asked who it is, it repeats its system prompt.
+  if (textOf(last).endsWith('Who are you?')) {
+    return { text: prompt.flatMap((m) => (m.role === 'system' ? [m.content] : [])).join('\n') };
+  }
+  // A fresh tool call id, unique like a model's: a step run again calls its tools with new ids.
+  const id = `call_${randomUUID()}`;
+  let text = textOf(last);
+  let retryOf: string | undefined;
+  if (CONTINUE.test(text)) {
+    // The interrupted prompt, and the last tool result since.
+    const at = prompt.findLastIndex((m) => m.role === 'user' && !CONTINUE.test(textOf(m)));
+    const result = prompt.slice(at).findLast((m) => m.role === 'tool');
+    const part = result?.role === 'tool' ? result.content.findLast((c) => c.type === 'tool-result') : undefined;
+    if (result && part && INTERRUPTED.test(textOf(result))) {
+      const call = prompt
+        .flatMap((m) => (m.role === 'assistant' ? m.content : []))
+        .findLast((c) => c.type === 'tool-call' && c.toolCallId === part.toolCallId);
+      if (call?.type !== 'tool-call') throw new Error(`no tool call ${part.toolCallId}`);
+      const input = { ...(call.input as Record<string, unknown>) };
+      // The prompt's first transfer: the one every retry of it retries.
+      const first = prompt
+        .slice(at)
+        .flatMap((m) => (m.role === 'assistant' ? m.content : []))
+        .find((c) => c.type === 'tool-call' && c.toolName === 'transfer');
+      const original = first?.type === 'tool-call' ? first.toolCallId : call.toolCallId;
+      if (call.toolName !== 'transfer' || 'amount' in input) {
+        if (call.toolName === 'transfer') input.retryOf ??= original;
+        return { call: { id, name: call.toolName, input } };
+      }
+      // OpenCode stores a tool call when its input starts, and its whole input once the call runs: a crash
+      // between them leaves a call that may have run. The prompt is answered again, as a retry of it.
+      retryOf = original;
+    } else if (result) {
+      return { text: `Done: ${textOf(result)}` };
+    }
+    text = textOf(prompt[at]!);
+  }
+  const move = /move (\d+) from (\d+) to (\d+)/i.exec(text);
+  if (move) {
+    const [amount, from, to] = move.slice(1).map(Number);
+    return { text: 'On it.', call: { id, name: 'transfer', input: { from, to, amount, ...(retryOf && { retryOf }) } } };
+  }
+  if (/audit/i.test(text)) return { call: { id, name: 'audit', input: {} } };
+  return { text: 'Ask me to "move 5 from 1 to 2", or to "audit" the books.' };
+}
