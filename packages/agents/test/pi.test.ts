@@ -22,6 +22,7 @@ import {
   type Entry,
   handlerOf,
   sqlAttempt,
+  steeredAtAStep,
 } from './support.ts';
 
 /** How many more requests the provider fails, unavailable, before it answers again. */
@@ -52,6 +53,7 @@ vi.mock('@earendil-works/pi-ai/providers/all', () => ({
       }
       if (textOf(last.content) === 'Break it') return callTools([['boom', {}]]);
       if (textOf(last.content) === 'Look it up') return callTools([['lookup', {}]]);
+      if (textOf(last.content) === 'audit the books') return callTools([['audit', {}]]);
       if (textOf(last.content) === 'Please move 5 from 1 to 2') {
         return callTools([['transfer', { from: 1, to: 2, amount: 5 }]], 'On it.');
       }
@@ -401,5 +403,41 @@ describe('subagent', () => {
     // One idempotency key per tool call, made from the invocation id.
     expect(new Set(alice.calls.map((c) => c.idempotencyKey)).size).toBe(2);
     expect(alice.calls.every((c) => c.idempotencyKey?.startsWith('inv1:'))).toBe(true);
+  });
+});
+
+describe('pi, steered', () => {
+  /** The steered message, placed by pi as the transfer's round ends, after its result: the model audits. */
+  const SAID_STEERED = [
+    ['user', 'Please move 5 from 1 to 2'],
+    ['assistant', 'On it. + transfer'],
+    ['user', 'audit the books'],
+    ['assistant', 'audit'],
+    ['assistant', 'moved 5 from account 1 to account 2\nthe books are fine'],
+  ];
+
+  it('submits a message steered while a tool runs to its inbox as the round ends: the next request has it', async () => {
+    const { answer, said: shown, audits, taken } = await steeredAtAStep((tools) => pi.chat({ tools }), pi.messages());
+    expect(shown).toEqual(SAID_STEERED);
+    expect(answer).toBe('moved 5 from account 1 to account 2\nthe books are fine');
+    expect(audits).toBe(1);
+    expect(taken).toEqual(['steer-1']);
+  });
+
+  it('retries a turn that failed after it placed the message with the message, once', async () => {
+    const {
+      answer,
+      failed,
+      said: shown,
+      audits,
+      taken,
+    } = await steeredAtAStep((tools) => pi.chat({ tools }), pi.messages(), {
+      failAudit: true,
+    });
+    expect(failed).toBeInstanceOf(Error);
+    expect(shown).toEqual(SAID_STEERED);
+    expect(answer).toBe('moved 5 from account 1 to account 2\nthe books are fine');
+    expect(audits).toBe(2);
+    expect(taken).toEqual(['steer-1']);
   });
 });

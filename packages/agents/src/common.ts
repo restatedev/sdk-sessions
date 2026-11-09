@@ -294,14 +294,27 @@ const signalsOfAgent = (ctx: restate.SessionContext) => ctx.rpc(signals, signals
 export class Inbox {
   revision = -1;
   messages: Steer[] = [];
+  readonly #listeners = new Set<() => void>();
 
-  /** Keep what `publish` answered, if it is newer than what is kept. */
+  /** Keep what `publish` answered, if it is newer than what is kept, and tell the listeners if it lists messages. */
   saw(published: Published | undefined) {
     if (typeof published !== 'object' || published === null) return;
     const revision = published.revision ?? -1;
     if (revision <= this.revision) return;
     this.revision = revision;
     this.messages = [...(published.steering ?? [])];
+    if (this.messages.length > 0) for (const listener of this.#listeners) listener();
+  }
+
+  /**
+   * Call `listener` after each publish that lists messages, until the
+   * returned function is called: for a framework that takes steered
+   * messages through an inbox of its own (pi's, DeepSeek's), handed to it as
+   * they come.
+   */
+  listen(listener: () => void): () => void {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
   }
 }
 

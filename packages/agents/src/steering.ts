@@ -20,6 +20,7 @@
 // nothing; one it did not take (it came after the turn's last step, say) is
 // answered as a turn of its own. So each message is answered once.
 import type * as restate from '@restatedev/sessions';
+import type { Transaction } from '@restatedev/sessions';
 import { inboxOf, stopSignalOf } from './common.ts';
 import type { Conversation } from './conversation.ts';
 import { signals, signalsOf } from './signals.ts';
@@ -51,11 +52,16 @@ export async function takeSteers<I>(ctx: restate.SessionContext, conversation: C
   const going = () => stop?.aborted !== true;
   const turn = conversation.running();
   if (!going() || !turn || turn.openCalls().length > 0) return [];
-  const companion = signalsOf(ctx);
-  return turn.steer(
-    inbox.messages,
-    // With the transaction that stores them: so they are marked taken once stored, and once.
-    (tx, ids) => tx.send(signals, companion, { idempotencyKey: `taken:${ids[0]}` }).taken(ids),
-    going,
-  );
+  return turn.steer(inbox.messages, (tx, ids) => tookSteers(ctx, tx, ids), going);
+}
+
+/**
+ * Tell the companion that the turn of `ctx` took the steered messages `ids`,
+ * with `tx`, the transaction that stores them: so they are marked taken once
+ * stored, and once. A framework that places steered messages itself (pi,
+ * DeepSeek) calls it as it copies them into the turn.
+ */
+export function tookSteers(ctx: restate.SessionContext, tx: Transaction, ids: string[]) {
+  if (ids.length === 0) return;
+  tx.send(signals, signalsOf(ctx), { idempotencyKey: `taken:${ids[0]}` }).taken(ids);
 }

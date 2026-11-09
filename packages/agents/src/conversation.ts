@@ -818,28 +818,35 @@ export class Turn<I> {
    * Copy a framework's own messages into the turn, in `tx`, a transaction of
    * the framework's own store (its write of these messages): the rows commit
    * with it, so the copy is made once, however often the attempt crashes.
-   * Each of `items` is a reply of the model (`reply`, from `agent`) or
-   * another item (a tool's result). For a framework that keeps its own
-   * history. It cannot wait for the turn's other writes inside `tx`, which
+   * Each of `items` is a reply of the model (`reply`, from `agent`), a
+   * message steered to the turn that its framework placed (`steer`, its id:
+   * stored once, in the steered messages' table too), or another item (a
+   * tool's result). For a framework that keeps its own history. It cannot wait for the turn's other writes inside `tx`, which
    * holds the database: it takes its positions, and adds its entries, at
    * once, so that a close after it sees them and writes after them. A turn
    * being closed (or closed) takes no copy: its close says how it ended.
    * Whether it copied.
    */
-  async copyIn(tx: DatabaseWriter, items: { item: I; reply?: boolean; agent?: string }[]): Promise<boolean> {
+  async copyIn(
+    tx: DatabaseWriter,
+    items: { item: I; reply?: boolean; agent?: string; steer?: string }[],
+  ): Promise<boolean> {
     if (!this.writable) return false;
     const ledger = this.#ledger;
     const n = ledger.next;
     const seq = ledger.seq;
-    const added: Entry<I>[] = items.map(({ item, reply, agent }, i) => ({
+    const added: Entry<I>[] = items.map(({ item, reply, agent, steer }, i) => ({
       n: n + i,
       item,
       ...(reply ? { reply: n + i, agent } : {}),
+      ...(steer === undefined ? {} : { steer }),
     }));
     // A rolled back transaction fails its attempt, whose state goes with it.
     ledger.next = n + added.length;
     ledger.seq += added.length;
     this.#add(added);
+    const steered = added.filter((e) => e.steer !== undefined);
+    if (steered.length > 0) (this.prompt.steers ??= []).push(...steered);
     for (const [i, e] of added.entries()) {
       await tx.execute(INSERT_STEP, [
         e.n,
@@ -849,6 +856,7 @@ export class Turn<I> {
         e.reply ?? null,
         e.agent ?? null,
       ]);
+      if (e.steer !== undefined) await tx.execute(INSERT_STEERED, [e.n, this.n, e.steer]);
     }
     return true;
   }
