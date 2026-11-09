@@ -33,7 +33,8 @@ to bring the bug back, with the tests that must fail. The bugs are:
   (the PRs were squashed: `84cefaf` and `1371e59` list them);
 - **the fixes of v0.3.0's bugs that steps 1 and 2 of [the plan](plan.md)
   port** from the Python SDK (the call records; LangGraph's checkpointer);
-- **the fixes since**: `lastOf` from the ends of the tables (`2bd66aa`);
+- **the fixes since**: `lastOf` from the ends of the tables (`2bd66aa`,
+  [Access patterns](access-patterns.md));
 - **durability mutants**, of no fix: the Python SDK's that apply here
   (a call made again after a crash, a call record kept or forgotten at the
   wrong time, a stored reply asked for again).
