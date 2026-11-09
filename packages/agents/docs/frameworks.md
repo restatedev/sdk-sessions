@@ -387,8 +387,9 @@ The Anthropic SDK's tool runner (`@anthropic-ai/sdk` 0.133.0).
   model's tool call ids, and a full `request/header` logged by each loop
   instance (every invocation logs the tools' schemas again). None breaks a
   resume: the harness never replays.
-- Approvals exist (`dsh-user-approval`: `approval/asked|decided`), not
-  mounted; nor are subagents, forks or background jobs.
+- Approvals (`dsh-user-approval`: `approval/asked|decided`) are mounted
+  with the `approval` option ([Approvals](#approvals)); subagents, forks
+  and background jobs are not.
 
 ### Target: framework-owned history
 
@@ -431,6 +432,62 @@ The Anthropic SDK's tool runner (`@anthropic-ai/sdk` 0.133.0).
   holds the summary in place of the oldest messages, the views every
   message, and a crash at any state request of the turn that condenses is
   answered once.
+
+### Approvals
+
+**The harness.** A `tools/pre-execute` policy decides a call: `allow`,
+`deny`, `cancel` or `ask`. On `ask`, the tool runtime asks `ctx.approval`
+(`dsh-user-approval`'s `ApprovalService`) for a decision, which logs
+`approval/asked`, puts the question to the `approval/request` waterfall (the
+answerers), and logs `approval/decided`: `allowed-once` runs the call; a
+`rejected`, `cancelled` or `unavailable` (no answerer) denies it, with the
+harness's own reason (`the user rejected tool "x"`). The request names the
+tool and the call id, not the arguments; the call's `tool/call` event is
+appended before the policy runs, and stored by the checkpoint before the
+tool body, after the decision. Each call of a parallel group is decided
+before the next one starts.
+
+**Before.** Nothing asked: no policy of this composition answers `ask`, and
+without `ApprovalService` an `ask` is denied (`requires approval (not yet
+supported)`). A harness tool that asks itself (the sandboxed bash tool, a
+`run_code` escalation) is not mounted.
+
+**Now.** The `approval` option (tool names, or a function of a call)
+mounts `ApprovalService`, and the agent's scope gets a `tools/pre-execute`
+policy that answers `ask` for the calls it names (once the other policies
+allow them), and an `approval/request` answerer: a wait for the signal
+`approval`, `waitFor(ctx, callId, 'approval', { tool, args }, { approval:
+true, rejoin: true })`. Its value decides (`true`, `{ approved: true }`, or
+a text such as `approved` or `yes` allows; anything else rejects, as the
+Python SDK's `approval_of`, though the denial's reason cannot reach the
+model). Before it waits, it publishes (`toolCallStarted`), which forgets the
+calls whose results are stored. An error of the wait fails the attempt,
+and its ask never settles, so the harness stores no decision.
+
+- **The wait rejoins.** The session is not flushed before the wait: a crash
+  or a suspension while it waits leaves the log at the model request, and
+  the resume has the model asked again (`CONTINUE`). Stored first, the call
+  (its `tool/call` already appended) would get a result saying its outcome
+  is unknown, which tells the model not to retry blindly. The model makes
+  the call again under a new id: with the same tool and input it joins the
+  earlier attempt's wait, so the person is asked once. A call with other
+  arguments (a transfer retried with `retryOf`) asks anew. A rejected
+  call's record stays until the invocation ends (its result is the
+  harness's error, which `Turn.stored` does not count), so a later attempt
+  of the same invocation that makes the same call again is rejected again,
+  without asking.
+- **An approval is not the call** (`approval: true`): a turn stopped while
+  an approved tool runs closes its call as cancelled, not as done.
+- **The model's input** gets the approval service's runtime context ("Approval
+  policy: ask. …"), after the prompt, on the first request: only with
+  `approval`.
+- **Tests** (`test/deepseek.test.ts`, "the DeepSeek Harness agent's
+  approvals"): approved (the tool runs after the wait, not before), denied
+  (never runs; the model gets the denial), the values that decide, a crash
+  while it waits (one wait, joined; the tool runs once), a crash at any
+  state request (one wait for each call made), and a turn cancelled while it
+  waits, or while the approved tool runs. Without `rejoin` the two crash
+  tests fail; without `approval: true` the last one does.
 
 ## pi
 
