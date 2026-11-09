@@ -320,6 +320,26 @@ describe('a steered message', () => {
     ]);
   });
 
+  it('is taken by one turn only: listed to a later turn again, it is taken no more', async () => {
+    let turns = 0;
+    const took: (string | undefined)[][] = [];
+    const a = asker(async (ctx, conversation) => {
+      turns += 1;
+      await toolRound(ctx, conversation, `c${turns}`);
+      // The companion lists it to the second turn too (its close forgot it late, say).
+      if (turns === 2) a.following.steering.push({ id: 's1', text: 'use Celsius' });
+      await toolCallEnded(ctx);
+      took.push(texts(await takeSteers(ctx, conversation)));
+      await conversation.turn.appendReply([{ role: 'assistant', text: `answer ${turns}` }]);
+      return `answer ${turns}`;
+    });
+    a.following.steering.push({ id: 's1', text: 'use Celsius' });
+    await a.ask('the weather?');
+    expect(await a.ask('and tomorrow?')).toBe('answer 2');
+    expect(took).toEqual([['use Celsius'], []]);
+    expect(await a.rows(`SELECT id, turn FROM ${STEERED}`)).toEqual([['s1', 0]]);
+  });
+
   it("is taken once of the messages given with the same id, and the companion is told each id's take once", async () => {
     const a = asker(async (ctx, conversation) => {
       await toolRound(ctx, conversation);

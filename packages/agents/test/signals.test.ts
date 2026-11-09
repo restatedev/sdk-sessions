@@ -79,7 +79,7 @@ function companion(ends: Record<string, Promise<unknown>> = {}, { watched = fals
   const handlers = (signals as unknown as { object: Record<string, (ctx: unknown, input?: unknown) => unknown> })
     .object;
   const run = <T>(name: string, input?: unknown) => handlers[name]!(ctx, input) as Promise<T>;
-  return { run, own, rejected, sent };
+  return { run, own, rejected, sent, state };
 }
 
 const wait = (id: string, awakeable: string) => ({ id, name: 'approval', since: '', awakeable });
@@ -272,7 +272,8 @@ describe("an agent's companion, steering", () => {
     await c.run('taken', ['s1']);
     await c.run('steer', { id: 's2', text: 'two' });
     await c.run('close', A);
-    // The next turn finds none of them: s2 was queued as a turn of its own as it was sent.
+    // Nothing is kept of them: s2 was queued as a turn of its own as it was sent.
+    expect(c.state.has('inbox')).toBe(false);
     await c.run('start', { ...turn(B), steers: true });
     expect((await published(c)).steering).toBeUndefined();
     expect(await steering(c)).toEqual([]);
@@ -280,9 +281,10 @@ describe("an agent's companion, steering", () => {
     await c.run('steer', { id: 's3', text: 'three' });
     await c.run('start', { ...turn(A + 'x'), steers: true });
     expect(await steering(c)).toEqual([]);
+    expect(c.state.has('inbox')).toBe(false);
   });
 
-  it('closes a turn with only messages it took publishing the change', async () => {
+  it("forgets only the closed turn's messages", async () => {
     const c = companion();
     await c.run('start', { ...turn(A), steers: true });
     await c.run('steer', { id: 's1', text: 'one' });

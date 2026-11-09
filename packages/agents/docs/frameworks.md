@@ -43,6 +43,31 @@ What the core gives an integration, once ported:
   framework's own durable wait.
 - **The turn's signal** (`stopSignalOf`), refusals (`refusalOf`, `fromTool`),
   and publishing (`toolCallStarted`, `toolCallEnded`), as today.
+- **Steering**: `takeSteers(ctx, conversation)` at each step, or, for a
+  framework that keeps its own history, `inboxOf(ctx).listen` and
+  `tookSteers` as it copies the messages its own inbox placed
+  ([Steering](#steering)); `chatHandler(answer, { steers: true })` says the
+  framework takes them.
+
+### Steering
+
+A message steered to a turn ([Steering a turn](turns.md#steering-a-turn))
+joins it at a step: after a reply's tool results, before the next model
+request. Each integration puts the messages in that request, in place, and
+stores them once in the turn:
+
+|                                | Where it takes them                                                                             | How                                                                                                                                                                                                                                                                                                                                                                                        |
+| ------------------------------ | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Claude                         | before the turn's first request, and after each round's results (`takeSteers`)                  | the runner leaves the history to its caller once the messages are taken: its next request is `history()`, which has them after the results. Not after a paused reply, which goes back as the last message                                                                                                                                                                                  |
+| LangGraph, built-in agent      | in the model node, before each request (`takeSteers`)                                           | they go in the request and stay in the run's state, with the id `steer:<id>` (`items.steered`)                                                                                                                                                                                                                                                                                             |
+| LangGraph, a graph of your own | none: each is a turn of its own                                                                 | the graph keeps its own state, which the turn cannot add to in place                                                                                                                                                                                                                                                                                                                       |
+| pi                             | as a round of tool calls is done (pi-durable's `afterTools` hook)                               | each waiting message is submitted to pi's inbox (`whenBusy: 'steer'`, keyed `steer:<id>`, an entry of kind `restate.steer`), which pi places after the round's results (`steeringMode: 'all'`); the copy of pi's commit into the turn stores it, with `taken`                                                                                                                              |
+| DeepSeek                       | at the step after it hears of it: a publish as a tool call starts, or once its result is stored | each waiting message goes to the harness's step inbox (`agent.steer`, a user message `steer:<id>`), which the harness places at its next step; the copy of its flush into the turn stores it, with `taken`. A message sent while a tool runs is heard of as its result is stored, which is as the next model request goes out: it joins at the step after that request's, in the same turn |
+
+A turn hears of the messages only at a publish (a tool call's start and
+end), so a message sent while the model writes is taken at the step after
+the next tool call, or, with none, answered as a turn of its own. A
+background agent takes none.
 
 ### At a glance, the target
 
