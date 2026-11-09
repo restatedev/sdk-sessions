@@ -507,9 +507,13 @@ The Anthropic SDK's tool runner (`@anthropic-ai/sdk` 0.133.0).
   conversation's entries after the turn's user entry (its submission's
   `entry`) and after the last copied: `pi.assistant` and `pi.tool-result`,
   each item keeping its entry id.
-- **Not done**: a provider's outage still ends the turn (pi settles the
-  submission `unanswered`, and a retry finds it settled): retrying it would
-  take a new request id per attempt.
+- **A provider's outage** no longer ends the turn: pi-durable retried a
+  failed request 3 times, then settled the submission `unanswered` for good.
+  A new request id per attempt would have asked again, but with the prompt
+  twice in pi's context. pi retries without limit instead (`retry`'s
+  `maxRetries`, by default `Infinity`), each retry committed with when it is
+  due, 2 s and then twice as long each time, a minute apart at most; a
+  refusal is never retried, and ends the turn.
 
 ## OpenCode
 

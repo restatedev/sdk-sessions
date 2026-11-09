@@ -7,7 +7,7 @@ import * as pi from '@restatedev/agents/pi';
 import { Type } from '@earendil-works/pi-ai';
 import { defineTool } from '@earendil-works/pi-durable';
 import { describe, expect, it, vi } from 'vitest';
-import { callTools, fakeProvider, say, textOf } from './fakes/pi.ts';
+import { callTools, fakeProvider, say, textOf, unavailable } from './fakes/pi.ts';
 import { AttemptEnded } from '../src/common.ts';
 import {
   afterCancel,
@@ -23,11 +23,18 @@ import {
   sqlAttempt,
 } from './support.ts';
 
+/** How many more requests the provider fails, unavailable, before it answers again. */
+const outage = vi.hoisted(() => ({ left: 0 }));
+
 // It repeats what it was told so far; asked to delegate, it hands out two
 // tasks, and then reports their results.
 vi.mock('@earendil-works/pi-ai/providers/all', () => ({
   builtinProviders: () => [
     fakeProvider('openai', 'gpt-6-sol', ({ messages }) => {
+      if (outage.left > 0) {
+        outage.left--;
+        return unavailable('503 Service Unavailable');
+      }
       const last = messages.at(-1)!;
       if (last.role === 'toolResult') {
         return say(
@@ -174,6 +181,15 @@ const twice = async (ctx: restate.SessionContext) => [
 ];
 
 describe('pi.chat', () => {
+  it("answers through a provider's outage, however many times its requests fail", async () => {
+    // More failures than pi-durable's own 3 retries, which ended the turn unanswered.
+    outage.left = 6;
+    const alice = object('alice');
+    const chat = pi.chat({ retry: { baseDelayMs: 1, maxAgentDelayMs: 1 } });
+    const answer = await alice.invoke(chat, 'inv1', 'Hi, I am Alice');
+    expect([outage.left, answer]).toEqual([0, 'Hi, I am Alice']);
+  });
+
   it('ends a turn cancelled at any moment as one cancelled while a tool waits', async () => {
     const now = await cancelledWhileWorking((tools) => pi.chat({ tools }), pi.messages());
     const waiting = await afterCancel(pi.chat({ tools: [cancelledTransfer] }), pi.messages());

@@ -52,6 +52,7 @@ import {
   Harness,
   section,
   type Conversation,
+  type ConversationRetryPolicy,
   type ConversationStreamOptions,
   type ToolRegistration,
 } from '@earendil-works/pi-durable';
@@ -220,6 +221,15 @@ export interface Options<O extends z.ZodObject | undefined = z.ZodObject | undef
   /** OpenAI's service tier for each request: `fast` for its fast mode (priced higher), `flex`, and so on. */
   serviceTier?: ServiceTier;
   /**
+   * How pi asks the model again after a request failed for a reason that
+   * passes (an overloaded or unreachable provider, a rate limit): by
+   * default without limit, 2 s after the first failure, then twice as long
+   * each time, a minute apart at most. With `maxRetries`, a failure after
+   * that many retries ends the turn. A request refused for good (a wrong API
+   * key, an unknown model) is never asked again.
+   */
+  retry?: Partial<ConversationRetryPolicy>;
+  /**
    * The answer as data: a zod object, whose JSON the agent replies with
    * (checked), and `chat` and `prompt` answer with (see output.ts).
    */
@@ -308,7 +318,7 @@ function unanswered(id: string, why: string | null | undefined, detail: unknown,
  */
 export const withPi = async <T>(
   ctx: restate.SessionContext,
-  { model: named, models, system, tools = [], workspace, serviceTier }: Options,
+  { model: named, models, system, tools = [], workspace, serviceTier, retry }: Options,
   work: (pi: Pi) => Promise<T>,
 ): Promise<T> => {
   const model = modelOf(named);
@@ -383,6 +393,9 @@ export const withPi = async <T>(
     // A task that crashes is run again however often Restate retries the attempt (its retry policy decides):
     // pi-durable would park it after 5 crashes in a row, and the prompt would never be answered.
     restartLimit: Infinity,
+    // A provider's outage never ends the turn: pi asks again until it answers (pi-durable would give up after 3
+    // retries, ending the turn unanswered for good). Each retry is committed: a retried attempt waits as it would.
+    retry: { maxRetries: Infinity, ...retry },
     // pi-durable hands its stream settings to pi-ai's requests as they are: serviceTier is pi-ai's.
     ...(serviceTier ? { stream: { serviceTier } as ConversationStreamOptions } : {}),
   };
