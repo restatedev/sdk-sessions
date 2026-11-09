@@ -1,12 +1,13 @@
 /**
  * The agents that do the delegated work, and how the boss's tools reach them.
  *
- *   worker   (pi + GPT-6 Luna)       the cheap tier, in the workspace
- *   senior   (pi + GPT-6.1 Sol)      one rung up, only with the user's approval
- *   reviewer (pi + GPT-6 Sol)        a second opinion on a diff, read-only
+ *   worker   (pi + Claude Sonnet 5.5)   the cheap tier, in the workspace
+ *   senior   (pi + Claude Sonnet 5.5)   one rung up, only with the user's approval
+ *   reviewer (pi + Claude Sonnet 5.5)   a second opinion on a diff, read-only
  *
- * All OpenAI (OPENAI_API_KEY), in tiers: Astra for the boss, Sol for the medium tier, Luna for light
- * work. Each model can be changed with its *_MODEL variable.
+ * All Anthropic (ANTHROPIC_API_KEY): Fable 5.2 for the boss, Sonnet 5.5 for every agent it delegates
+ * to. Each model can be changed with its *_MODEL variable: a stronger SENIOR_MODEL (Opus 5.5) makes
+ * the senior a real rung up.
  *
  * Each is a session object of its own, keyed `<boss key>.<task name>`: a correction goes back to the
  * same agent, which still has its history, and tasks with different names run at once.
@@ -15,6 +16,7 @@ import { join } from 'node:path';
 import { signal, subagent, type Tool } from '@restatedev/agents';
 import * as pi from '@restatedev/agents/pi';
 import { z } from 'zod';
+import { REVIEWER_MODEL, SENIOR_MODEL, WORKER_MODEL } from './models.ts';
 import type { Tier } from './policy.ts';
 import * as prompts from './prompts.ts';
 
@@ -23,11 +25,11 @@ import * as prompts from './prompts.ts';
 // pi creates it if it is missing.
 export const workspace = process.env.WORKSPACE ?? join(import.meta.dirname, 'scratch');
 
-// The cheap tier: about a twentieth of Sol's price per token.
+// The cheap tier.
 export const worker = pi.agent({
   name: 'worker',
   description: 'The cheap tier: one bounded task with a mechanical check',
-  model: process.env.WORKER_MODEL ?? 'openai/gpt-6-luna',
+  model: WORKER_MODEL,
   workspace,
   background: true,
   system: prompts.WORKER,
@@ -36,19 +38,19 @@ export const worker = pi.agent({
 export const senior = pi.agent({
   name: 'senior',
   description: 'One rung up: a task the worker could not finish',
-  model: process.env.SENIOR_MODEL ?? 'openai/gpt-6.1-sol',
+  model: SENIOR_MODEL,
   workspace,
   background: true,
   system: prompts.SENIOR,
 });
 
-// Stronger than the worker it reviews, and another model than the senior's. A reviewer of another
-// family (another provider's model) catches more of a model's blind spots: with OPENAI_API_KEY alone,
-// this is the next best. It has no workspace: it sees the diff the boss sends, and can change nothing.
+// A reviewer of another family (another provider's model, through REVIEWER_MODEL) catches more of
+// a model's blind spots than one on the worker's own model. It has no workspace: it sees the diff
+// the boss sends, and can change nothing.
 export const reviewer = pi.agent({
   name: 'reviewer',
   description: 'A second opinion on a diff',
-  model: process.env.REVIEWER_MODEL ?? 'openai/gpt-6-sol',
+  model: REVIEWER_MODEL,
   background: true,
   system: prompts.REVIEWER,
 });

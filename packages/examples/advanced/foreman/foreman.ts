@@ -2,10 +2,10 @@
  * Chat with a big model that hands work to smaller ones and checks what comes back. The boss runs a
  * cascade: each task starts on the cheapest model that can do it, and moves up only on evidence.
  *
- *   you ──chat──▶ boss (GPT-6 Astra)       plans, briefs, checks, decides
- *                  ├─ worker   (GPT-6 Luna)        the cheap tier, in the workspace
- *                  ├─ senior   (GPT-6.1 Sol)       one rung up, only with your approval
- *                  └─ reviewer (GPT-6 Sol)         a second opinion on a diff, read-only
+ *   you ──chat──▶ boss (Claude Fable 5.2)  plans, briefs, checks, decides
+ *                  ├─ worker   (Claude Sonnet 5.5)  the cheap tier, in the workspace
+ *                  ├─ senior   (Claude Sonnet 5.5)  one rung up, only with your approval
+ *                  └─ reviewer (Claude Sonnet 5.5)  a second opinion on a diff, read-only
  *
  * The boss gets one tool per move of the cascade (tools/), and each asks policy.ts first:
  *
@@ -19,11 +19,12 @@
  * database next to its conversation. Every agent is a session object, so a crash, or a day spent
  * waiting for your approval, loses nothing.
  *
- *   OPENAI_API_KEY=… WORKSPACE=… node advanced/foreman/foreman.ts      # see README.md
+ *   ANTHROPIC_API_KEY=… WORKSPACE=… node advanced/foreman/foreman.ts      # see README.md
  */
 import { serve, sessionObject } from '@restatedev/agents';
 import * as pi from '@restatedev/agents/pi';
 import { reviewer, senior, worker } from './agents.ts';
+import { BOSS_MODEL, modelsOf } from './models.ts';
 import { BOSS } from './prompts.ts';
 import { tools } from './tools/index.ts';
 import { ledgerView, SCHEMA, tasksView } from './tools/ledger.ts';
@@ -32,7 +33,7 @@ const boss = sessionObject({
   name: 'boss',
   schema: SCHEMA,
   handlers: {
-    chat: pi.chat({ model: process.env.BOSS_MODEL ?? 'openai/gpt-6-astra', system: BOSS, tools }),
+    chat: pi.chat({ model: BOSS_MODEL, models: modelsOf(BOSS_MODEL), system: BOSS, tools }),
   },
   views: {
     messages: pi.messages(),
