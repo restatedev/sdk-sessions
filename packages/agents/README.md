@@ -100,11 +100,12 @@ npm install @restatedev/agents @earendil-works/pi-ai @deepseek-ai/cordis \
   @deepseek-ai/{dsh-commands,dsh-compaction,dsh-compaction-basic,dsh-compaction-tool-result-pruner,dsh-token-meter}@0.2.1-rc.2   # DeepSeek
 ```
 
-OpenCode was a framework of this package until its agents moved onto the
-conversation of turns: a turn whose invocation is gone (killed) must be
-closed, never finished, and OpenCode resumes a turn it claimed whenever it
-boots, with no public way to end it first (see
-[docs/frameworks.md](docs/frameworks.md#opencode)). A subpath whose packages are
+OpenCode (`@restatedev/agents/opencode`: `@opencode/{core,sdk,server,plugin}`
+2.2.6 and `effect` 4.1.0, on Node 24) is back on the conversation of turns,
+not yet documented here: a turn whose invocation is gone (killed) is closed,
+never finished, through OpenCode's resume budget (see
+[docs/opencode.md](docs/opencode.md), which also lists what is left: steering,
+its `retry` hook, permissions, the crash test). A subpath whose packages are
 missing fails as it is imported, naming the first it lacks. The packages
 are not published yet:
 [`pnpm --filter e2e packaging`](../e2e/packaging.ts) installs them from

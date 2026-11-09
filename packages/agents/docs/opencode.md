@@ -7,7 +7,9 @@ the alternatives weighed, and the steps. The model is in
 OpenCode left, in [The frameworks](frameworks.md#opencode) (D6 of
 [the plan](plan.md#decisions)).
 
-**Status: proposed.** Research of 2026-11-09: OpenCode's published packages
+**Status: steps 0 to 3 implemented** ([`src/opencode/`](../src/opencode),
+[`test/opencode.test.ts`](../test/opencode.test.ts), on Node 24); steps 4 to 6
+are left ([As built](#as-built)). Research of 2026-11-09: OpenCode's published packages
 (`@opencode/core`, `sdk`, `server`, `plugin`, `schema`, `util`) at 2.0.32 and
 2.2.6, the latest release (2026-11-06), read in their sources, nothing run;
 and OpenCode's docs, OpenAPI spec, changelog and issues. Step 0, the
@@ -92,6 +94,32 @@ needs: the test skips on an older Node).
   the node each replaces (through a private symbol: no public way), not by
   position; `SqlClient.make` takes a `driver`; the workerd profile installs
   no packages, so the tests' model provider is a local file.
+
+## As built
+
+Steps 1 to 3, where they differ from the design below:
+
+- **The hook is on `Items`**, not an option of `answerOnce` and a second
+  hook beside the view: `Items.settleOwn(ctx, turn, status)`, which
+  `answerOnce` calls before every close (ended, cancelled, refused, failed)
+  and `settle` before its own, since both already have the view's items; and
+  `Items.erase(ctx)`, which `clear` calls for OpenCode's database. A
+  framework without them behaves as before.
+- **An assistant message is copied once it is streamed** and none of its
+  calls still streams its input, not once its step ended: while its tools
+  run it has no completed time, and a reply is stored before its tools run.
+- **A stop copies first, then interrupts**, and copies nothing after: the
+  store's result of a cut-off call is the cancel note, not OpenCode's
+  "Tool execution interrupted".
+- **`results(calls)`** is a results item of the integration's own, not an
+  assistant-shaped one.
+- **Background shell** is the `background` option of OpenCode's `shell`,
+  which is refused; the subagent and question tools are removed.
+- **Left** (steps 4 to 6): steering (`delivery: 'steer'`; a steered message
+  is a turn of its own for now), OpenCode's `retry` hook (its own retries
+  apply), permissions through Restate, a change of `model` on an existing
+  session, `packages/e2e`'s crash test and packaging, the README and the
+  examples.
 
 ## What OpenCode does, in brief
 
