@@ -152,7 +152,10 @@ export interface Parsed {
 export interface Items<I> {
   /** `item` as it is stored: its JSON, most often. */
   dump(item: I): string;
-  /** The item `dump` stored as `stored`. */
+  /**
+   * The item `dump` stored as `stored`. It throws for a row it cannot read
+   * (another framework's), which {@link loadItem} makes a terminal error.
+   */
   load(stored: string): I;
   /** The item of a prompt (the user's message). */
   prompt(text: string): I;
@@ -792,6 +795,23 @@ export class Turn<I> {
 /** How many turns of the transcript a load reads at a time, from the latest back. */
 export const PAGE = 64;
 
+/**
+ * The item stored as `stored`, or a terminal error: a retry would read the
+ * same row again. A row that `items` cannot read was stored by an agent of
+ * another framework under the same name, or by another version of this one.
+ */
+export function loadItem<I>(items: Items<I>, stored: string): I {
+  try {
+    return items.load(stored);
+  } catch (error) {
+    const reason = error instanceof Error ? `${error.name}: ${error.message}` : JSON.stringify(error);
+    throw new restate.TerminalError(
+      'This conversation holds a message that this agent cannot read (one stored by an agent of another ' +
+        `framework under the same name, or by another version of this one?): ${reason}`,
+    );
+  }
+}
+
 /** The columns of the transcript a load reads. */
 const TRANSCRIPT = `SELECT n, prompt, item, status, answer, agent, carried, answered_at, answered_seq, asked_at FROM ${TURNS}`;
 
@@ -801,7 +821,7 @@ function promptEntry<I>(items: Items<I>, row: unknown[]): Entry<I> {
   const at = Number(n);
   return {
     n: at,
-    item: items.load(String(item)),
+    item: loadItem(items, String(item)),
     prompt: String(prompt),
     answer: str(answer),
     agent: str(agent),
@@ -865,7 +885,7 @@ async function stepsAfter<I>(db: DatabaseReader, items: Items<I>, after: number)
   const rows = await db.values(`SELECT n, item, reply, agent FROM ${STEPS} WHERE n > ? ORDER BY n`, [after]);
   return rows.map(([n, item, reply, agent]) => ({
     n: Number(n),
-    item: items.load(String(item)),
+    item: loadItem(items, String(item)),
     reply: int(reply),
     agent: str(agent),
   }));

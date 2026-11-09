@@ -14,6 +14,7 @@ import {
   type Entry,
   type Items,
   lastOf,
+  loadItem,
   type Parsed,
   type Run,
   SCHEMA,
@@ -691,5 +692,44 @@ describe('the last position and seq', () => {
     // they come from (both tables, and the seq and answered_seq indexes). A SELECT of several maxima scans.
     expect(scanned).toBeGreaterThanOrEqual(20);
     expect(read).toBeLessThanOrEqual(5);
+  });
+});
+
+/** Another framework's items, which have a `kind`: it cannot read the made-up framework's. */
+class OtherFramework extends FakeItems {
+  override load(stored: string): Item {
+    const item = JSON.parse(stored) as Item & { kind?: string };
+    if (item.kind === undefined) throw new Error('an item has a kind');
+    return item;
+  }
+}
+
+/** A run that answers hello. */
+const hello: Run<Item> = async (conversation) => {
+  await conversation.turn.appendReply([{ role: 'assistant', text: 'hello' }]);
+  return 'hello';
+};
+
+describe('a conversation this agent cannot read', () => {
+  it('fails for good: a retry would read the same row', async () => {
+    const run = hello;
+    const map = new Map<string, Uint8Array>();
+    expect(await asking(run, { map }).ask('hi')).toBe('hello');
+    // An agent of the same name on another framework.
+    const other = asking(run, { map, items: new OtherFramework() });
+    const failure = other.ask('hi');
+    await expect(failure).rejects.toBeInstanceOf(restate.TerminalError);
+    await expect(failure).rejects.toThrow(/cannot read .*Error: an item has a kind/);
+  });
+
+  it('is the error of loadItem, whatever the framework throws', () => {
+    const throwing = new (class extends FakeItems {
+      override load(): Item {
+        throw new TypeError('no such field');
+      }
+    })();
+    expect(() => loadItem(throwing, '{}')).toThrow(restate.TerminalError);
+    expect(() => loadItem(throwing, '{}')).toThrow(/cannot read .*TypeError: no such field/);
+    expect(loadItem(ITEMS, '{"role":"user","text":"hi"}')).toEqual({ role: 'user', text: 'hi' });
   });
 });

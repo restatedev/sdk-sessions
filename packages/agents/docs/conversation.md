@@ -143,7 +143,11 @@ const SCHEMA = new Schema('restate_agents.turns', [
   loaded by the framework (`Items.dump`, `Items.load`). The core reads it
   only through `Items.read`: what was said, the tool calls, the results.
   So an agent's conversation is one framework's: `answerOnce` refuses
-  items other than its `messages` view's (D7).
+  items other than its `messages` view's (D7). A row the framework cannot
+  load (stored by an agent of another framework under the same name, or by
+  another version of this one) fails the turn, or the view, with a terminal
+  error (`loadItem`): a retry would read the same row. Each framework's
+  `load` checks the row's shape, since a JSON parse alone takes any row.
 - **`reply`** groups the items of one model reply (a reply that is several
   items, say), so that the full view shows it as one message, and `drop`
   removes it whole.

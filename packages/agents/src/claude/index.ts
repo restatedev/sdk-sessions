@@ -89,7 +89,16 @@ const storedText = (content: string | readonly { type: string; text?: string }[]
  */
 export const items: Items<MessageParam> = {
   dump: (message) => JSON.stringify(message),
-  load: (stored) => JSON.parse(stored) as MessageParam,
+  load: (stored) => {
+    // Only a message of the API's (a role and its content): another framework's row is not one.
+    const message = JSON.parse(stored) as MessageParam;
+    const { role, content, ...rest } = message;
+    if ((role !== 'user' && role !== 'assistant') || (typeof content !== 'string' && !Array.isArray(content)))
+      throw new Error('not a message of the Claude API (a role and its content)');
+    if (Object.keys(rest).length > 0)
+      throw new Error(`not a message of the Claude API: ${Object.keys(rest).join(', ')}`);
+    return message;
+  },
   prompt: (text) => ({ role: 'user', content: text }),
   // The API refuses an empty text: an empty answer, as the model sees it later, says so.
   reply: (text) => ({ role: 'assistant', content: text.trim() ? text : NO_ANSWER }),

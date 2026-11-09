@@ -296,7 +296,13 @@ export interface Options<O extends z.ZodObject | undefined = z.ZodObject | undef
  */
 export const items: Items<Message> = {
   dump: (m) => JSON.stringify(m),
-  load: (stored) => freezeMessage(JSON.parse(stored) as Message),
+  load: (stored) => {
+    // Only a harness's message (an id, a role, a list of content parts): another framework's row is not one.
+    const m = JSON.parse(stored) as Message;
+    if (typeof m.id !== 'string' || typeof m.role !== 'string' || !Array.isArray(m.content))
+      throw new Error("not a DeepSeek harness's message (an id, a role and a list of content parts)");
+    return freezeMessage(m);
+  },
   prompt: (text) => message('prompt', text),
   reply: (text) =>
     freezeMessage({
