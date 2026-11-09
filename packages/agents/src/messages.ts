@@ -103,6 +103,9 @@ async function rowsFrom(db: DatabaseReader, first: number, until = Number.MAX_SA
   return [...turns, ...steps].toSorted((a, b) => Number(a[0]) - Number(b[0]));
 }
 
+/** Whether the conversation has a turn before a position: a page that starts there has more before it. */
+const EARLIER = `SELECT EXISTS (SELECT 1 FROM ${TURNS} WHERE n < ?)`;
+
 /** The first value of the first row of `sql`. */
 const one = async (db: DatabaseReader, sql: string, params: unknown[]) =>
   (await db.values(sql, params as never))[0]?.[0];
@@ -151,7 +154,7 @@ async function latest<I>(
   const until = before === undefined ? undefined : await one(db, `SELECT MIN(n) FROM ${TURNS} WHERE n >= ?`, [end]);
   const rows = await rowsFrom(db, Number(first), until === null || until === undefined ? undefined : Number(until));
   const messages = render(items, rows).filter((m) => m.id < end);
-  const earlier = await one(db, `SELECT EXISTS (SELECT 1 FROM ${TURNS} WHERE n < ?)`, [first]);
+  const earlier = await one(db, EARLIER, [first]);
   return {
     messages: latestOf(messages, limit).map(chat),
     more: messages.length > limit || Boolean(Number(earlier)),
@@ -214,7 +217,7 @@ async function summaryLatest<I>(
   const cursor = await now(db);
   const messages = summarized(items, rows.toReversed()).filter((m) => m.id < end);
   const first = rows.length > 0 ? Number(rows.at(-1)![0]) : end;
-  const earlier = await one(db, `SELECT EXISTS (SELECT 1 FROM ${TURNS} WHERE n < ?)`, [first]);
+  const earlier = await one(db, EARLIER, [first]);
   return {
     messages: latestOf(messages, limit).map(chat),
     more: messages.length > limit || Boolean(Number(earlier)),

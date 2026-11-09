@@ -111,6 +111,12 @@ export const messageSerde: restate.Serde<string> = {
 };
 
 /**
+ * What an empty answer says, as the model sees it later in the conversation:
+ * a provider's API may refuse an empty text (Anthropic's does).
+ */
+export const NO_ANSWER = '(no answer)';
+
+/**
  * What a cancelled turn answers, and each tool call it cut off: the model
  * sees it in the conversation that goes on.
  */

@@ -45,6 +45,7 @@ import {
   type Summarize,
   toolCallEnded,
   toolCallStarted,
+  NO_ANSWER,
 } from '../common.ts';
 import { answerOnce, type Items, type Parsed, type Run } from '../conversation.ts';
 import { conversationView } from '../messages.ts';
@@ -60,9 +61,6 @@ export const callId = (context?: BetaToolRunContext) => {
   if (!context) throw new Error('a tool call without its context');
   return context.toolUse.id;
 };
-
-/** What an empty answer says, as the model sees it later: the API refuses an empty text. */
-const NO_ANSWER = '(no answer)';
 
 /**
  * `messages` as the API takes them: it refuses an empty text, and an

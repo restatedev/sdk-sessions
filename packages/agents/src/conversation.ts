@@ -618,10 +618,7 @@ export class Turn<I> {
       // Its seq taken as the write runs, as `#insert` takes its own.
       await ledger.db.transaction(async (tx) => {
         seq = ledger.seq + 1;
-        await tx.execute(
-          `UPDATE ${TURNS} SET status = ?, answer = ?, agent = ?, carried = ?, answered_at = ?, answered_seq = ? WHERE n = ?`,
-          [status, answer, agent ?? null, carried ?? null, at ?? null, seq, this.n],
-        );
+        await tx.execute(ANSWER, [status, answer, agent ?? null, carried ?? null, at ?? null, seq, this.n]);
         ledger.seq = seq;
       });
       Object.assign(this.prompt, { status, answer, agent, carried, answeredAt: at, answeredSeq: seq });
@@ -692,17 +689,9 @@ export class Turn<I> {
       const carried = 'carried' in this.#carried ? this.#carried.carried : ledger.carried()[1];
       await ledger.db.transaction(async (tx) => {
         for (const [i, e] of added.entries()) {
-          await tx.execute(`INSERT INTO ${STEPS} (n, turn, seq, item, reply, agent) VALUES (?, ?, ?, ?, NULL, NULL)`, [
-            e.n,
-            this.n,
-            seq + i + 1,
-            items.dump(e.item),
-          ]);
+          await tx.execute(INSERT_STEP, [e.n, this.n, seq + i + 1, items.dump(e.item), null, null]);
         }
-        await tx.execute(
-          `UPDATE ${TURNS} SET status = ?, answer = ?, agent = ?, carried = ?, answered_at = ?, answered_seq = ? WHERE n = ?`,
-          [status, note, agent ?? null, carried ?? null, at, answeredSeq, this.n],
-        );
+        await tx.execute(ANSWER, [status, note, agent ?? null, carried ?? null, at, answeredSeq, this.n]);
       });
       ledger.next = n + added.length;
       ledger.seq = answeredSeq;
@@ -743,7 +732,7 @@ export class Turn<I> {
     ledger.seq += added.length;
     this.#add(added);
     for (const [i, e] of added.entries()) {
-      await tx.execute(`INSERT INTO ${STEPS} (n, turn, seq, item, reply, agent) VALUES (?, ?, ?, ?, ?, ?)`, [
+      await tx.execute(INSERT_STEP, [
         e.n,
         this.n,
         seq + i + 1,
@@ -773,7 +762,6 @@ export class Turn<I> {
     const ledger = this.#ledger;
     return ledger.lock.run(async () => {
       this.#checkWritable();
-      const sql = `INSERT INTO ${STEPS} (n, turn, seq, item, reply, agent) VALUES (?, ?, ?, ?, ?, ?)`;
       let n = ledger.next;
       let added: Entry<I>[] = [];
       // The positions and seqs taken as the write runs: a framework's copy
@@ -784,7 +772,7 @@ export class Turn<I> {
         n = ledger.next;
         added = made(n);
         for (const [i, e] of added.entries()) {
-          await tx.execute(sql, [
+          await tx.execute(INSERT_STEP, [
             e.n,
             this.n,
             ledger.seq + i + 1,
@@ -866,6 +854,12 @@ async function transcriptOf<I>(
     before = read.at(-1)!.n;
   }
 }
+
+/** Store a step of a turn: its position, its turn's, its `seq`, its item, and the reply and agent it is of. */
+const INSERT_STEP = `INSERT INTO ${STEPS} (n, turn, seq, item, reply, agent) VALUES (?, ?, ?, ?, ?, ?)`;
+
+/** Store a turn's answer on its row: how it ended, the answer, what it carries, its message's position, its `seq`. */
+const ANSWER = `UPDATE ${TURNS} SET status = ?, answer = ?, agent = ?, carried = ?, answered_at = ?, answered_seq = ? WHERE n = ?`;
 
 /** The rows of the trajectories after position `after`, in order, as entries. */
 async function stepsAfter<I>(db: DatabaseReader, items: Items<I>, after: number): Promise<Entry<I>[]> {

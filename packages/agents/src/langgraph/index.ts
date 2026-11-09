@@ -63,6 +63,7 @@ import {
   type Summarize,
   toolCallEnded,
   toolCallStarted,
+  NO_ANSWER,
 } from '../common.ts';
 import { answerOnce, type Items, type Run, type Turn } from '../conversation.ts';
 import { conversationView } from '../messages.ts';
@@ -110,9 +111,6 @@ export const items: Items<BaseMessage> = {
     return {};
   },
 };
-
-/** What an empty answer says, as the model sees it later. */
-const NO_ANSWER = '(no answer)';
 
 /** Whether `message` is a reply of the model with nothing in it: no text, no tool call, no other content. */
 const blank = (message: AIMessage) =>
