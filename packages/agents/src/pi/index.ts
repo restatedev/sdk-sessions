@@ -428,12 +428,16 @@ export const withPi = async <T>(
   const returned = new Set<string>();
   // The messages steered to the turn of a prompt's run, submitted to pi as a publish lists them (`prompt`).
   let steering: ((of: ConversationId) => Promise<void>) | undefined;
+  // Whether a tool of the round asks to end the run (`terminate`, a handoff): pi then ends the round at its final
+  // boundary, which would start a run of its own for a message submitted there, outside the turn.
+  let ending = false;
   const tracked = (t: ToolRegistration): ToolRegistration => ({
     ...t,
     execute: async (args, api, task) => {
       try {
         await toolCallStarted(ctx);
         const result = await t.execute(args, api, task);
+        if (result.control?.terminate === true || result.control?.handoff !== undefined) ending = true;
         returned.add(api.callId);
         return result;
       } catch (error) {
@@ -447,7 +451,12 @@ export const withPi = async <T>(
     tools.map((t) => tracked(isTool(t) ? native(t, ctx) : t)),
     system,
     workspace,
-    async (of) => steering?.(of),
+    async (of) => {
+      // A round that may end the run takes no steered message: each waits for the turn's end, then is a turn of its own.
+      const ends = ending;
+      ending = false;
+      if (!ends) await steering?.(of);
+    },
   );
   const settings = {
     // A task that crashes is run again however often Restate retries the attempt (its retry policy decides):

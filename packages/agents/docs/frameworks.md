@@ -64,15 +64,12 @@ stores them once in the turn:
 | pi                             | as a round of tool calls is done (pi-durable's `afterTools` hook)                               | each waiting message is submitted to pi's inbox (`whenBusy: 'steer'`, keyed `steer:<id>`, an entry of kind `restate.steer`), which pi places after the round's results (`steeringMode: 'all'`); the copy of pi's commit into the turn stores it, with `taken`                                                                                                                              |
 | DeepSeek                       | at the step after it hears of it: a publish as a tool call starts, or once its result is stored | each waiting message goes to the harness's step inbox (`agent.steer`, a user message `steer:<id>`), which the harness places at its next step; the copy of its flush into the turn stores it, with `taken`. A message sent while a tool runs is heard of as its result is stored, which is as the next model request goes out: it joins at the step after that request's, in the same turn |
 
-Two cases hold a message longer than they should. `langgraph.chat` with
-options that a function gives says its turns take steered messages, as the
-options are known only once the message comes: a graph of your own from that
-function takes none, so the `steer` view answers its turn, and the message
-waits for the turn's end, then is answered as a turn of its own. And a pi
-tool of your own whose result ends the run (`terminate`, or a handoff) makes
-the end of its round pi's final boundary: a message waiting there starts a
-new pi run after the turn's, which the conversation does not hold; the
-Restate tools never end a run so.
+`langgraph.chat` with options that a function gives decides per message,
+as its turn starts, from the options it gives (once per attempt): a graph of
+your own takes none. A pi round whose tool asks to end the run (`terminate`,
+a handoff) submits no message: pi would end the round at its final
+boundary, which starts a run of its own for a message placed there, outside
+the turn; the message waits for the turn's end, and is a turn of its own.
 
 A turn hears of the messages only at a publish (a tool call's start and
 end), so a message sent while the model writes is taken at the step after

@@ -6,6 +6,7 @@ import {
   BUDGET,
   type Chat,
   chatOf,
+  type Steers,
   chatTurn,
   checkWindow,
   isAgent,
@@ -258,7 +259,7 @@ const internal = (items: Items<unknown> | undefined) => ({
  * the message is sent, so that it keeps its place in the key's queue: it runs
  * once the messages before it are answered.
  */
-const steeredOf = ({ answer, steers }: { answer: Chat; steers: boolean }) => ({
+const steeredOf = ({ answer, steers }: { answer: Chat; steers: Steers }) => ({
   ingressPrivate: true,
   explicitCancellation: true,
   handler: async (ctx: restate.SessionContext, { id, text }: Steer) => {

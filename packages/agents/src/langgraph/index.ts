@@ -435,10 +435,20 @@ export const chat = <O extends z.ZodObject | undefined = undefined>(options: Con
     if (options.graph === undefined && typeof options.model !== 'object') providerOfModel(modelOf(options.model));
   }
   // The built-in loop takes steered messages at its steps; a graph of your own takes none (each is a turn of its
-  // own). Options a function gives are known only as a message comes, after its turn says whether it takes them:
-  // such a turn says it does, so that a graph from that function holds a message until its turn ends.
-  const steers = typeof options === 'function' || options.graph === undefined;
-  return chatHandler(async (ctx, message) => prompt(ctx, message, await configured(options, ctx)), { steers });
+  // own). Options a function gives are its message's: given once per attempt, to the turn's start and its prompt.
+  if (typeof options !== 'function') {
+    const steers = options.graph === undefined;
+    return chatHandler(async (ctx, message) => prompt(ctx, message, options), { steers });
+  }
+  const given = new WeakMap<restate.SessionContext, Promise<Options<O>>>();
+  const optionsOf = (ctx: restate.SessionContext) => {
+    let of = given.get(ctx);
+    if (!of) given.set(ctx, (of = configured(options, ctx)));
+    return of;
+  };
+  return chatHandler(async (ctx, message) => prompt(ctx, message, await optionsOf(ctx)), {
+    steers: async (ctx) => (await optionsOf(ctx)).graph === undefined,
+  });
 };
 
 /**

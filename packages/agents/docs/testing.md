@@ -131,11 +131,11 @@ rows': 59 mutants in all.
 
 ### Steering
 
-Steering ([Steering a turn](turns.md#steering-a-turn)) came with 19
+Steering ([Steering a turn](turns.md#steering-a-turn)) came with 21
 durability mutants of its own, of no fix: the rules of a steered message's
 life, each with the test that fails for it. Run on its branch, with Node
 22.23 and, for the two e2e ones, Restate 1.8.0 (`pnpm --filter e2e
-steering`): all 19 are killed.
+steering`): all 21 are killed.
 
 | Mutant                             | Bug brought back                                                                                   | Verdict            |
 | ---------------------------------- | -------------------------------------------------------------------------------------------------- | ------------------ |
@@ -156,6 +156,8 @@ steering`): all 19 are killed.
 | `claude-steer-after-pause`         | Claude takes a message after a paused reply, which then is not the last message                    | killed             |
 | `claude-steer-not-sent`            | Claude stores the message, but its next request is the runner's own, without it                    | killed             |
 | `langgraph-steer-not-asked`        | LangGraph's model node stores the message, but asks without it                                     | killed             |
+| `pi-steer-in-ending-round`         | pi submits a message as a round that ends the run ends, which pi answers in a run of its own       | killed             |
+| `langgraph-fn-graph-steers`        | `langgraph.chat(fn)` says its turns take steered messages, also a graph's                          | killed             |
 | `pi-steer-not-copied`              | pi places the message, but the turn's copy leaves it out                                           | killed             |
 | `deepseek-steer-not-copied`        | the harness places the message, but the turn's copy leaves it out                                  | killed             |
 

@@ -19,6 +19,8 @@ import {
   crashedAnywhere,
   SAID_IN_TURNS as SAID,
   steeredAtAStep,
+  followingOf,
+  sqlAttempt,
 } from './support.ts';
 import { Teller } from './fakes/langgraph.ts';
 import * as langgraph from '@restatedev/agents/langgraph';
@@ -301,6 +303,16 @@ describe('the LangGraph agent', () => {
   });
 });
 
+/** Whether the turn of `chat` (on an object of its own) says, as it starts, that it takes steered messages. */
+async function steersOf(chat: ReturnType<typeof langgraph.chat>, key: string) {
+  const map = new Map<string, Uint8Array>();
+  const said: (boolean | undefined)[] = [];
+  const published = async () => void said.push(followingOf(map).answering?.steers);
+  const sql = sqlAttempt({ map, key, id: 'inv1', published });
+  await sql.end(() => chat.handler(sql.ctx, 'Hello'));
+  return said[0];
+}
+
 describe('the LangGraph agent, steered', () => {
   it('takes a message steered while a tool runs at its next step: the next request ends with it', async () => {
     const { answer, said, audits, taken } = await steeredAtAStep(
@@ -349,5 +361,18 @@ describe('the LangGraph agent, steered', () => {
       .addEdge('__start__', 'echo');
     expect(chatOf(langgraph.chat({ graph }))?.steers).toBe(false);
     expect(chatOf(langgraph.chat({}))?.steers).toBe(true);
+    // Options a function gives: each turn says, as it starts, what its options' graph takes.
+    expect(
+      await steersOf(
+        langgraph.chat(async () => ({ graph })),
+        'graph',
+      ),
+    ).toBeUndefined();
+    expect(
+      await steersOf(
+        langgraph.chat(async () => ({ model: new Teller({}) })),
+        'loop',
+      ),
+    ).toBe(true);
   });
 });

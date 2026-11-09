@@ -405,8 +405,15 @@ export const aborted = (signal: AbortSignal) =>
 /** A `chat` handler's answer to a message: a framework's prompt, say. */
 export type Chat<A = unknown> = (ctx: restate.SessionContext, message: string) => Promise<A>;
 
+/**
+ * Whether a `chat` handler's turns take steered messages: for every message,
+ * or for each, as the invocation's context says (a framework's options that
+ * a function gives, say).
+ */
+export type Steers = boolean | ((ctx: restate.SessionContext) => boolean | Promise<boolean>);
+
 /** What makes a `chat` handler (`chatHandler`): its answer, and whether it takes steered messages. */
-const CHAT = new Link<{ answer: Chat; steers: boolean }>('restate-agents.chat');
+const CHAT = new Link<{ answer: Chat; steers: Steers }>('restate-agents.chat');
 
 /** The answer of `entry`, a handler that `chatHandler` made, and whether it takes steered messages. */
 export const chatOf = (entry: object) => CHAT.of(entry);
@@ -435,7 +442,7 @@ export const chatOf = (entry: object) => CHAT.of(entry);
  * private `steered` handler). With `steers` (a framework's integration says
  * so), its turns take steered messages at their steps (`takeSteers`).
  */
-export const chatHandler = <A = string>(answer: Chat<A>, { steers = false }: { steers?: boolean } = {}) =>
+export const chatHandler = <A = string>(answer: Chat<A>, { steers = false }: { steers?: Steers } = {}) =>
   CHAT.on(
     {
       input: messageSerde,
@@ -456,14 +463,14 @@ export async function chatTurn<A>(
   ctx: restate.SessionContext,
   text: string,
   answer: Chat<A>,
-  steers = false,
+  steers: Steers = false,
 ): Promise<A> {
   const invocationId = ctx.request.id;
   // The companion knows the turn from here to its close: `status` and `stop` ask it.
   // An agent on the conversation of turns has `settle`: the companion sends it
   // this turn, should its invocation be gone without closing it.
   const settles = agentOf(ctx)?.items !== undefined;
-  const steering = steers && !unfollowed(ctx);
+  const steering = !unfollowed(ctx) && (typeof steers === 'function' ? await steers(ctx) : steers);
   // Before the first publish, which may answer messages steered to the turn already (a retried attempt's).
   if (steering) INBOX.set(ctx, new Inbox());
   await ctx.rpc(signals, signalsOf(ctx)).start({
