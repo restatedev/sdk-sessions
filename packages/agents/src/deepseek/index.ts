@@ -41,6 +41,9 @@ import { SessionId, SessionStore, type SessionEvent } from '@deepseek-ai/dsh-ses
 import * as checkpoints from '@deepseek-ai/dsh-session-checkpoint-policy';
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection';
 import { SystemPrompt } from '@deepseek-ai/dsh-system-prompt';
+import { TokenMeter } from '@deepseek-ai/dsh-token-meter';
+import { ToolResultPruner } from '@deepseek-ai/dsh-compaction-tool-result-pruner';
+import { BasicCompactionEngine, type BasicCompactionConfig } from '@deepseek-ai/dsh-compaction-basic';
 import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
 import {
   defineTool,
@@ -120,10 +123,15 @@ function routeOf(model: string): Route {
 
 /**
  * The harness, its session in `db`: the services
- * an agent loop needs, the persistence and its checkpoints, and the provider
- * of `route`.
+ * an agent loop needs, the persistence and its checkpoints, compaction (with
+ * `compaction`'s settings), and the provider of `route`.
  */
-async function boot(db: restate.Database, route: Route, system?: string): Promise<Context> {
+async function boot(
+  db: restate.Database,
+  route: Route,
+  system?: string,
+  compaction: BasicCompactionConfig = {},
+): Promise<Context> {
   const harness = new Context();
   await harness.plugin(LlmRuntime);
   await harness.plugin(SessionStore);
@@ -133,6 +141,13 @@ async function boot(db: restate.Database, route: Route, system?: string): Promis
   await harness.plugin(SessionProjectionRegistry);
   await harness.plugin(SqlSessionPersistence, { db });
   await harness.plugin(checkpoints);
+  // The model's input stays within its context window: as it nears the
+  // window (or overflows it), the oldest history is condensed into a summary,
+  // one more model request, after oversized tool results are trimmed. The
+  // log keeps every event, and the conversation of turns every message.
+  await harness.plugin(TokenMeter);
+  await harness.plugin(ToolResultPruner);
+  await harness.plugin(BasicCompactionEngine, compaction);
   // DeepSeek's with DEEPSEEK_API_KEY; another's with the key pi-ai finds for it (OPENAI_API_KEY...).
   if (route.provider === 'deepseek-official') await harness.plugin(deepseek, {});
   else await harness.plugin(piAi, { providers: { [route.provider]: {} } });
@@ -261,6 +276,13 @@ export interface Options<O extends z.ZodObject | undefined = z.ZodObject | undef
   /** The agent's tools: `tool()`s, Restate's (`call`, `signal`...), or the harness's (`defineTool`). */
   tools?: (AnyTool | ToolDefinition)[];
   /**
+   * When the model's input is condensed: the settings of the harness's
+   * compaction (@deepseek-ai/dsh-compaction-basic), such as `thresholdRatio`
+   * (by default 0.8 of the model's context window) and `retainRatio` (the
+   * newest 0.16 kept as it is).
+   */
+  compaction?: BasicCompactionConfig;
+  /**
    * The answer as data: a zod object, whose JSON the agent replies with
    * (checked), and `chat` and `prompt` answer with (see output.ts).
    */
@@ -351,11 +373,11 @@ const copying =
  * continued after a crash.
  */
 const runOf =
-  (ctx: restate.SessionContext, { model: named, system, tools = [] }: Options): Run<Message> =>
+  (ctx: restate.SessionContext, { model: named, system, tools = [], compaction }: Options): Run<Message> =>
   async (conversation) => {
     const turn = conversation.turn;
     const route = routeOf(modelOf(named, DEEPSEEK_MODEL));
-    const harness = await boot(ctx.db, route, system);
+    const harness = await boot(ctx.db, route, system, compaction);
     const persistence = harness.sessionPersistence as SqlSessionPersistence;
     // A tool's error fails the attempt, which Restate retries: the harness
     // stores nothing more, so the retry finds the tool's call without a result.

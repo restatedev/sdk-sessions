@@ -400,8 +400,9 @@ transaction; `CONTINUE` only for this invocation's own prompt, a step of its
 turn, not copied; a dead turn closed in the store (`settle`, or the next
 message), never continued, and its note given to the harness's next turn;
 the CANCELLED and UNANSWERED notes given to it too; `dsh-compaction-basic`
-mounted (not done: it is not a dependency yet, so the harness's input still
-grows with the conversation); a context overflow terminal.
+mounted (done after the merge, with the token meter and the tool result
+pruner, and a `compaction` option for its settings); a context overflow
+terminal.
 
 **Tests**: invert `:228-236`; the copy across crashes (`crashedAnywhere`):
 each message once in `messages`; `CONTINUE` not in the views; a dead turn

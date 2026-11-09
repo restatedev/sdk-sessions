@@ -401,6 +401,14 @@ The Anthropic SDK's tool runner (`@anthropic-ai/sdk` 0.133.0).
 - **Tests** (`test/deepseek.test.ts`): invert `:228-236`; the copy across
   crashes (`crashedAnywhere`); `CONTINUE` not in the views; a dead turn closed
   with its calls' outcomes; compaction mounted; an overflow classified.
+- **Compaction, mounted (after the merge)**: `boot` mounts
+  `dsh-token-meter`, `dsh-compaction-tool-result-pruner` and
+  `dsh-compaction-basic`, whose settings are the `compaction` option. Its
+  summary is no `assistant/message` event, so the copy leaves it out; its
+  request is the teller's in the tests, on a small window: the model's input
+  holds the summary in place of the oldest messages, the views every
+  message, and a crash at any state request of the turn that condenses is
+  answered once.
 
 ## pi
 
