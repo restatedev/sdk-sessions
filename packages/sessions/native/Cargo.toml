@@ -15,9 +15,7 @@ crate-type = ["cdylib"]
 napi = { version = "3", default-features = false, features = ["napi8", "async", "tokio_rt"] }
 napi-derive = "3"
 # The storage (`state`) and SQL on it (`sql`), with its feature `sql`.
-restate-sdk-shared-core = { version = "8.4.0", features = [
-  "sql",
-] }
+restate-sdk-shared-core = { version = "8.4.0", features = ["sql"] }
 futures = "0.3"
 bytes = "1.10"
 
