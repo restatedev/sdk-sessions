@@ -185,6 +185,18 @@ export interface Items<I> {
    * the id `steer:<steerId>`); by default, a prompt's item.
    */
   steered?(text: string, steerId: string): I;
+  /**
+   * For a framework whose history is in a store of its own that the turn is
+   * copied from after the fact (OpenCode's): bring that store to the turn's
+   * end, and copy what it has of the turn into it, before the turn is
+   * closed with `status`. `answerOnce` and `settle` call it before each
+   * close, so that the framework's store is closed first, then the copy,
+   * then the turn. A framework whose copy is in its own transaction (pi,
+   * DeepSeek) has none.
+   */
+  settleOwn?(ctx: restate.SessionContext, turn: Turn<I>, status: Status): Promise<void>;
+  /** For a framework with a database of its own beside `ctx.db`: forget it, as `clear` empties the key's. */
+  erase?(ctx: restate.SessionContext): Promise<void>;
 }
 
 /** What the user's message with the summary of the earliest turns starts with. */
@@ -1420,10 +1432,17 @@ async function answerTurn<I>(
   check: Check | undefined,
   reminder: string | undefined,
 ): Promise<string> {
+  const { items } = conversation;
+  /** Close `closed` with `status` and `note`: the framework's own store first, if it has one. */
+  const close = async (closed: Turn<I>, status: Status, note: string) => {
+    if (closed.status !== undefined) return;
+    await items.settleOwn?.(ctx, closed, status);
+    await closed.close(ctx, status, note);
+  };
   let running = conversation.running();
   if (running && running.id !== promptId) {
     // Turns never overlap, so the invocation of this one is gone: it ends unanswered.
-    await running.close(ctx, 'ended', ENDED);
+    await close(running, 'ended', ENDED);
     running = undefined;
   }
   const turn = running ?? (await conversation.ask(promptId, text));
@@ -1449,7 +1468,7 @@ async function answerTurn<I>(
     if (error instanceof AttemptEnded) throw error; // the next attempt goes on with the run
     if (error instanceof restate.CancelledError) {
       // Cancelled: close the turn, so that the next prompt starts afresh.
-      await turn.close(ctx, 'cancelled', CANCELLED);
+      await close(turn, 'cancelled', CANCELLED);
       await conversation.seal();
       throw error;
     }
@@ -1459,12 +1478,12 @@ async function answerTurn<I>(
     const refused =
       error instanceof restate.TerminalError ? (error.code === REFUSED ? error : undefined) : refusalOf(ctx, error);
     if (refused) {
-      await turn.close(ctx, 'refused', UNANSWERED);
+      await close(turn, 'refused', UNANSWERED);
       throw refused;
     }
     if (error instanceof restate.TerminalError) {
       // Failed for good: closed with the error, so that the next prompt does not run into it again.
-      await turn.close(ctx, 'failed', `Error: ${error.message}`);
+      await close(turn, 'failed', `Error: ${error.message}`);
       throw error;
     }
     throw error;
@@ -1485,6 +1504,7 @@ export async function settle<I>(ctx: restate.SessionContext, items: Items<I>, in
   if (!row || row.status !== null || invocationOf(String(row.prompt)) !== invocationId) return false;
   const running = (await Conversation.load(ctx.db, items, 0)).running();
   if (!running) return false;
+  await items.settleOwn?.(ctx, running, 'ended');
   await running.close(ctx, 'ended', ENDED);
   return true;
 }
