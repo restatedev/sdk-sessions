@@ -342,7 +342,8 @@ type Agent = Awaited<ReturnType<Context['agents']['create']>>['agent'];
 function promptOf(turn: Turn<Message>, before: { status?: string; answer?: string } | undefined) {
   const text = textOf(turn.prompt.item);
   const note = before && before.status !== 'answered' && before.answer ? `(${before.answer})\n\n` : '';
-  return message(promptId(turn.id), note + text);
+  // The harness keeps the prompt as it is given, the turn's reminder too; the conversation as it was asked.
+  return message(promptId(turn.id), note + text + (turn.reminder ?? ''));
 }
 
 /**
@@ -518,9 +519,9 @@ export const prompt = <O extends z.ZodObject | undefined = undefined>(
   text: string,
   options: Options<O> = {},
 ): Promise<Answer<O>> =>
-  withChecked(text, options, (t, o, check) => answerOnce(ctx, t, items, runOf(ctx, o), { check })) as Promise<
-    Answer<O>
-  >;
+  withChecked(text, options, (t, o, check, reminder) =>
+    answerOnce(ctx, t, items, runOf(ctx, o), { check, reminder }),
+  ) as Promise<Answer<O>>;
 
 /**
  * A chat handler: each message an invocation, the session in the object's

@@ -405,6 +405,14 @@ export class Turn<I> {
   /** The turn's row: its prompt, and once it has them, its status, answer and what it carried. */
   readonly prompt: Entry<I>;
 
+  /**
+   * What the model is told after the turn's prompt, where it reads it last
+   * (`output`'s ask for JSON), and never stored: the conversation keeps the
+   * prompt as it was asked. `history()` adds it to the prompt; a framework
+   * that keeps its own history adds it to the prompt it is given.
+   */
+  reminder: string | undefined;
+
   constructor(ledger: Ledger<I>, prompt: Entry<I>, items: Entry<I>[] = []) {
     this.#ledger = ledger;
     this.prompt = prompt;
@@ -1083,7 +1091,14 @@ export class Conversation<I> {
     const summary = this.summary;
     if (summary !== undefined) out.push(...summaryItems(this.items, summary));
     for (const turn of this.earlier()) out.push(turn.item, this.items.reply(turn.answer ?? '', turn.agent));
-    for (const turn of this.#turns) for (const entry of turn.entries) out.push(entry.item);
+    for (const turn of this.#turns) {
+      for (const entry of turn.entries) {
+        // The prompt as the model gets it: with the turn's reminder, which is not stored.
+        const reminded = entry === turn.prompt && turn.reminder !== undefined;
+        const said = reminded ? parsedOf(this.items, entry).said?.[1] : undefined;
+        out.push(said === undefined ? entry.item : this.items.prompt(said + turn.reminder));
+      }
+    }
     return out;
   }
 
@@ -1150,14 +1165,15 @@ export const invocationOf = (promptId: string) => promptId.split(':', 1)[0]!;
  * `window` and `budget` are the agent's unless given. With `check`, the
  * answer is checked: a message it returns asks the model again with it,
  * once, as a step of the turn ({@link Turn.askAgain}), and the turn's answer
- * is the reply to that.
+ * is the reply to that. With `reminder`, the model is told it after the
+ * prompt ({@link Turn.reminder}), which is stored as it was asked.
  */
 export async function answerOnce<I>(
   ctx: restate.SessionContext,
   text: string,
   items: Items<I>,
   run: Run<I>,
-  options: { window?: Window; budget?: number; check?: Check } = {},
+  options: { window?: Window; budget?: number; check?: Check; reminder?: string } = {},
 ): Promise<string> {
   const settings = settingsOf(ctx);
   // One framework per agent (D7): its conversation holds its `messages` view's items, which another can't read.
@@ -1183,7 +1199,7 @@ export async function answerOnce<I>(
         const turn = conversation.turns.at(-1);
         return turn !== undefined && turn.id === promptId && turn.stored(callId, failedWith);
       },
-      () => answerTurn(ctx, conversation, promptId, text, run, options.check),
+      () => answerTurn(ctx, conversation, promptId, text, run, options.check, options.reminder),
     ),
   );
   const definition = definitionOf(ctx) as { name: string } | undefined;
@@ -1202,6 +1218,7 @@ async function answerTurn<I>(
   text: string,
   run: Run<I>,
   check: Check | undefined,
+  reminder: string | undefined,
 ): Promise<string> {
   let running = conversation.running();
   if (running && running.id !== promptId) {
@@ -1210,6 +1227,7 @@ async function answerTurn<I>(
     running = undefined;
   }
   const turn = running ?? (await conversation.ask(promptId, text));
+  turn.reminder = reminder;
   const going = (async () => {
     let answered = await run(conversation);
     // Once at most: a turn that asked again (in an earlier attempt, say) answers with the reply to that.

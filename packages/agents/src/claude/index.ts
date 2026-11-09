@@ -325,8 +325,8 @@ export const prompt = <O extends z.ZodObject | undefined = undefined>(
   text: string,
   options: Options<O> = {},
 ): Promise<Answer<O>> =>
-  withChecked(text, options, (t, o, check) =>
-    answerOnce(ctx, t, items, runOf(ctx, agentOf(ctx, o)), { check }),
+  withChecked(text, options, (t, o, check, reminder) =>
+    answerOnce(ctx, t, items, runOf(ctx, agentOf(ctx, o)), { check, reminder }),
   ) as Promise<Answer<O>>;
 
 /**

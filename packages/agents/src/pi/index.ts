@@ -94,9 +94,10 @@ export interface Pi {
    * Answer `text`, once, with the answer's text: a turn of the object's
    * conversation (each prompt of an invocation has an id of its own, the
    * same on every attempt). With `check`, a reply it returns a message for
-   * is asked again within the turn, once.
+   * is asked again within the turn, once. With `reminder`, the model is told
+   * it after the prompt, which the conversation keeps as it was asked.
    */
-  prompt: (text: string, check?: Check) => Promise<string>;
+  prompt: (text: string, check?: Check, reminder?: string) => Promise<string>;
   /** The object's conversation, on the model: for `reset`, `compact`, `entries` and the like. */
   conversation: () => Promise<Conversation>;
 }
@@ -411,7 +412,7 @@ export const withPi = async <T>(
     context,
   );
 
-  const prompt = (text: string, check?: Check) => {
+  const prompt = (text: string, check?: Check, reminder?: string) => {
     // 0.3.0's `prompt(text, id)` took a prompt's id: from JavaScript, it would
     // fail as the check is called, again at every retry.
     if (check !== undefined && typeof check !== 'function') {
@@ -455,7 +456,8 @@ export const withPi = async <T>(
         // The model is told how the turn before this one ended, if its run did not answer it.
         const before = store.transcript.at(-2);
         const note = !again && before && before.status !== 'answered' && before.answer ? `(${before.answer})\n\n` : '';
-        const asked = textOf(current.latestAsk().item.message.content);
+        // pi keeps the prompt as it is given, the turn's reminder too; the conversation as it was asked.
+        const asked = textOf(current.latestAsk().item.message.content) + (again ? '' : (current.reminder ?? ''));
         const submission = await root.submit({ type: 'input', content: note + asked, requestId }, context);
         const settled = await submission.wait(context);
         // A prompt the cancellation's abort ended fails with the cancellation.
@@ -467,7 +469,7 @@ export const withPi = async <T>(
         if (!reply) throw new restate.TerminalError(`prompt ${id}: no answer entry`);
         return textOf(reply.content);
       },
-      { check },
+      { check, reminder },
     );
   };
   // `failure`, once it comes. A cancellation aborts the conversation's work
@@ -511,9 +513,9 @@ export const prompt = <O extends z.ZodObject | undefined = undefined>(
   text: string,
   options: Options<O> = {},
 ): Promise<Answer<O>> =>
-  withChecked(text, options, (t, o, check) => withPi(ctx, o, (session) => session.prompt(t, check))) as Promise<
-    Answer<O>
-  >;
+  withChecked(text, options, (t, o, check, reminder) =>
+    withPi(ctx, o, (session) => session.prompt(t, check, reminder)),
+  ) as Promise<Answer<O>>;
 
 /**
  * A chat handler: each message an invocation, the conversation in the

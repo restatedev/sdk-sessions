@@ -24,9 +24,10 @@ const format = (output: z.ZodObject) =>
   JSON.stringify(z.toJSONSchema(output));
 
 /**
- * What each prompt ends with, with `output`: the system prompt's ask, again,
- * where an agent reads it last (after a long run of tool calls, it may have
- * drifted from its system prompt to a summary in prose).
+ * What the model is told after each prompt, with `output`: the system
+ * prompt's ask, again, where an agent reads it last (after a long run of tool
+ * calls, it may have drifted from its system prompt to a summary in prose).
+ * It is not stored: clients read the prompt as it was asked.
  */
 const reminder =
   '\n\nWhen you are done, reply with your answer as JSON only, of the schema you were given: no other text.';
@@ -79,17 +80,23 @@ export const recheck =
  * answering with a value of `options.output` if it has one, or else with the
  * agent's text. A reply that is not the value is asked again within its
  * turn, once (`check`), and the reply to that must be one, or the prompt
- * fails, terminal.
+ * fails, terminal. The model is told `reminder` after the prompt, which the
+ * conversation keeps as it was asked (`answerOnce`'s `reminder`).
  */
 export const withChecked = async <T extends { system?: string; output?: z.ZodObject }>(
   text: string,
   options: T,
-  prompt: (text: string, options: T, check?: (answer: string) => string | undefined) => Promise<string>,
+  prompt: (
+    text: string,
+    options: T,
+    check?: (answer: string) => string | undefined,
+    reminder?: string,
+  ) => Promise<string>,
 ): Promise<Answer<T['output']>> => {
   const { output } = options;
   if (!output) return prompt(text, options) as Promise<Answer<T['output']>>;
   const asked = { ...options, system: [options.system, format(output)].filter(Boolean).join('\n\n') };
-  const answer = parsed(output, await prompt(text + reminder, asked, recheck(output)));
+  const answer = parsed(output, await prompt(text, asked, recheck(output), reminder));
   if ('wrong' in answer)
     throw new restate.TerminalError(`The agent's reply is not the answer asked for: ${answer.wrong}`);
   return answer.value as Answer<T['output']>;

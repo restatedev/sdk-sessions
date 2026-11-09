@@ -333,7 +333,7 @@ export const prompt = <O extends z.ZodObject | undefined = undefined>(
   text: string,
   options: Options<O> = {},
 ): Promise<Answer<O>> =>
-  withChecked(text, options, async (t, { model, system, tools = [], recursionLimit }, check) =>
+  withChecked(text, options, async (t, { model, system, tools = [], recursionLimit }, check, reminder) =>
     answerOnce(
       ctx,
       t,
@@ -345,7 +345,7 @@ export const prompt = <O extends z.ZodObject | undefined = undefined>(
         system,
         recursionLimit,
       ),
-      { check },
+      { check, reminder },
     ),
   ) as Promise<Answer<O>>;
 

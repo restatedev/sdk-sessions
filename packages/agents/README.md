@@ -456,9 +456,10 @@ The waits are kept by the `signals` object, keyed `<agent>:<key>`, which
 
 With `output`, a zod object, an agent answers with data rather than text:
 its reply is its answer, as JSON of the schema (which its system prompt
-asks for, with the schema), and `chat` answers with the value, checked
-against the schema: the answer is the call's return value, as with any
-handler. Every framework takes it.
+asks for, with the schema, and the model is reminded of after each prompt,
+though `messages` shows the prompt as it was asked), and `chat` answers
+with the value, checked against the schema: the answer is the call's
+return value, as with any handler. Every framework takes it.
 
 ```ts
 const Plan = z.object({ summary: z.string(), parts: z.array(z.string()) });
