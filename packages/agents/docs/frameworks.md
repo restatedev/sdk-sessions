@@ -286,7 +286,10 @@ The Anthropic SDK's tool runner (`@anthropic-ai/sdk` 0.133.0).
   what a `DeltaChannel` is rebuilt from, the latest checkpoint's ancestors
   back to each delta channel's snapshot (Python's `_kept` in
   [`_checkpointer.py`](https://github.com/restatedev/sdk-python/blob/434bb6fe05ab17f3384709b48f060a47e68f5fb7/python/restate/agents/langgraph/_checkpointer.py)),
-  counting only the channels the checkpoint holds.
+  counting only the channels the checkpoint holds. After the merge, a `put`
+  finds them from those its parent needed, as the `put` before kept them in
+  memory: a child needs some of its parent's, so a thread's steps read none
+  back (Python's reads them at each `put`).
 - **Later, not in this port**: `agent({ graph })`, a graph of your own on
   framework-owned history (the Python SDK's `_graph.py`: the messages after
   the run's input copied by id, the prompt's id `prompt:<turn>`, a window of
