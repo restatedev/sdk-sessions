@@ -455,11 +455,14 @@ The waits are kept by the `signals` object, keyed `<agent>:<key>`, which
 ## Structured answers
 
 With `output`, a zod object, an agent answers with data rather than text:
-its reply is its answer, as JSON of the schema (which its system prompt
-asks for, with the schema, and the model is reminded of after each prompt,
-though `messages` shows the prompt as it was asked), and `chat` answers
-with the value, checked against the schema: the answer is the call's
-return value, as with any handler. Every framework takes it.
+its reply is its answer, as JSON of the schema, and `chat` answers with the
+value, checked against the schema: the answer is the call's return value,
+as with any handler. Every framework takes it. Claude asks the model for it
+natively where the model has structured outputs (the API's
+`output_config.format`, which holds the reply to the schema), or as its
+`nativeOutput` says; otherwise, and in the other frameworks, the system
+prompt asks for it, with the schema, and the model is reminded of it after
+each prompt, though `messages` shows the prompt as it was asked.
 
 ```ts
 const Plan = z.object({ summary: z.string(), parts: z.array(z.string()) });
@@ -468,13 +471,14 @@ const planner = claude.agent({ name: 'planner', output: Plan });
 const plan = await ctx.rpc(planner, 'ENG-1').chat('Plan the work on ENG-1'); // a Plan
 ```
 
-A reply that is not such JSON (a code fence around it is fine) is answered
-with what is wrong with it, once, for the model to reply again; then the
-invocation fails, with a terminal error, and the conversation shows its turn
-failed, with that error. A retried attempt resumes the
-conversation, and reads the same reply. In a handler of your own, `prompt(ctx, text, {
-output })` answers with it too. As a subagent's, the parent's model gets it
-as JSON.
+A reply that is not such JSON (a code fence around it is fine; asked
+natively, the API holds it to the schema's types, not to checks such as a
+string's `max`) is answered with what is wrong with it, once, for the model
+to reply again; then the invocation fails, with a terminal error, and the
+conversation shows its turn failed, with that error. A retried attempt
+resumes the conversation, and reads the same reply. In a handler of your
+own, `prompt(ctx, text, { output })` answers with it too. As a subagent's,
+the parent's model gets it as JSON.
 
 ## Webhooks
 

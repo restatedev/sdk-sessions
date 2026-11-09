@@ -138,6 +138,15 @@ The Anthropic SDK's tool runner (`@anthropic-ai/sdk` 0.133.0).
   returns a signed `compaction` block, which must be sent back as it came.
 - What changes per attempt: message ids, `tool_use` ids (stable here, as a
   reply is stored before its tools run), the container id.
+- Structured outputs: `output_config.format`, a JSON schema the API holds
+  the final text reply to, without a beta header (Claude's 4.5 models and
+  later, and Mythos Preview). The runner sends it with each request, so
+  tool calls go on, and drops it only for a compaction request.
+  `betaZodOutputFormat` (`helpers/beta/zod`) makes one of a zod schema, and
+  moves into descriptions what the API does not take (string lengths,
+  number bounds), and `enum` and `const` too, which it does. A declined
+  reply, or one cut off at `max_tokens`, may not fit the schema; a schema
+  too complex for the API is a 400.
 
 ### Target: the turn projection
 
@@ -165,6 +174,11 @@ The Anthropic SDK's tool runner (`@anthropic-ai/sdk` 0.133.0).
   terminal error); `pause_turn` stores the paused reply as a step and goes
   on.
 - **Summaries**: `summarize` with the agent's own client and model.
+- **Output**: a model with structured outputs is asked for `output`
+  natively (`nativeOutput`): `output_config.format` on each request, and
+  nothing in the system prompt or the prompt (no `reminder`); the check
+  stays (D9), for what the API does not hold the reply to. Other models
+  are asked in the prompt.
 - **Goes**: `src/claude/conversation.ts` (both tables, `pending`, `close`,
   `cancel`, `since`), `transcribe`, `TRANSCRIPT`, `storedText`, the pending
   loop, the `transcribing` wiring (`index.ts:226-231`, `:247-286`,
