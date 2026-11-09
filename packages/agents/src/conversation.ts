@@ -227,12 +227,11 @@ export async function startOf(db: DatabaseReader): Promise<Start> {
 
 /** The last position of `db`'s rows (none if it has none), and the last `seq` they have (or 0). */
 export async function lastOf(db: DatabaseReader): Promise<[last: number | undefined, seq: number]> {
-  const [[turn, turnSeq, answeredSeq]] = (await db.values(
-    `SELECT MAX(n), MAX(seq), MAX(answered_seq) FROM ${TURNS}`,
-  )) as unknown[][] as [[unknown, unknown, unknown]];
-  const [[step, stepSeq]] = (await db.values(`SELECT MAX(n), MAX(seq) FROM ${STEPS}`)) as unknown[][] as [
-    [unknown, unknown],
-  ];
+  // One subquery per maximum: each reads the end of its b-tree, where one SELECT of several scans the table.
+  const [[turn, turnSeq, answeredSeq, step, stepSeq]] = (await db.values(
+    `SELECT (SELECT MAX(n) FROM ${TURNS}), (SELECT MAX(seq) FROM ${TURNS}), (SELECT MAX(answered_seq) FROM ${TURNS}), ` +
+      `(SELECT MAX(n) FROM ${STEPS}), (SELECT MAX(seq) FROM ${STEPS})`,
+  )) as unknown[][] as [[unknown, unknown, unknown, unknown, unknown]];
   const positions = [turn, step].filter((n) => n !== null && n !== undefined).map(Number);
   const seqs = [turnSeq, answeredSeq, stepSeq].filter((s) => s !== null && s !== undefined).map(Number);
   return [positions.length > 0 ? Math.max(...positions) : undefined, seqs.length > 0 ? Math.max(...seqs) : 0];
