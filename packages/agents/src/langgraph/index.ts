@@ -27,7 +27,7 @@
 //   would hand it to the model as the tool's result); a call of a tool the
 //   agent lacks, or with arguments that do not fit, is the model's to fix.
 // - A message is answered once per invocation (`answerOnce`).
-import * as restate from '@restatedev/sessions';
+import type * as restate from '@restatedev/sessions';
 import type { RunnableConfig } from '@langchain/core/runnables';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import {
@@ -41,14 +41,7 @@ import {
   ToolMessage,
 } from '@langchain/core/messages';
 import { type StructuredToolInterface, tool, ToolInputParsingException } from '@langchain/core/tools';
-import {
-  END,
-  GraphRecursionError,
-  isGraphInterrupt,
-  MessagesAnnotation,
-  START,
-  StateGraph,
-} from '@langchain/langgraph';
+import { END, isGraphInterrupt, MessagesAnnotation, START, StateGraph } from '@langchain/langgraph';
 import { ToolNode, toolsCondition } from '@langchain/langgraph/prebuilt';
 import {
   chatHandler,
@@ -73,6 +66,7 @@ import { type Definition, sessionObject } from '../object.ts';
 import { isTool, jsonSchemaOf, type Tool as AnyTool } from '../tools.ts';
 
 import { SqlCheckpointSaver } from './checkpointer.ts';
+import { terminalOf } from './errors.ts';
 
 export { SqlCheckpointSaver };
 
@@ -281,9 +275,8 @@ const runOf =
       );
       return messages.at(-1)!.text;
     } catch (error) {
-      // A run that loops would loop again: it ends the turn.
-      if (error instanceof GraphRecursionError) throw new restate.TerminalError(error.message);
-      throw error;
+      // LangGraph's own errors (a run that loops, an invalid update) would be met again: they end the turn.
+      throw terminalOf(error) ?? error;
     }
   };
 

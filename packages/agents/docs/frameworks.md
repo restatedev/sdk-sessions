@@ -276,8 +276,10 @@ The Anthropic SDK's tool runner (`@anthropic-ai/sdk` 0.133.0).
   `failing`, `index.ts:69-95`), then publishes; START goes to the tools node
   if the turn has open calls; a stored final reply returns at once. The input
   is `{ messages: conversation.history() }`.
-- **Errors**: a `recursionLimit` of about 10 000, and `GraphRecursionError`
-  terminal; a `TerminalError` closes the turn as failed (`answerOnce` does).
+- **Errors**: a `recursionLimit` of about 10 000, and LangGraph's own
+  errors that a retry would meet again terminal (`GraphRecursionError`,
+  `InvalidUpdateError`, `EmptyInputError`: `errors.ts`, as the Python SDK's
+  `_errors.py`); a `TerminalError` closes the turn as failed (`answerOnce` does).
 - **Summaries**: `summarize` with the agent's own model.
 - **Goes**: the `prompt` and `answers` channels, the `answer` node, `close()`,
   the `for (;;)` loop, `transcribe`.

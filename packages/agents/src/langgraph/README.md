@@ -51,7 +51,9 @@ retried attempt runs it again from the start, from what is stored.
   `@restatedev/agents` tool is its answer to the model, and so are arguments
   that do not fit a tool, and a call of a tool the agent does not have.
 - **A turn takes at most `recursionLimit` steps** (default 10 000): past
-  it, it fails for good.
+  it, it fails for good. So do LangGraph's other errors that a retry would
+  meet again: an invalid state update, and a run with no input
+  ([`errors.ts`](errors.ts)).
 - **A message is answered once per invocation** (`answerOnce`). A turn that
   a killed invocation left is closed (`ended`), never finished.
 
