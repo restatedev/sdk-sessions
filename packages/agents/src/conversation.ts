@@ -1230,10 +1230,13 @@ async function answerTurn<I>(
   turn.reminder = reminder;
   const going = (async () => {
     let answered = await run(conversation);
-    // Once at most: a turn that asked again (in an earlier attempt, say) answers with the reply to that.
-    for (let again = check?.(answered); again !== undefined && turn.latestAsk() === turn.prompt; again = undefined) {
+    // Once at most: a turn that asked again (in an earlier attempt, say) answers with the reply to that,
+    // or its check fails it (a terminal error, which closes it failed, below).
+    const again = check?.(answered, turn.latestAsk() !== turn.prompt);
+    if (again !== undefined && turn.latestAsk() === turn.prompt) {
       await turn.askAgain(again);
       answered = await run(conversation);
+      check?.(answered, true);
     }
     return answered;
   })();

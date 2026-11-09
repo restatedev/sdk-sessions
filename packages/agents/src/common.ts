@@ -164,9 +164,11 @@ export const SUMMARIZE =
 /**
  * What a turn checks its answer with: nothing if the answer is what was
  * asked for, else the message that asks the model again, once, within the
- * turn (`answerOnce`'s `check`).
+ * turn (`answerOnce`'s `check`). With `last`, the model was asked again
+ * already: a check that throws a terminal error then fails the turn, which
+ * is closed with it.
  */
-export type Check = (answer: string) => string | undefined;
+export type Check = (answer: string, last?: boolean) => string | undefined;
 
 /** `window`, if it is one: a whole number of turns (0 or more), or `'all'`. */
 export function checkWindow(window: Window): Window {

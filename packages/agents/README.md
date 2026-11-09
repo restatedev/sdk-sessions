@@ -470,7 +470,8 @@ const plan = await ctx.rpc(planner, 'ENG-1').chat('Plan the work on ENG-1'); // 
 
 A reply that is not such JSON (a code fence around it is fine) is answered
 with what is wrong with it, once, for the model to reply again; then the
-invocation fails, with a terminal error. A retried attempt resumes the
+invocation fails, with a terminal error, and the conversation shows its turn
+failed, with that error. A retried attempt resumes the
 conversation, and reads the same reply. In a handler of your own, `prompt(ctx, text, {
 output })` answers with it too. As a subagent's, the parent's model gets it
 as JSON.

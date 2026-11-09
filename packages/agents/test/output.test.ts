@@ -87,6 +87,18 @@ describe("an agent's output", () => {
     await expect(conversation(chat, 'd').attempt('inv1', 'Plan wrongly')).rejects.toThrow(/summary/);
   });
 
+  it('closes its turn failed when the reply asked again is not it either, as the invocation fails', async () => {
+    const c = conversation(chat, 'never');
+    const notIt = /^The agent's reply is not the answer asked for: it is not JSON: "A plan, in prose"$/;
+    await expect(c.attempt('inv1', 'Refuse')).rejects.toThrow(notIt);
+    // The conversation says the turn failed, and why: not with the reply, as if it were the answer.
+    const { messages } = await c.read(pi.messages(), { view: 'summary' });
+    const [, answer] = messages;
+    expect(answer!.parts).toEqual([{ type: 'text', text: expect.stringMatching(/^Error: The agent's reply is not/) }]);
+    // Retried (a crash right after the close), it fails as it did.
+    await expect(c.attempt('inv1', 'Refuse')).rejects.toThrow(notIt);
+  });
+
   it('survives a crash at any point: the retry answers with the same reply', async () => {
     for (let crashAt = 1; ; crashAt++) {
       const c = conversation(chat, `crash-${crashAt}`);
