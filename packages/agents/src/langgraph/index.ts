@@ -66,11 +66,13 @@ import { type Definition, sessionObject } from '../object.ts';
 import { isTool, jsonSchemaOf, type Tool as AnyTool } from '../tools.ts';
 
 import { SqlCheckpointSaver } from './checkpointer.ts';
+import { handlerContext } from './context.ts';
 import { terminalOf } from './errors.ts';
 import { type AnyGraph, check as checkGraph, graphRun } from './graph.ts';
 
 export { SqlCheckpointSaver };
 export { type AnyGraph, INTERRUPT } from './graph.ts';
+export * as nodes from './nodes.ts';
 
 /**
  * LangGraph's items: LangChain's messages, stored as their `toDict()`. A
@@ -282,16 +284,45 @@ const runOf =
     }
   };
 
-/** `t` as a LangChain tool: `t.run` checks the model's arguments itself. */
-const native = (t: AnyTool, ctx: restate.SessionContext): StructuredToolInterface =>
+/**
+ * `t` as a LangChain tool: `t.run` checks the model's arguments itself. Its
+ * context is `ctx`, or else the graph's run's (context.ts).
+ */
+const native = (t: AnyTool, ctx?: restate.SessionContext): StructuredToolInterface =>
   tool(
-    async (args: unknown, { toolCall }) => {
+    async (args: unknown, config) => {
+      const { toolCall } = config;
       if (!toolCall?.id) throw new Error('a tool call without an id');
-      return t.run(args, { ctx, callId: toolCall.id });
+      const at = ctx ?? handlerContext((config as { context?: unknown }).context);
+      if (!at) {
+        throw new TypeError(
+          `the tool ${t.name} runs in a graph that langgraph.agent({ graph }) runs, or that is invoked with the ` +
+            "handler's context: invoke(input, { context: ctx })",
+        );
+      }
+      return t.run(args, { ctx: at, callId: toolCall.id });
     },
     // What does not fit, for the model to fix: not only that something does not.
     { name: t.name, description: t.description, schema: jsonSchemaOf(t), verboseParsingErrors: true },
   );
+
+/**
+ * `given` as LangChain tools, for a graph of your own or LangChain's
+ * `createAgent`:
+ *
+ *   const graph = createAgent({ model, tools: langgraph.tools([call(orders, 'status', { description: '…' })]) });
+ *   const desk = langgraph.agent({ name: 'desk', graph });
+ *
+ * Restate's tools (`call`, `send`, `workflow`, `subagent`, `signal`) make
+ * their Restate calls once per tool call, even if a crash runs the tool call
+ * again: the model's reply, with the tool call's id, is checkpointed before
+ * the tools run. A `tool()` of your own runs your function, again after a
+ * crash, as do LangChain's tools, which are passed through. They take the
+ * handler's context from the graph's run (`langgraph.agent({ graph })` gives
+ * it; a handler of your own passes `context: ctx`).
+ */
+export const tools = (given: (AnyTool | StructuredToolInterface)[]): StructuredToolInterface[] =>
+  given.map((t) => (isTool(t) ? native(t) : t));
 
 /** An agent's options: `chat` and `prompt` take them. */
 export interface Options<O extends z.ZodObject | undefined = z.ZodObject | undefined> {
@@ -326,16 +357,16 @@ export interface Options<O extends z.ZodObject | undefined = z.ZodObject | undef
 }
 
 /** Throw a `TypeError` if `options` gives a graph of your own with what only the built-in loop takes, or the other way around. */
-function checkOptions({ graph, model, system, tools, recursionLimit, context }: Options) {
+function checkOptions({ graph, model, system, tools: given, recursionLimit, context }: Options) {
   if (graph === undefined) {
     if (context !== undefined) throw new TypeError('context is the run context of a graph of your own: pass graph');
     return;
   }
-  const given = Object.entries({ model, system, tools, recursionLimit }).flatMap(([name, value]) =>
+  const extra = Object.entries({ model, system, tools: given, recursionLimit }).flatMap(([name, value]) =>
     value === undefined ? [] : [name],
   );
-  if (given.length > 0) {
-    throw new TypeError(`a graph of your own has its own model and tools: it takes no ${given.join(', ')}`);
+  if (extra.length > 0) {
+    throw new TypeError(`a graph of your own has its own model and tools: it takes no ${extra.join(', ')}`);
   }
   checkGraph(graph);
 }
@@ -364,7 +395,7 @@ export const prompt = <O extends z.ZodObject | undefined = undefined>(
       answerOnce(ctx, t, items, graphRun(ctx, graph, context), { check, window: 1, budget: 0 }),
     ) as Promise<Answer<O>>;
   }
-  return withChecked(text, options, async (t, { model, system, tools = [], recursionLimit }, check, reminder) =>
+  return withChecked(text, options, async (t, { model, system, tools: given = [], recursionLimit }, check, reminder) =>
     answerOnce(
       ctx,
       t,
@@ -372,7 +403,7 @@ export const prompt = <O extends z.ZodObject | undefined = undefined>(
       runOf(
         ctx,
         await modelOfOptions(model),
-        tools.map((x) => (isTool(x) ? native(x, ctx) : x)),
+        given.map((x) => (isTool(x) ? native(x, ctx) : x)),
         system,
         recursionLimit,
       ),

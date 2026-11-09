@@ -74,6 +74,37 @@ const desk = langgraph.agent({ name: 'desk', graph, context: { region: 'eu' } })
   a `structuredResponse` (LangChain's `createAgent` with a `responseFormat`)
   answers with it, as JSON; else its last AI message is validated.
 
+### Restate's steps in a graph of your own
+
+A graph is durable a step at a time: a crash runs the step it cut off
+again, which is fine for a model request, but not for a payment. Make a
+step's side effects Restate's, done once:
+
+- **Prebuilt nodes** ([`nodes.ts`](nodes.ts)): `nodes.waitForSignal`,
+  `nodes.workflow`, `nodes.call`, `nodes.send` and `nodes.subagent` each
+  read their input from the state and write what they get back to the field
+  `output`. A node run again (a crash, a retried attempt) gets the same task
+  id from LangGraph, so it joins the call, the workflow or the wait it
+  started rather than start another.
+
+  ```ts
+  const graph = new StateGraph(State)
+    .addNode('approve', nodes.waitForSignal('approval', { input: (s) => s.refund, output: 'approved' }))
+    .addNode('ship', nodes.workflow(shipping, { input: (s) => s.order, output: 'receipt' }));
+  ```
+
+- **Restate's tools** in a `ToolNode`, or LangChain's `createAgent`:
+  `langgraph.tools([...])` makes `tool()`s and Restate's tools (`call`,
+  `send`, `workflow`, `subagent`, `signal`) LangChain tools. Restate's make
+  their calls once per tool call, as the model's reply with the call's id is
+  checkpointed before the tools run; LangChain's tools are passed through.
+
+Both take the handler's context from the graph's run: `langgraph.agent({
+graph })` gives it, and a handler of your own passes it as the run context
+(`invoke(input, { context: ctx, durability: 'sync' })`, with a
+`SqlCheckpointSaver(ctx.db)`). A node refuses to run without it, a
+checkpointer, or `durability: 'sync'`.
+
 ## Through crashes
 
 The built-in agent keeps no checkpoints: its conversation is the object's
@@ -132,6 +163,8 @@ The tests run on a scripted model, [`test/fakes/langgraph.ts`](../../test/fakes/
   graph of your own: its thread across turns, a run a crash cut off,
   `interrupt()` as signals (a retried attempt joins the same wait), the
   structured response, what closed a failed run, and the graphs refused;
+  [`langgraph-nodes.test.ts`](../../test/langgraph-nodes.test.ts), the
+  prebuilt nodes and `tools()`, through crashes;
   [`storage/langgraph-prune.test.ts`](../../test/storage/langgraph-prune.test.ts),
   the checkpointer's `prune` and `metadata`.
 - [`test/langgraph.test.ts`](../../test/langgraph.test.ts):
