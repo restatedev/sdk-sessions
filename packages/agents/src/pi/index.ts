@@ -411,8 +411,15 @@ export const withPi = async <T>(
     context,
   );
 
-  const prompt = (text: string, check?: Check) =>
-    answerOnce(
+  const prompt = (text: string, check?: Check) => {
+    // 0.3.0's `prompt(text, id)` took a prompt's id: from JavaScript, it would
+    // fail as the check is called, again at every retry.
+    if (check !== undefined && typeof check !== 'function') {
+      throw new restate.TerminalError(
+        `pi's prompt(text, check) takes a check of the answer, not ${JSON.stringify(check)}: a prompt has an id of its own`,
+      );
+    }
+    return answerOnce(
       ctx,
       text,
       items,
@@ -462,6 +469,7 @@ export const withPi = async <T>(
       },
       { check },
     );
+  };
   // `failure`, once it comes. A cancellation aborts the conversation's work
   // instead: the work ends with it (a prompt closes its turn, cancelled).
   const abortOn = async (): Promise<never> => {

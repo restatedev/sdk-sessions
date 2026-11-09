@@ -174,6 +174,10 @@ describe('pi.messages', () => {
 const reset = (ctx: restate.SessionContext) =>
   pi.withPi(ctx, {}, async ({ conversation, context }) => (await conversation()).reset(undefined, context));
 
+/** A handler that prompts as in 0.3.0, with an id: from JavaScript, as TypeScript refuses it. */
+const byItsId = (ctx: restate.SessionContext) =>
+  pi.withPi(ctx, {}, (session) => session.prompt('Hi', 'greeting' as unknown as undefined));
+
 /** A handler that prompts twice. */
 const twice = async (ctx: restate.SessionContext) => [
   await pi.prompt(ctx, 'One'),
@@ -343,6 +347,13 @@ describe('pi.chat', () => {
     const alice = object('alice');
     expect(await alice.invoke(twice, 'inv1', undefined)).toEqual(['One', 'One / Two']);
     expect(await alice.invoke(twice, 'inv1', undefined)).toEqual(['One', 'One / Two']);
+  });
+
+  it("fails for good, saying why, given a prompt's id as 0.3.0's prompt(text, id) took", async () => {
+    const alice = object('alice');
+    const failed = await alice.invoke(byItsId, 'inv1', undefined).catch((error: unknown) => error);
+    expect(failed).toBeInstanceOf(restate.TerminalError);
+    expect(String(failed)).toMatch(/takes a check of the answer, not "greeting"/);
   });
 
   it('remembers the conversation across messages, and answers a retried message once', async () => {
