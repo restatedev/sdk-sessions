@@ -10,8 +10,9 @@ OpenCode left, in [The frameworks](frameworks.md#opencode) (D6 of
 **Status: proposed.** Research of 2026-11-09: OpenCode's published packages
 (`@opencode/core`, `sdk`, `server`, `plugin`, `schema`, `util`) at 2.0.32 and
 2.2.6, the latest release (2026-11-06), read in their sources, nothing run;
-and OpenCode's docs, OpenAPI spec, changelog and issues. Step 0 is the spike
-that runs what this page only read.
+and OpenCode's docs, OpenAPI spec, changelog and issues. Step 0, the
+spike, has run since ([The spike's findings](#the-spikes-findings)): a dead
+turn is closed without the model, both ways.
 
 ## Why it left, and what changed
 
@@ -57,6 +58,41 @@ So a dead turn _can_ be closed in OpenCode's store: not through its public
 client, but through the same override that already decided how OpenCode
 resumes. The rest of this page builds on that.
 
+## The spike's findings
+
+Step 0, run on OpenCode 2.2.6 over the object's database, with a scripted
+model that fails the test if asked
+([`test/opencode-spike.test.ts`](../test/opencode-spike.test.ts),
+[`src/opencode/db.ts`](../src/opencode/db.ts); on Node 24, which OpenCode
+needs: the test skips on an older Node).
+
+- **A dead turn is closed without the model, both ways**: by a
+  `SessionRestart` of our own, and by `SessionRestart.layer({ maxAttempts: 0 })`.
+  Each leaves a failed idle marker and releases the claim; a later boot
+  resumes nothing; the next prompt is answered in a turn of its own, whose
+  model request has the dead call and its result, no "Continue", and does not
+  make the call again.
+- **A crashed turn of the same prompt is resumed**, as before: the model is
+  asked, and the turn finishes.
+- **Our result for a cut-off call lands only after a death without
+  teardown.** A host that is closed (as an attempt that ends while its
+  process lives closes it) fails its running calls itself, with OpenCode's
+  "Tool execution interrupted", and keeps the claim: the closer then finds
+  no running part. So the closing note must say which calls did happen
+  whichever closer runs, and the closer of our own buys little over the
+  budget's: **the budget (`maxAttempts: 0`) is the default**, ours stays in
+  `db.ts` as an option.
+- **A queued prompt does not join the turn; a steered one does.**
+  `delivery: 'queue'` starts after the turn's last step, as a new turn of the
+  same drain, with no idle marker between. `delivery: 'steer'` joins at the
+  next step. Steering uses `'steer'`.
+- **Awaiting the sweep is safe, and was not shown to be needed**: in
+  process, the sweep ended before the first request in every run.
+- **Ported from 0.3.0's `db.ts`**: the workerd replacements are picked by
+  the node each replaces (through a private symbol: no public way), not by
+  position; `SqlClient.make` takes a `driver`; the workerd profile installs
+  no packages, so the tests' model provider is a local file.
+
 ## What OpenCode does, in brief
 
 From the sources, 2.0.32 and 2.2.6 alike unless said:
@@ -68,7 +104,7 @@ From the sources, 2.0.32 and 2.2.6 alike unless said:
 | A turn's end         | the projector's `projectIdle`                                                        | a `session_message` row `{type: 'idle', outcome, error}`, and `session_v2.time_idle`, `idle_outcome`                                                                                                                                                                                                                                                                               |
 | One event, one write | `Bus.publish` of a durable event                                                     | one `immediate` transaction: the projections, the commit hook (claim, release), the event's sequence and row                                                                                                                                                                                                                                                                       |
 | The resume, at boot  | `SessionRestart.resumeSuspendedSessions`, forked by the host, not awaited            | background jobs first (shell, subagent child sessions; 2.2.6 adds images), then each claimed top-level session not active here: `prepareResume` (above), then `execution.resume`, a forced drain                                                                                                                                                                                   |
-| A drain              | `SessionRunner.drain` (`packages/core/src/session/runner/llm.ts`)                    | `settleStaleToolCalls` first, at _every_ drain (a resume's, and the next prompt's): `Tool.Failed` "Tool execution interrupted: <name>" for each streaming or running tool part; then the inbox's queued input joins the turn (`advanceToStep`), then a step: compaction if due, the `context` hook, the model                                                                      |
+| A drain              | `SessionRunner.drain` (`packages/core/src/session/runner/llm.ts`)                    | `settleStaleToolCalls` first, at _every_ drain (a resume's, and the next prompt's): `Tool.Failed` "Tool execution interrupted: <name>" for each streaming or running tool part; then steered input joins the turn (`advanceToStep`; queued input waits for its end), then a step: compaction if due, the `context` hook, the model                                                 |
 | Interrupt            | `Session.interrupt` → `SessionExecution.interrupt` → the coordinator                 | ends a drain of this process (`Execution.Interrupted`, released); no drain here, `false`, and nothing is written                                                                                                                                                                                                                                                                   |
 | `active`, `wait`     | the coordinator                                                                      | in-memory only: what runs in this process                                                                                                                                                                                                                                                                                                                                          |
 | Plugin hooks         | `@opencode/plugin`                                                                   | session `prompt`, `context`, `compaction`, `generate`, `title`, `model.request`, `http.request`, `http.response`, `retry`, `experimental.ws.*`; tool `execute.before`, `execute.after`; `aisdk.sdk`, `language`; `permission.evaluate`; `shell.create.before`; transforms. None runs in the restart, none can veto a turn; 2.2.6 adds `experimental.idle` (a successful idle only) |
@@ -92,7 +128,7 @@ dead turn is the one hole, and the copy into the store is new.
 | **Refused** (424), **failed for good**                                       | a failed idle marker; a refusal by its error; closed `UNANSWERED` or with the error                                                                   | 424, no note                                  |
 | **A provider's outage fails the attempt, not the turn**                      | the `session.retry` hook: retry without limit, or end the attempt; a refusal is never retried                                                         | OpenCode's own retries, then a failed turn    |
 | **The closing note reaches the next model**                                  | `(<note>)` starts the next prompt's text, as for pi and DeepSeek                                                                                      | none                                          |
-| **Steering**: a message joins at the next step                               | the inbox: a prompt queued while the drain runs joins the turn at its next step (`advanceToStep`), by its id `msg_steer_<id>`                         | a message queued waited for the next turn     |
+| **Steering**: a message joins at the next step                               | a prompt of `delivery: 'steer'` joins the running turn at its next step, by its id `msg_steer_<id>` (one of `'queue'` waits for the turn's end)       | a message queued waited for the next turn     |
 | **Asking again** (`output`'s check) is a step of the turn                    | a second message, `msg_<prompt id>_again`, in the same turn                                                                                           | a second turn                                 |
 | **The views read the store**                                                 | `transcribe` and `transcribing` go; `messages` reads the store's copies                                                                               | the log, from OpenCode's messages             |
 | **Compaction** is the framework's own                                        | OpenCode's: near the window, on an overflow, or asked; its compaction messages are not copied                                                         | the same                                      |
@@ -297,8 +333,8 @@ Run what this page only read, on OpenCode 2.2.6 over the object's database
 4. the fallback, `maxAttempts: 0`, the same way;
 5. the inbox: a prompt queued while a drain runs joins it at its next step.
 
-**Done when** the findings are in the PR, with the choice between the
-closer and the fallback.
+**Done** ([The spike's findings](#the-spikes-findings)): the budget is the
+default closer, and steering is `delivery: 'steer'`.
 
 ### Step 1: back, at 2.2.6, as it was
 
@@ -377,11 +413,11 @@ OpenCode (`examples/advanced/foreman`).
 
 ## Decisions proposed
 
-| #   | Decision                                                                                                   | Why                                                                                      |
-| --- | ---------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| O1  | **OpenCode 2.2.6**, `effect` 4.1.0, pinned exactly                                                         | 2.0.32 predates 2.1.0's renames; the closer's seams are the same in both                 |
-| O2  | **Whose claim it is comes from `ctx.db`**: the last prompt submitted, recorded before its submit           | OpenCode's tables are projections whose layout changes; the order makes the record sound |
-| O3  | **A dead turn is closed by a `SessionRestart` of the integration's own**, the budget's events, its results | No public call does it; this is the seam the old integration already used                |
-| O4  | **OpenCode first, then the copy, then the store**, through a `settleOwn` hook of `answerOnce` and `settle` | The only order that stays consistent across a crash between two stores                   |
-| O5  | **The copy is idempotent and catches up** before each publish, answer and close                            | It cannot share OpenCode's transaction                                                   |
-| O6  | **v1 without OpenCode's background work** (subagents, background shells, questions)                        | Their recovery is not yet mapped onto turns; Restate's `subagent` delegates instead      |
+| #   | Decision                                                                                                       | Why                                                                                      |
+| --- | -------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| O1  | **OpenCode 2.2.6**, `effect` 4.1.0, pinned exactly                                                             | 2.0.32 predates 2.1.0's renames; the closer's seams are the same in both                 |
+| O2  | **Whose claim it is comes from `ctx.db`**: the last prompt submitted, recorded before its submit               | OpenCode's tables are projections whose layout changes; the order makes the record sound |
+| O3  | **A dead turn is closed by OpenCode's resume budget** (`maxAttempts: 0`), the note saying which calls happened | No public call does it; the spike showed a closer of our own buys little over it         |
+| O4  | **OpenCode first, then the copy, then the store**, through a `settleOwn` hook of `answerOnce` and `settle`     | The only order that stays consistent across a crash between two stores                   |
+| O5  | **The copy is idempotent and catches up** before each publish, answer and close                                | It cannot share OpenCode's transaction                                                   |
+| O6  | **v1 without OpenCode's background work** (subagents, background shells, questions)                            | Their recovery is not yet mapped onto turns; Restate's `subagent` delegates instead      |
