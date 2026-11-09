@@ -146,10 +146,12 @@ describe('the DeepSeek Harness agent', () => {
   });
 
   it('publishes the conversation as a turn and its tool calls start and end', async () => {
-    const { answer, parts, published } = await followedWhileWorking(
+    const { answer, parts, published, outputs } = await followedWhileWorking(
       (tools) => deepseek.chat({ tools }),
       deepseek.messages(),
     );
+    // A follower reads the call as it starts, and its output as it ends.
+    expect(outputs).toEqual([undefined, 'moved 5 from account 1 to account 2']);
     expect(answer).toBe('Done: moved 5 from account 1 to account 2');
     expect(parts).toEqual([
       [{ type: 'text', text: 'Please move 5 from 1 to 2' }],

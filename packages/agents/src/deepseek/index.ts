@@ -351,10 +351,17 @@ function promptOf(turn: Turn<Message>, before: { status?: string; answer?: strin
  * tools' results. Not the requests to continue (a step of the run's own),
  * nor anything once the run stopped or `failed()` (the harness's result of a
  * tool that failed the attempt, or was cancelled, is not the call's): the
- * turn's close, or the retry, says how it ended.
+ * turn's close, or the retry, says how it ended. `resulted` gets the calls
+ * whose results it copied.
  */
 const copying =
-  (ctx: restate.SessionContext, turn: Turn<Message>, from: () => number | undefined, failed: () => boolean) =>
+  (
+    ctx: restate.SessionContext,
+    turn: Turn<Message>,
+    from: () => number | undefined,
+    failed: () => boolean,
+    resulted: (calls: string[]) => void,
+  ) =>
   async (tx: Parameters<NonNullable<SqlSessionPersistence['copy']>>[0], batch: readonly SessionEvent[]) => {
     const start = from();
     if (start === undefined || failed() || stopSignalOf(ctx)?.aborted || !turn.writable) return;
@@ -364,7 +371,9 @@ const copying =
       if (e.type === 'tool/result') return [{ item: e.data.message }];
       return [];
     });
-    if (copied.length > 0) await turn.copyIn(tx, copied);
+    if (copied.length === 0) return;
+    await turn.copyIn(tx, copied);
+    resulted(batch.flatMap((e) => (e.seq > start && e.type === 'tool/result' ? [e.data.message.toolCallId] : [])));
   };
 
 /**
@@ -399,12 +408,14 @@ const runOf =
     const id = again ? MessageId(`prompt:${turn.id}:again`) : promptId(turn.id);
     // Where the turn's latest ask is in the log, once it is.
     let from: number | undefined;
+    // The tool calls that returned, whose ends are published once a flush stored their results.
+    const returned = new Set<string>();
     try {
       const sessionId = SessionId(ctx.key);
       const options = {
         agentOptions: route,
         setup: (agentCtx: Context) => {
-          for (const t of tools) agentCtx.tools.register(tracked(isTool(t) ? native(t, ctx) : t, ctx, fail));
+          for (const t of tools) agentCtx.tools.register(tracked(isTool(t) ? native(t, ctx) : t, ctx, fail, returned));
         },
       };
       // Resuming closes a harness turn a crash, or a killed invocation, left open.
@@ -414,6 +425,8 @@ const runOf =
       agent = started.agent;
       const found = agent.session.snapshotEvents().length;
       from = agent.session.snapshotEvents().find((e) => e.type === 'user/message' && e.data.id === id)?.seq;
+      // A tool call's end is published once a flush stored its result, for followers to read it there.
+      let ended = false;
       persistence.copy = async (tx, batch) => {
         from ??= batch.find((e) => e.type === 'user/message' && e.data.id === id)?.seq;
         await copying(
@@ -421,7 +434,16 @@ const runOf =
           turn,
           () => from,
           () => broken,
+          (calls) => {
+            for (const call of calls) if (returned.delete(call)) ended = true;
+          },
         )(tx, batch);
+      };
+      persistence.flushed = async () => {
+        if (!ended) return;
+        ended = false;
+        // Failing, it fails the attempt, as a tool's error does: never the flush, which is done.
+        await toolCallEnded(ctx).catch(fail);
       };
       // The turn before this one, as the conversation has it.
       const before = conversation.transcript.at(-2);
@@ -458,20 +480,24 @@ async function cancelTurn(harness: Context, agent: Agent) {
 }
 
 /**
- * `definition`, its calls published as they start and end (for the clients
- * that follow the conversation), and its error failing the attempt.
+ * `definition`, its calls published as they start, and as they end once
+ * their results are stored (each call that returned is put in `returned`),
+ * for the clients that follow the conversation; its error failing the
+ * attempt.
  */
 const tracked = (
   definition: ToolDefinition,
   ctx: restate.SessionContext,
   fail: (error: unknown) => void,
+  returned: Set<string>,
 ): ToolDefinition => ({
   ...definition,
   execute: async (args, exec) => {
     try {
       await toolCallStarted(ctx);
       const result = await definition.execute(args, exec);
-      await toolCallEnded(ctx);
+      // Its end is published once the harness stored its result (`runOf`).
+      returned.add(exec.callId);
       return result;
     } catch (error) {
       fromTool(ctx, error);

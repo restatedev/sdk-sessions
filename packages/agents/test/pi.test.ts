@@ -260,7 +260,10 @@ describe('pi.chat', () => {
   });
 
   it('publishes the conversation as a turn and its tool calls start and end', async () => {
-    const { answer, parts, published } = await followedWhileWorking((tools) => pi.chat({ tools }), pi.messages());
+    const { answer, parts, published, outputs } = await followedWhileWorking(
+      (tools) => pi.chat({ tools }),
+      pi.messages(),
+    );
     expect(answer).toBe('moved 5 from account 1 to account 2');
     expect(parts).toEqual([
       [{ type: 'text', text: 'Please move 5 from 1 to 2' }],
@@ -277,6 +280,8 @@ describe('pi.chat', () => {
     ]);
     // Published at its start, as its tool call starts and ends, and at its end.
     expect(published).toBe(4);
+    // A follower reads the call as it starts, and its output as it ends.
+    expect(outputs).toEqual([undefined, answer]);
   });
 
   it('in the background, publishes only the end of a turn', async () => {

@@ -494,7 +494,10 @@ messages by id does not notice.
 The revision increases at:
 
 - a turn's start, and each of its tool calls' start and end (not in the
-  background);
+  background): its end once its result is stored, so that a follower reads
+  it there. pi and DeepSeek store a tool's result after the tool returns (pi
+  in its next commit, DeepSeek in its next flush): they publish the end once
+  that commit has copied the result into the turn;
 - a turn's close: its own, its watch's, or the next turn's `start` closing
   it;
 - `settle`, once it closed a dead turn in the conversation;

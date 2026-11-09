@@ -515,6 +515,12 @@ The Anthropic SDK's tool runner (`@anthropic-ai/sdk` 0.133.0).
   conversation's entries after the turn's user entry (its submission's
   `entry`) and after the last copied: `pi.assistant` and `pi.tool-result`,
   each item keeping its entry id.
+- **A tool's end is published once its result is stored**: pi commits a
+  tool's result after the tool returns, so publishing as the tool returned
+  had a follower read the call without its output until the next publish.
+  The storage facade's `afterCommit` publishes it once the commit that copied
+  the result is done (DeepSeek's persistence does the same after a flush,
+  `flushed`).
 - **A provider's outage** no longer ends the turn: pi-durable retried a
   failed request 3 times, then settled the submission `unanswered` for good.
   A new request id per attempt would have asked again, but with the prompt

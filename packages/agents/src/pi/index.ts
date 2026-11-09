@@ -174,9 +174,10 @@ export const items: Items<Item> = {
  * the run of the turn's request `requestId` after its user entry (pi's
  * submission names it),
  * its replies and its tools' results; nothing once `stopped()`, or once the
- * turn is closed. Each entry once: after the last one copied.
+ * turn is closed. Each entry once: after the last one copied. `resulted`
+ * gets the calls whose results it copied.
  */
-function copying(turn: Turn<Item>, requestId: string, stopped: () => boolean) {
+function copying(turn: Turn<Item>, requestId: string, stopped: () => boolean, resulted: (calls: string[]) => void) {
   let from: { conversation: number; last: number } | undefined;
   return async (tx: DatabaseWriter) => {
     if (stopped() || !turn.writable) return;
@@ -202,7 +203,9 @@ function copying(turn: Turn<Item>, requestId: string, stopped: () => boolean) {
         copied.push({ item: { entry: Number(id), message }, reply: message.role === 'assistant' });
       }
     }
-    if (copied.length > 0) await turn.copyIn(tx, copied);
+    if (copied.length === 0) return;
+    await turn.copyIn(tx, copied);
+    resulted(copied.flatMap(({ item: { message } }) => (message.role === 'toolResult' ? [message.toolCallId] : [])));
   };
 }
 
@@ -369,13 +372,15 @@ export const withPi = async <T>(
     cancel(error);
     return awaitWithContext(new Promise<never>(() => {}), context);
   };
+  // The tool calls that returned, whose ends are published once pi stored their results (`prompt`).
+  const returned = new Set<string>();
   const tracked = (t: ToolRegistration): ToolRegistration => ({
     ...t,
     execute: async (args, api, task) => {
       try {
         await toolCallStarted(ctx);
         const result = await t.execute(args, api, task);
-        await toolCallEnded(ctx);
+        returned.add(api.callId);
         return result;
       } catch (error) {
         // The tool's error: never taken for the model's provider refusing (a tool may call a model API).
@@ -421,11 +426,25 @@ export const withPi = async <T>(
         // A run an earlier prompt of this invocation left (its turn failed, say).
         await abortLeft((r) => r === id || r === `${id}:again`);
         // Once stopped, the turn's close says how it ended: not pi's abort of its tools.
+        // A tool call's end is published once its result is stored, for followers to read it there.
+        let ended = false;
         database.onCommit = copying(
           current,
           requestId,
           () => cancelled !== undefined || stopSignalOf(ctx)?.aborted === true,
+          (calls) => {
+            for (const call of calls) if (returned.delete(call)) ended = true;
+          },
         );
+        database.afterCommit = async () => {
+          if (!ended) return;
+          ended = false;
+          // Failing, it fails the attempt, as a tool's error does: never pi's commit, which is done.
+          await toolCallEnded(ctx).catch((error: unknown) => {
+            failed(error);
+            cancel(error);
+          });
+        };
         // The model is told how the turn before this one ended, if its run did not answer it.
         const before = store.transcript.at(-2);
         const note = !again && before && before.status !== 'answered' && before.answer ? `(${before.answer})\n\n` : '';
