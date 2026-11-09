@@ -132,6 +132,10 @@ chain here, `Stop.guard` is a race with the turn's `AbortSignal`
   history, and its turns hold copies of its messages
   ([The conversation](conversation.md#framework-owned-history)). The Python
   SDK has this only for a LangGraph graph of your own (`graph=`).
+- **`waitFor` can rejoin** (`rejoin`), which Python's `wait_for` never does:
+  the DeepSeek Harness makes a call cut off by a crash again under a new id,
+  so its approvals join the earlier attempt's wait by their input, as
+  Restate's own tools do. Pydantic AI keeps a deferred call's id.
 - **Snapshots are not ported** (no framework here needs them). Their table is
   created anyway, so that the schema is the Python SDK's, step for step.
 - **Names** follow this package: `answerOnce`, `askAgain`, `stopSignalOf`,

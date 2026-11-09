@@ -39,8 +39,8 @@ What the core gives an integration, once ported:
   `askAgain`) and its reads (`finalReply`, `openCalls`, `latestAsk`,
   `stored`).
 - **Tools**, as today (`tool()`'s `run` gets `ctx` and the call's id), and
-  `waitFor(ctx, callId, signal, input, { approval })` for a framework's own
-  durable wait.
+  `waitFor(ctx, callId, signal, input, { approval, rejoin })` for a
+  framework's own durable wait.
 - **The turn's signal** (`stopSignalOf`), refusals (`refusalOf`, `fromTool`),
   and publishing (`toolCallStarted`, `toolCallEnded`), as today.
 

@@ -480,11 +480,15 @@ invocation (the next invocation's first call replaces it):
   same tool and input), makes a call of its own, also after a crash that left
   the first's record unforgotten (its turn's end forgets it after the answer
   is stored). Today `callOf` matches by id alone.
-- **A framework's own wait is its tool call's alone** (`waitFor`, which never
-  rejoins). The framework stored the tool call before it waits, so a retried
+- **A framework's own wait is its tool call's alone** (`waitFor`, which does
+  not rejoin). The framework stored the tool call before it waits, so a retried
   attempt waits again under the same id; a new call with the same input (the
   model asking again after the first's answer) waits anew, and never gets an
-  earlier call's approval or denial.
+  earlier call's approval or denial. A framework that makes a cut-off call
+  again under a new id instead (DeepSeek, whose approval comes before the
+  harness stores the call) waits with `rejoin`: the call made again joins
+  the wait an earlier attempt opened with the same input, as Restate's
+  tools do, until that call's result is stored.
 - **Forgetting.** At each publish and before each tool call, a record whose
   Restate call returned is forgotten once the turn has its result under the
   latest id it was made with (`Turn.stored`): a success, or the very error
