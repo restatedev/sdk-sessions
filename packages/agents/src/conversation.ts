@@ -847,8 +847,10 @@ async function transcriptOf<I>(
   let before = Number.MAX_SAFE_INTEGER;
   const walk = new Walk(bounded[0]);
   let left = bounded[1] * 4;
+  // Without a budget, the window and the turn before it are a few turns: a page of a few.
+  const page = left > 0 ? PAGE : 4;
   for (;;) {
-    const rows = await db.values(`${TRANSCRIPT} WHERE n >= ? AND n < ? ORDER BY n DESC LIMIT ?`, [first, before, PAGE]);
+    const rows = await db.values(`${TRANSCRIPT} WHERE n >= ? AND n < ? ORDER BY n DESC LIMIT ?`, [first, before, page]);
     for (const row of rows) {
       const entry = promptEntry(items, row);
       read.push(entry);
@@ -856,10 +858,11 @@ async function transcriptOf<I>(
       if (entry.answer !== undefined) {
         // A turn before the window: the model sees its message and answer, while the budget holds them.
         left -= (parsedOf(items, entry).said?.[1] ?? '').length + entry.answer.length;
-        if (left < 0) return read.toReversed();
+        // Without a budget, the first turn before the window is the last read (the model is told how it ended).
+        if (left < 0 || bounded[1] === 0) return read.toReversed();
       }
     }
-    if (rows.length < PAGE) return read.toReversed();
+    if (rows.length < page) return read.toReversed();
     before = read.at(-1)!.n;
   }
 }
@@ -1162,7 +1165,9 @@ export const invocationOf = (promptId: string) => promptId.split(':', 1)[0]!;
  * invocation is gone. `items` must be the agent's `messages` view's, if it
  * has one: one framework per agent.
  *
- * `window` and `budget` are the agent's unless given. With `check`, the
+ * `window` and `budget` are the agent's unless given; with `ownHistory`
+ * (the framework keeps the model's history itself), none: only the latest
+ * turns are read, and the agent's `summarize` is not for it. With `check`, the
  * answer is checked: a message it returns asks the model again with it,
  * once, as a step of the turn ({@link Turn.askAgain}), and the turn's answer
  * is the reply to that. With `reminder`, the model is told it after the
@@ -1173,7 +1178,7 @@ export async function answerOnce<I>(
   text: string,
   items: Items<I>,
   run: Run<I>,
-  options: { window?: Window; budget?: number; check?: Check; reminder?: string } = {},
+  options: { window?: Window; budget?: number; check?: Check; reminder?: string; ownHistory?: boolean } = {},
 ): Promise<string> {
   const settings = settingsOf(ctx);
   // One framework per agent (D7): its conversation holds its `messages` view's items, which another can't read.
@@ -1182,8 +1187,12 @@ export async function answerOnce<I>(
       "this agent's `messages` view is another framework's: an agent's conversation holds one framework's items",
     );
   }
-  const window = checkWindow(options.window ?? settings.window);
-  const budget = options.budget ?? settings.budget;
+  // A framework that keeps the model's history itself (pi, DeepSeek) reads
+  // only the latest turns: the one it answers, and the one before, to tell
+  // the model how that ended. Summaries are of `history()`, which it never reads.
+  const own = options.ownHistory === true;
+  const window = own ? 0 : checkWindow(options.window ?? settings.window);
+  const budget = own ? 0 : (options.budget ?? settings.budget);
   const promptId = nextPromptId(ctx);
   await SCHEMA.ensure(ctx.db);
   const stored = await answerIn(ctx.db, promptId);
@@ -1203,7 +1212,7 @@ export async function answerOnce<I>(
     ),
   );
   const definition = definitionOf(ctx) as { name: string } | undefined;
-  if (settings.summarize && conversation.overflowing() && definition) {
+  if (!own && settings.summarize && conversation.overflowing() && definition) {
     // Compacted in an invocation of its own, which the key runs before its next message.
     ctx.send({ service: definition.name, handler: 'compact', key: ctx.key, idempotencyKey: `${promptId}:compact` });
   }

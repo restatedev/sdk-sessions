@@ -7,6 +7,7 @@ import type { RequestMessage } from '@deepseek-ai/dsh-llm';
 import * as restate from '@restatedev/restate-sdk';
 import { CANCELLED, REFUSED, UNANSWERED } from '@restatedev/agents';
 import { AttemptEnded, ENDED } from '../src/common.ts';
+import { Conversation } from '../src/conversation.ts';
 import {
   afterCancel,
   cancelledTransfer,
@@ -317,6 +318,20 @@ describe('the DeepSeek Harness agent', () => {
       teller.reply = reply;
     }
     expect(JSON.stringify(seen[0]!.at(-1))).toContain(UNANSWERED);
+  });
+
+  it("reads only the latest turns of a long conversation, as the harness keeps the model's history", async () => {
+    const c = conversation(prompt, 'long');
+    for (let n = 0; n < 8; n++) await c.attempt(`inv${n}`, `message ${n}`);
+    const load = vi.spyOn(Conversation, 'load');
+    try {
+      await c.attempt('inv8', 'message 8');
+      const loaded = (await load.mock.results[0]!.value) as Conversation<unknown>;
+      // The turn before (the model is told how it ended) and the one it answers: not the 7 before them.
+      expect(loaded.transcript).toHaveLength(2);
+    } finally {
+      load.mockRestore();
+    }
   });
 
   it('keeps the requests to continue out of the conversation', async () => {

@@ -9,6 +9,7 @@ import { defineTool } from '@earendil-works/pi-durable';
 import { describe, expect, it, vi } from 'vitest';
 import { callTools, fakeProvider, say, textOf, unavailable } from './fakes/pi.ts';
 import { AttemptEnded } from '../src/common.ts';
+import { Conversation } from '../src/conversation.ts';
 import {
   afterCancel,
   cancelledTransfer,
@@ -341,6 +342,20 @@ describe('pi.chat', () => {
     const failed = object('alice').invoke(pi.chat({ tools: [boom] }), 'inv1', 'Break it');
     await expect(failed).rejects.toThrow('no such page');
     await expect(failed).rejects.not.toBeInstanceOf(restate.TerminalError);
+  });
+
+  it("reads only the latest turns of a long conversation, as pi keeps the model's history", async () => {
+    const alice = object('alice');
+    for (let n = 0; n < 8; n++) await alice.invoke(pi.chat(), `inv${n}`, `message ${n}`);
+    const load = vi.spyOn(Conversation, 'load');
+    try {
+      await alice.invoke(pi.chat(), 'inv8', 'message 8');
+      const loaded = (await load.mock.results[0]!.value) as Conversation<unknown>;
+      // The turn before (the model is told how it ended) and the one it answers: not the 7 before them.
+      expect(loaded.transcript).toHaveLength(2);
+    } finally {
+      load.mockRestore();
+    }
   });
 
   it('answers each prompt of an invocation, and each once', async () => {

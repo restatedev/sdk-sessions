@@ -469,7 +469,8 @@ export const withPi = async <T>(
         if (!reply) throw new restate.TerminalError(`prompt ${id}: no answer entry`);
         return textOf(reply.content);
       },
-      { check, reminder },
+      // pi keeps the model's history: the conversation reads only its latest turns.
+      { check, reminder, ownHistory: true },
     );
   };
   // `failure`, once it comes. A cancellation aborts the conversation's work

@@ -520,7 +520,8 @@ export const prompt = <O extends z.ZodObject | undefined = undefined>(
   options: Options<O> = {},
 ): Promise<Answer<O>> =>
   withChecked(text, options, (t, o, check, reminder) =>
-    answerOnce(ctx, t, items, runOf(ctx, o), { check, reminder }),
+    // The harness keeps the model's history: the conversation reads only its latest turns.
+    answerOnce(ctx, t, items, runOf(ctx, o), { check, reminder, ownHistory: true }),
   ) as Promise<Answer<O>>;
 
 /**
