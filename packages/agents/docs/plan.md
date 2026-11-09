@@ -620,8 +620,7 @@ The PR's author asks for a review after each step, or a few. The review:
 ## Out of scope
 
 Not in this PR, on purpose: snapshots (D3); steps retention (the Python
-SDK's `steps-retention.md`); a LangGraph graph of your own on framework-owned
-history (`agent({ graph })`) and `interrupt()` as signals; durable approvals
+SDK's `steps-retention.md`); durable approvals
 for the frameworks that have them (DeepSeek's `approval/request`, OpenCode's
 permission hook); steering; a port of `scripts/resurrect.py`; changes to
 `@restatedev/sessions`, unless a step needs one (then in a commit of its

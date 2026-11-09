@@ -77,7 +77,7 @@ the handler `chat` (a message in, the answer out), and the views
 | Import                                                    | Framework                       | Choose it when                                                                                |
 | --------------------------------------------------------- | ------------------------------- | --------------------------------------------------------------------------------------------- |
 | [`@restatedev/agents/pi`](src/pi/README.md)               | pi-durable                      | You want the default: any provider, coding tools on request, and its Harness (compact, reset) |
-| [`@restatedev/agents/langgraph`](src/langgraph/README.md) | LangGraph                       | You use LangChain: its tools, or a chat model of your own                                     |
+| [`@restatedev/agents/langgraph`](src/langgraph/README.md) | LangGraph                       | You use LangChain: its tools, a chat model of your own, or a graph of your own                |
 | [`@restatedev/agents/claude`](src/claude/README.md)       | the Anthropic SDK's tool runner | You want Claude with nothing in between: the lightest, the API's own messages                 |
 | [`@restatedev/agents/deepseek`](src/deepseek/README.md)   | DeepSeek Harness                | You want DeepSeek's harness: DeepSeek's models, or any pi-ai knows                            |
 

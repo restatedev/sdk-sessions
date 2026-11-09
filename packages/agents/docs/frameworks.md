@@ -292,11 +292,14 @@ The Anthropic SDK's tool runner (`@anthropic-ai/sdk` 0.133.0).
   finds them from those its parent needed, as the `put` before kept them in
   memory: a child needs some of its parent's, so a thread's steps read none
   back (Python's reads them at each `put`).
-- **Later, not in this port**: `agent({ graph })`, a graph of your own on
-  framework-owned history (the Python SDK's `_graph.py`: the messages after
-  the run's input copied by id, the prompt's id `prompt:<turn>`, a window of
-  at least 1, a closed turn's closing record as the run's input), with
-  `interrupt()` as Restate signals.
+- **A graph of your own** (`agent({ graph })`, `graph.ts`, as the Python
+  SDK's `_graph.py`): framework-owned history, its checkpoints in the key's
+  database; the messages after the run's input copied by id, the prompt's id
+  `prompt:<turn>`, a window of 1, a closed turn's closing record as the
+  run's input; `interrupt()` as Restate signals. Unlike Python's, the run's
+  prompt is stamped on its checkpoints by the saver (`metadata`), since the
+  loop does not merge `config.metadata`; and an interrupt's wait id adds the
+  count of resume values stored, since a node's interrupts share one id.
 - **Tests** (`test/langgraph.test.ts`, 15 today): invert `:187-195`; add a
   stored final reply not asked again, counting model calls (the Python SDK's
   `langgraph-reask-stored-reply` mutant survived its crash tests, and would

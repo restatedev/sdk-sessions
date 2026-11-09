@@ -67,8 +67,10 @@ import { isTool, jsonSchemaOf, type Tool as AnyTool } from '../tools.ts';
 
 import { SqlCheckpointSaver } from './checkpointer.ts';
 import { terminalOf } from './errors.ts';
+import { type AnyGraph, check as checkGraph, graphRun } from './graph.ts';
 
 export { SqlCheckpointSaver };
+export { type AnyGraph, INTERRUPT } from './graph.ts';
 
 /**
  * LangGraph's items: LangChain's messages, stored as their `toDict()`. A
@@ -226,7 +228,7 @@ async function integration<T>(name: string, load: () => Promise<T>): Promise<T> 
  * the turn has calls without results (a crash cut them off). The model node
  * stores each reply before it returns.
  */
-function graph(
+function toolLoop(
   ctx: restate.SessionContext,
   turn: Turn<BaseMessage>,
   model: BaseChatModel,
@@ -267,7 +269,7 @@ const runOf =
     // A stored final reply is the answer: the model is not asked for it again.
     const final = turn.finalReply();
     if (final !== undefined) return final;
-    const app = graph(ctx, turn, model, tools, system).compile();
+    const app = toolLoop(ctx, turn, model, tools, system).compile();
     try {
       const { messages } = await app.invoke(
         { messages: sendable(conversation.history()) },
@@ -303,9 +305,39 @@ export interface Options<O extends z.ZodObject | undefined = z.ZodObject | undef
   recursionLimit?: number;
   /**
    * The answer as data: a zod object, whose JSON the agent replies with
-   * (checked), and `chat` and `prompt` answer with (see output.ts).
+   * (checked), and `chat` and `prompt` answer with (see output.ts). With
+   * `graph`, the graph's own prompts must ask for it.
    */
   output?: O;
+  /**
+   * A graph of your own to run, instead of the built-in tool-calling loop
+   * (graph.ts): a `StateGraph` whose state has `messages`, or a compiled one
+   * (such as LangChain's `createAgent` makes). It has its own model and
+   * tools, so it takes no `model`, `system`, `tools` or `recursionLimit`.
+   */
+  graph?: AnyGraph;
+  /**
+   * The run context of `graph` (LangGraph's `context`), for a graph with a
+   * context schema of its own. By default the handler's context. The
+   * prebuilt `nodes` and the tools of `tools()` get the handler's context
+   * either way.
+   */
+  context?: unknown;
+}
+
+/** Throw a `TypeError` if `options` gives a graph of your own with what only the built-in loop takes, or the other way around. */
+function checkOptions({ graph, model, system, tools, recursionLimit, context }: Options) {
+  if (graph === undefined) {
+    if (context !== undefined) throw new TypeError('context is the run context of a graph of your own: pass graph');
+    return;
+  }
+  const given = Object.entries({ model, system, tools, recursionLimit }).flatMap(([name, value]) =>
+    value === undefined ? [] : [name],
+  );
+  if (given.length > 0) {
+    throw new TypeError(`a graph of your own has its own model and tools: it takes no ${given.join(', ')}`);
+  }
+  checkGraph(graph);
 }
 
 /** The chat model of `model`. */
@@ -323,8 +355,16 @@ export const prompt = <O extends z.ZodObject | undefined = undefined>(
   ctx: restate.SessionContext,
   text: string,
   options: Options<O> = {},
-): Promise<Answer<O>> =>
-  withChecked(text, options, async (t, { model, system, tools = [], recursionLimit }, check, reminder) =>
+): Promise<Answer<O>> => {
+  checkOptions(options);
+  const { graph, context } = options;
+  if (graph !== undefined) {
+    // The graph keeps its own history: the conversation loads the previous turn whole, for what closed it.
+    return withChecked(text, options, (t, _options, check) =>
+      answerOnce(ctx, t, items, graphRun(ctx, graph, context), { check, window: 1, budget: 0 }),
+    ) as Promise<Answer<O>>;
+  }
+  return withChecked(text, options, async (t, { model, system, tools = [], recursionLimit }, check, reminder) =>
     answerOnce(
       ctx,
       t,
@@ -339,6 +379,7 @@ export const prompt = <O extends z.ZodObject | undefined = undefined>(
       { check, reminder },
     ),
   ) as Promise<Answer<O>>;
+};
 
 /**
  * A chat handler: each message an invocation, the conversation in the
@@ -347,7 +388,10 @@ export const prompt = <O extends z.ZodObject | undefined = undefined>(
  * (`curl -d 'Hi'`) or as a JSON string (`curl --json '"Hi"'`).
  */
 export const chat = <O extends z.ZodObject | undefined = undefined>(options: Configure<Options<O>> = {}) => {
-  if (typeof options === 'object' && typeof options.model !== 'object') providerOfModel(modelOf(options.model));
+  if (typeof options === 'object') {
+    checkOptions(options);
+    if (options.graph === undefined && typeof options.model !== 'object') providerOfModel(modelOf(options.model));
+  }
   return chatHandler(async (ctx, message) => prompt(ctx, message, await configured(options, ctx)));
 };
 
@@ -386,7 +430,8 @@ export const agent = <P extends string, O extends z.ZodObject | undefined = unde
     background,
     window,
     budget,
-    summarize: summarize ?? summarizer(options.model),
+    // A graph of your own keeps its own history, which the conversation's summaries do not reach.
+    summarize: summarize ?? (options.graph === undefined ? summarizer(options.model) : undefined),
     handlers: { chat: chat(options) },
     views: { messages: messages() },
   });
