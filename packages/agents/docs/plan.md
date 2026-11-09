@@ -311,7 +311,8 @@ invocation failed; `status` shows `invocationId` and `since` only.
 
 - a `messages` view on the store is the framework's, made with its `Items`
   (a function of this step, `conversationView(items)` say), and carries them,
-  so that `sessionObject` finds them, as it finds `alsoClearing`'s clear;
+  so that `sessionObject` finds them (after the merge, nothing else uses
+  `alsoClearing`, OpenCode's `clear` of its own database, which is gone);
 - the private handlers `settle(invocationId)` (close the turn, then publish)
   and `compact()` (from the agent's settings), for an agent on the store;
   `settle` and `compact` become reserved names;
