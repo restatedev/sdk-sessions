@@ -112,8 +112,13 @@
     "@langchain/langgraph-checkpoint": "1.1.5",
     "@langchain/langgraph-checkpoint-validation": "1.1.1",
     "@langchain/openai": "1.7.0",
+    "@opencode/core": "2.2.6",
+    "@opencode/plugin": "2.2.6",
+    "@opencode/sdk": "2.2.6",
+    "@opencode/server": "2.2.6",
     "@restatedev/restate-sdk": "1.18.2",
     "@restatedev/sessions": "workspace:*",
+    "effect": "4.1.0",
     "zod": "4.6.5"
   },
   "peerDependencies": {
