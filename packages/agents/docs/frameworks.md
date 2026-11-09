@@ -642,6 +642,10 @@ and its ask never settles, so the harness stores no decision.
 
 ## OpenCode
 
+Its return is planned in [OpenCode's return](opencode.md): a dead turn closed
+through a `SessionRestart` of the integration's own, which the findings below
+predate.
+
 `@opencode/*` 2.0.32, with `effect` 4.0.1. `src/opencode/` (removed in step 8).
 
 ### Today

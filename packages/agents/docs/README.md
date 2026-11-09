@@ -77,6 +77,7 @@ flowchart LR
 | [Turn semantics](turns.md)            | what a turn is; its life, its end, attempts, stops, dead turns and `settle`; the turn model in code; what clients see; the guarantees                   |
 | [The conversation](conversation.md)   | the data layout (every table), a worked example, which turns a turn loads, what the model gets, framework-owned history, the call records, the schemas  |
 | [The frameworks](frameworks.md)       | per framework: how it works today (with the problems found), the library's own model, and how it maps onto the store                                    |
+| [OpenCode's return](opencode.md)      | proposed: how OpenCode comes back on the store, its dead turns closed by a `SessionRestart` of the integration's own; the alternatives, the steps       |
 | [Testing](testing.md)                 | how the agents are tested, and each past bug brought back to see which tests notice (`scripts/resurrect.ts`)                                            |
 | [Access patterns](access-patterns.md) | what a conversation asks of Restate state, turn after turn, warm and in a new process (`scripts/access-patterns.ts`)                                    |
 
