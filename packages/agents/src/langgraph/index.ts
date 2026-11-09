@@ -434,7 +434,9 @@ export const chat = <O extends z.ZodObject | undefined = undefined>(options: Con
     checkOptions(options);
     if (options.graph === undefined && typeof options.model !== 'object') providerOfModel(modelOf(options.model));
   }
-  // The built-in loop takes steered messages at its steps; a graph of your own takes none (each is a turn of its own).
+  // The built-in loop takes steered messages at its steps; a graph of your own takes none (each is a turn of its
+  // own). Options a function gives are known only as a message comes, after its turn says whether it takes them:
+  // such a turn says it does, so that a graph from that function holds a message until its turn ends.
   const steers = typeof options === 'function' || options.graph === undefined;
   return chatHandler(async (ctx, message) => prompt(ctx, message, await configured(options, ctx)), { steers });
 };

@@ -540,7 +540,15 @@ const runOf =
       from = agent.session.snapshotEvents().find((e) => e.type === 'user/message' && e.data.id === id)?.seq;
       // A tool call's end is published once a flush stored its result, for followers to read it there.
       let ended = false;
+      // The harness messages of the steered messages in the log: those before this attempt, and each flush's.
+      const placed = new Set(
+        agent.session
+          .snapshotEvents()
+          .flatMap((e) => (e.type === 'user/message' && steeredId(e.data.id) !== undefined ? [String(e.data.id)] : [])),
+      );
       persistence.copy = async (tx, batch) => {
+        for (const e of batch)
+          if (e.type === 'user/message' && steeredId(e.data.id) !== undefined) placed.add(e.data.id);
         from ??= batch.find((e) => e.type === 'user/message' && e.data.id === id)?.seq;
         await copying(
           ctx,
@@ -565,11 +573,6 @@ const runOf =
       unlisten = inboxOf(ctx)?.listen(() => {
         if (stop?.aborted || broken) return;
         const pending = new Set(harnessAgent.inbox.nextStep.map((m) => String(m.id)));
-        const placed = new Set(
-          harnessAgent.session
-            .snapshotEvents()
-            .flatMap((e) => (e.type === 'user/message' && e.seq > (from ?? 0) ? [String(e.data.id)] : [])),
-        );
         for (const { id: steerId, text } of inboxOf(ctx)!.messages) {
           const messageId = steerMessageId(steerId);
           if (given.has(steerId) || pending.has(messageId) || placed.has(messageId)) continue;

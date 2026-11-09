@@ -131,11 +131,11 @@ rows': 59 mutants in all.
 
 ### Steering
 
-Steering ([Steering a turn](turns.md#steering-a-turn)) came with 17
+Steering ([Steering a turn](turns.md#steering-a-turn)) came with 19
 durability mutants of its own, of no fix: the rules of a steered message's
 life, each with the test that fails for it. Run on its branch, with Node
 22.23 and, for the two e2e ones, Restate 1.8.0 (`pnpm --filter e2e
-steering`): all 17 are killed.
+steering`): all 19 are killed.
 
 | Mutant                             | Bug brought back                                                                                   | Verdict            |
 | ---------------------------------- | -------------------------------------------------------------------------------------------------- | ------------------ |
@@ -152,6 +152,8 @@ steering`): all 17 are killed.
 | `steer-left-out-of-history`        | an earlier turn reaches the model without the messages steered to it                               | killed             |
 | `steer-free-of-the-budget`         | the budget counts a turn's prompt and answer only                                                  | killed             |
 | `steer-left-out-of-summary`        | the summary view misses a steered message                                                          | killed             |
+| `claude-steer-not-before-first`    | Claude takes no message before the turn's first request                                            | killed             |
+| `claude-steer-after-pause`         | Claude takes a message after a paused reply, which then is not the last message                    | killed             |
 | `claude-steer-not-sent`            | Claude stores the message, but its next request is the runner's own, without it                    | killed             |
 | `langgraph-steer-not-asked`        | LangGraph's model node stores the message, but asks without it                                     | killed             |
 | `pi-steer-not-copied`              | pi places the message, but the turn's copy leaves it out                                           | killed             |

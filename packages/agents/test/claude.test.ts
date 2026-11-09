@@ -22,6 +22,7 @@ import {
   followedWhileWorking,
   conversation,
   crashedAnywhere,
+  followingOf,
   SAID_IN_TURNS as SAID,
   handlerOf,
   type PromptHandler,
@@ -720,6 +721,54 @@ describe('the Claude agent, steered', () => {
     ]);
     expect(audits).toBe(2);
     expect(taken).toEqual(['steer-1']);
+  });
+
+  it('takes a message steered before its first request in that request', async () => {
+    const c = conversation(prompt, 'early');
+    followingOf(c.state).steering = [{ id: 'early', text: 'audit the books' }];
+    const asked: MessageParam[][] = [];
+    const reply = teller.reply;
+    teller.reply = (messages, request) => {
+      asked.push(structuredClone(messages));
+      return reply(messages, request);
+    };
+    let answer: unknown;
+    try {
+      answer = await c.attempt('inv1', 'Hello');
+    } finally {
+      teller.reply = reply;
+    }
+    expect(asked[0]).toEqual([
+      { role: 'user', content: 'Hello' },
+      { role: 'user', content: 'audit the books' },
+    ]);
+    expect(answer).toMatch(/^Done: /);
+    expect(followingOf(c.state).taken).toEqual([['early']]);
+  });
+
+  it('takes no message after a paused reply, which goes back as the last message', async () => {
+    const c = conversation(prompt, 'paused-steer');
+    const reply = teller.reply;
+    const asked: MessageParam[][] = [];
+    teller.reply = (messages) => {
+      asked.push(structuredClone(messages));
+      // The attempt fails once the paused reply is stored: the retry goes on from it.
+      if (asked.length === 2) throw new Error('the connection dropped');
+      const [text, stop] = asked.length === 1 ? ['Searching...', 'pause_turn'] : ['Found it.', 'end_turn'];
+      return { ...reply(messages), content: [{ type: 'text', text }], stop_reason: stop } as never;
+    };
+    let answer: unknown;
+    try {
+      await expect(c.attempt('inv1', 'Hello')).rejects.toThrow(/connection/i);
+      // Listed to the retried attempt as it starts, with the paused reply last in the turn.
+      followingOf(c.state).steering = [{ id: 'late', text: 'audit the books' }];
+      answer = await c.attempt('inv1', 'Hello');
+    } finally {
+      teller.reply = reply;
+    }
+    expect(answer).toBe('Found it.');
+    expect(asked[2]!.at(-1)).toEqual({ role: 'assistant', content: [{ type: 'text', text: 'Searching...' }] });
+    expect(followingOf(c.state).taken).toEqual([]);
   });
 
   it("puts the message after the tools' results, in a request the API takes, and every request after it keeps it", async () => {

@@ -227,11 +227,6 @@ export const stopSignalOf = (ctx: restate.SessionContext): AbortSignal | undefin
  */
 export interface Settings {
   background: boolean;
-  /**
-   * Its `chat` handler's answer, if `chatHandler` made it: the private
-   * `steered` handler answers with it a steered message that no turn took.
-   */
-  chat?: Chat;
   /** The items of its framework, if it keeps the conversation of turns (its `messages` view is `conversationView`'s). */
   items?: object;
   window: Window;
@@ -250,7 +245,6 @@ export const isAgent = <D extends object>(
   definition: D,
   {
     background = false,
-    chat = undefined as Chat | undefined,
     items = undefined as object | undefined,
     window = WINDOW as Window,
     budget = BUDGET,
@@ -259,7 +253,6 @@ export const isAgent = <D extends object>(
 ) => {
   return AGENT.on(definition, {
     background,
-    chat,
     items,
     window,
     budget,

@@ -214,7 +214,7 @@ const FOLLOWED = followed(false);
  * signals', and the conversation's ids and cursors go on where they got to
  * (conversation.ts).
  */
-const internal = (items: Items<unknown> | undefined, chat: { answer: Chat; steers: boolean } | undefined) => ({
+const internal = (items: Items<unknown> | undefined) => ({
   erase: {
     ingressPrivate: true,
     handler: async (ctx: restate.SessionContext) => {
@@ -249,20 +249,21 @@ const internal = (items: Items<unknown> | undefined, chat: { answer: Chat; steer
     ingressPrivate: true,
     handler: async (ctx: restate.SessionContext) => (items ? compact(ctx, items) : false),
   },
-  /**
-   * Answer a message sent to `steer` as a turn of its own, with the agent's
-   * `chat`, unless the turn it was sent to took it. The companion sends it
-   * as the message is sent, so that it keeps its place in the key's queue:
-   * it runs once the messages before it are answered.
-   */
-  steered: {
-    ingressPrivate: true,
-    explicitCancellation: true,
-    handler: async (ctx: restate.SessionContext, { id, text }: Steer) => {
-      if (!chat) throw new restate.TerminalError(`${ctx.request.target.service} has no \`chat\` to answer with`);
-      if (await steerStored(ctx.db, id)) return;
-      await chatTurn(ctx, text, chat.answer, chat.steers);
-    },
+});
+
+/**
+ * The private `steered` of an agent whose `chat` is `chat` (`chatHandler`'s):
+ * it answers a message sent to `steer` as a turn of its own, with that
+ * `chat`, unless the turn it was sent to took it. The companion sends it as
+ * the message is sent, so that it keeps its place in the key's queue: it runs
+ * once the messages before it are answered.
+ */
+const steeredOf = ({ answer, steers }: { answer: Chat; steers: boolean }) => ({
+  ingressPrivate: true,
+  explicitCancellation: true,
+  handler: async (ctx: restate.SessionContext, { id, text }: Steer) => {
+    if (await steerStored(ctx.db, id)) return;
+    await chatTurn(ctx, text, answer, steers);
   },
 });
 
@@ -320,7 +321,7 @@ type Functions<H> = string extends keyof H ? unknown : { [K in keyof H]: H[K] ex
 /** The names of the handlers and views every object (or agent) has, which its own cannot take. */
 type Reserved = {
   [
-    name in keyof typeof BUILT_IN | keyof typeof FOLLOWED | keyof ReturnType<typeof internal>
+    name in keyof typeof BUILT_IN | keyof typeof FOLLOWED | keyof ReturnType<typeof internal> | 'steered'
   ]?: 'a handler every object has: name yours otherwise';
 };
 
@@ -377,7 +378,7 @@ export const sessionObject = <
   if (!(Number.isInteger(budget) && budget >= 0)) {
     throw new Error(`${name}: budget must be a number of tokens (0 or more), not ${JSON.stringify(budget)}`);
   }
-  const own = [...Object.keys(BUILT_IN), ...Object.keys(FOLLOWED), ...Object.keys(internal(undefined, undefined))];
+  const own = [...Object.keys(BUILT_IN), ...Object.keys(FOLLOWED), ...Object.keys(internal(undefined)), 'steered'];
   if ('messages' in handlers) {
     throw new Error(`${name}: \`messages\` is a view: put it in \`views\`, so that the object is an agent`);
   }
@@ -408,8 +409,8 @@ export const sessionObject = <
       `${name}: \`summarize\` needs the conversation of turns: a framework's \`messages\` view (\`claude.messages()\`, say)`,
     );
   }
-  const { erase, steered, ...stored } = internal(items, chat);
-  const steering: Record<string, restate.Entry<restate.SessionContext>> = chat ? { steered } : {};
+  const { erase, ...stored } = internal(items);
+  const steering: Record<string, restate.Entry<restate.SessionContext>> = chat ? { steered: steeredOf(chat) } : {};
   const privates: Record<string, restate.Entry<restate.SessionContext>> = messages === undefined
     ? {}
     : items
@@ -426,7 +427,7 @@ export const sessionObject = <
         metadata,
         options: { ...OPTIONS, ...options },
       }),
-      { background, chat: chat?.answer, items, window, budget, summarize },
+      { background, items, window, budget, summarize },
     ),
   );
 };
