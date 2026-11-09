@@ -92,10 +92,14 @@ export async function page<I>(db: DatabaseReader, items: Items<I>, request: Mess
   return start.n ? { ...result, first: start.n } : result;
 }
 
-/** The rows (`n`, `seq`, `item`) of the transcript and the trajectories from position `first` on, in order. */
-async function rowsFrom(db: DatabaseReader, first: number) {
-  const turns = await db.values(`SELECT n, seq, item FROM ${TURNS} WHERE n >= ? ORDER BY n`, [first]);
-  const steps = await db.values(`SELECT n, seq, item FROM ${STEPS} WHERE n >= ? ORDER BY n`, [first]);
+/**
+ * The rows (`n`, `seq`, `item`) of the transcript and the trajectories from
+ * position `first` on, before position `until` if given, in order.
+ */
+async function rowsFrom(db: DatabaseReader, first: number, until = Number.MAX_SAFE_INTEGER) {
+  const range = 'WHERE n >= ? AND n < ? ORDER BY n';
+  const turns = await db.values(`SELECT n, seq, item FROM ${TURNS} ${range}`, [first, until]);
+  const steps = await db.values(`SELECT n, seq, item FROM ${STEPS} ${range}`, [first, until]);
   return [...turns, ...steps].toSorted((a, b) => Number(a[0]) - Number(b[0]));
 }
 
@@ -126,7 +130,9 @@ async function since<I>(db: DatabaseReader, items: Items<I>, cursor: number, lim
 /**
  * The latest `limit` messages before id `before`, rendered from enough turns
  * back to hold them: each turn starts with a message, so the rows from the
- * `limit + 1`-th latest turn before `before` on hold more than `limit`.
+ * `limit + 1`-th latest turn before `before` on hold more than `limit`. And
+ * to no later than the turn `before` is in: a turn's rows add only to its
+ * own messages, so the turns from `before` on change none before it.
  */
 async function latest<I>(
   db: DatabaseReader,
@@ -142,7 +148,9 @@ async function latest<I>(
   );
   const cursor = await now(db);
   if (first === null || first === undefined) return { messages: [], more: false, cursor };
-  const messages = render(items, await rowsFrom(db, Number(first))).filter((m) => m.id < end);
+  const until = before === undefined ? undefined : await one(db, `SELECT MIN(n) FROM ${TURNS} WHERE n >= ?`, [end]);
+  const rows = await rowsFrom(db, Number(first), until === null || until === undefined ? undefined : Number(until));
+  const messages = render(items, rows).filter((m) => m.id < end);
   const earlier = await one(db, `SELECT EXISTS (SELECT 1 FROM ${TURNS} WHERE n < ?)`, [first]);
   return {
     messages: latestOf(messages, limit).map(chat),
