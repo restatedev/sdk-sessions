@@ -60,18 +60,24 @@ const InTransaction = Context.Service<SqlClient.TransactionConnection, SqlClient
   '@restatedev/agents/OpenCodeTransaction',
 );
 
+/** A statement that writes. */
+const WRITE = /^\s*(INSERT|UPDATE|DELETE|REPLACE)\b/i;
+
 /**
  * A connection whose statements go to `target`: the session, which runs one
  * call at a time and holds them while a transaction runs, or that
- * transaction's database. Each is refused once `fence` closes.
+ * transaction's database. Each is refused once `fence` closes; `wrote` is
+ * told of each statement that writes.
  */
-function connection(target: DatabaseWriter, fence: Fence): Connection {
+function connection(target: DatabaseWriter, fence: Fence, wrote: () => void = () => {}): Connection {
   // Effect binds what the compiler made of OpenCode's values: SQL values.
   const exec = <T>(read: (sql: string, params: SqlValue[]) => Promise<T>, sql: string, params: readonly unknown[]) =>
     Effect.tryPromise({
       try: async () => {
         if (fence.closed) throw new Error('the attempt is over');
-        return read(sql, params as SqlValue[]);
+        const result = await read(sql, params as SqlValue[]);
+        if (WRITE.test(sql)) wrote();
+        return result;
       },
       catch: (cause) => error('execute', cause),
     });
@@ -91,8 +97,16 @@ function connection(target: DatabaseWriter, fence: Fence): Connection {
   };
 }
 
-/** An Effect SqlClient over `db`, with its statements refused once `fence` closes. */
-export function sqlClient(db: Database, fence: Fence): Layer.Layer<SqlClient.SqlClient> {
+/**
+ * An Effect SqlClient over `db`, with its statements refused once `fence`
+ * closes. `committed` runs after each write is committed: a transaction that
+ * wrote, or a statement that writes outside one.
+ */
+export function sqlClient(
+  db: Database,
+  fence: Fence,
+  committed: () => void = () => {},
+): Layer.Layer<SqlClient.SqlClient> {
   // `effect` as one SQL transaction: it commits when `effect` succeeds
   // and rolls back when it fails. Its statements go to the transaction's
   // database.
@@ -105,6 +119,7 @@ export function sqlClient(db: Database, fence: Fence): Layer.Layer<SqlClient.Sql
         const rollback = new Error('rollback');
         let interrupted = false;
         let resumed = false;
+        let wrote = false;
         // Settles when the transaction has committed, or rejects: with
         // `rollback` once `effect` failed, or with the error of BEGIN or COMMIT.
         const ended: Promise<void> = db.transaction(
@@ -113,7 +128,7 @@ export function sqlClient(db: Database, fence: Fence): Layer.Layer<SqlClient.Sql
               if (interrupted) return reject(rollback);
               const inner = Effect.provideContext(
                 effect,
-                Context.add(fiber.context, InTransaction, [connection(tx, fence), 0]),
+                Context.add(fiber.context, InTransaction, [connection(tx, fence, () => (wrote = true)), 0]),
               );
               resumed = true;
               resume(
@@ -137,6 +152,10 @@ export function sqlClient(db: Database, fence: Fence): Layer.Layer<SqlClient.Sql
               );
             }),
         );
+        ended.then(
+          () => (wrote ? committed() : undefined),
+          () => undefined,
+        );
         const settled = ended.catch((cause: unknown) => {
           // BEGIN failed: `effect` never ran.
           if (!resumed && cause !== rollback) resume(Effect.fail(error('transaction', cause)));
@@ -150,7 +169,8 @@ export function sqlClient(db: Database, fence: Fence): Layer.Layer<SqlClient.Sql
 
   const make = Effect.gen(function* () {
     const client = yield* SqlClient.make({
-      acquirer: Effect.succeed(connection(db, fence)),
+      // Outside a transaction, a statement commits as it runs.
+      acquirer: Effect.succeed(connection(db, fence, committed)),
       compiler: Statement.makeCompilerSqlite(),
       driver: 'sqlite-restate',
       spanAttributes: [['db.system.name', 'sqlite']],
@@ -202,12 +222,14 @@ export interface OpenOptions {
   local?: boolean;
   /** What this boot does with the turns left claimed (default `resume`). */
   restart?: Restart;
-  /** How `close` closes them (default `own`). */
+  /** How `close` closes them (default `budget`: the spike found ours buys little over it). */
   closer?: Closer;
   /** The result of a tool call that a closed turn left running (`own` only). */
   cutOff?: (toolCallId: string, name: string) => string;
   /** The error a closed turn ends with (`own` only). */
   ended?: string;
+  /** Runs after each of OpenCode's writes is committed: for a copy of what it wrote. */
+  committed?: () => void;
 }
 
 /** A booted OpenCode: `call` runs one of `client`'s calls (which return Effects); `close` shuts it down. */
@@ -320,7 +342,8 @@ export async function openOpenCode(
     config = {},
     local = false,
     restart = 'resume',
-    closer = 'own',
+    closer = 'budget',
+    committed,
     cutOff = () => CUT_OFF,
     ended = ENDED,
   }: OpenOptions,
@@ -347,7 +370,7 @@ export async function openOpenCode(
       },
       {
         overrides: [
-          OpenCodeDatabase.node.replace(OpenCodeDatabase.configuredClient(sqlClient(db, fence))),
+          OpenCodeDatabase.node.replace(OpenCodeDatabase.configuredClient(sqlClient(db, fence, committed))),
           ...rest,
           SessionRestart.node.replace(SessionRestart.node.mapLayer(() => sweep as never)),
         ],
