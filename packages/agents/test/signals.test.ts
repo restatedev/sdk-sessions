@@ -48,13 +48,18 @@ function companion(ends: Record<string, Promise<unknown>> = {}, { watched = fals
   const state = new Map<string, unknown>();
   const own: { method: string; input: unknown }[] = [];
   const rejected: string[] = [];
+  /** The state it cleared, by name, in order. */
+  const cleared: string[] = [];
   /** What it sent to others (an agent's `settle`, or `steered`). */
   const sent: { service: string; method: string; key?: string; parameter: unknown; idempotencyKey?: string }[] = [];
   const ctx = {
     key: 'assistant:alice',
     get: async (name: string) => structuredClone(state.get(name)),
     set: (name: string, value: unknown) => void state.set(name, structuredClone(value)),
-    clear: (name: string) => void state.delete(name),
+    clear: (name: string) => {
+      cleared.push(name);
+      state.delete(name);
+    },
     resolveAwakeable: () => {},
     rejectAwakeable: (awakeable: string) => void rejected.push(awakeable),
     objectSendClient: () =>
@@ -79,7 +84,7 @@ function companion(ends: Record<string, Promise<unknown>> = {}, { watched = fals
   const handlers = (signals as unknown as { object: Record<string, (ctx: unknown, input?: unknown) => unknown> })
     .object;
   const run = <T>(name: string, input?: unknown) => handlers[name]!(ctx, input) as Promise<T>;
-  return { run, own, rejected, sent, state };
+  return { run, own, rejected, sent, state, cleared };
 }
 
 const wait = (id: string, awakeable: string) => ({ id, name: 'approval', since: '', awakeable });
@@ -323,5 +328,44 @@ describe("an agent's companion, steering", () => {
     const c = companion();
     await c.run('start', { ...turn(A), steers: true });
     expect(await c.run('status')).toEqual({ answering: turn(A), waiting: [] });
+  });
+});
+
+describe("an agent's companion, publishing a turn's start", () => {
+  it('publishes a turn that says so as it starts it, and returns what `publish` returns', async () => {
+    const c = companion();
+    const before = await revision(c);
+    const started = await c.run<{ revision: number }>('start', { ...turn(A), publishes: true });
+    expect(started).toEqual({ revision: before + 1 });
+    expect(await revision(c)).toBe(before + 1);
+    // A retried start (the same invocation) publishes again: the attempt's first publish.
+    expect(await c.run('start', { ...turn(A), publishes: true })).toEqual({ revision: before + 2 });
+  });
+
+  it('returns the messages steered to the turn that it has not taken, as `publish` does', async () => {
+    const c = companion();
+    await c.run('start', { ...turn(A), steers: true, publishes: true });
+    await c.run('steer', { id: 's1', text: 'use Celsius' });
+    // The retried attempt's start finds it.
+    const started = await c.run<{ steering?: unknown[] }>('start', { ...turn(A), steers: true, publishes: true });
+    expect(started.steering).toEqual([{ id: 's1', text: 'use Celsius' }]);
+  });
+
+  it('publishes nothing for a turn that does not say so (of another SDK, or in the background), and returns nothing', async () => {
+    const c = companion();
+    const before = await revision(c);
+    expect(await c.run('start', turn(A))).toBeUndefined();
+    expect(await revision(c)).toBe(before);
+  });
+
+  it('clears the watches only when one waits', async () => {
+    const c = companion();
+    await published(c);
+    expect(c.cleared).not.toContain('watching');
+    await c.run('subscribe', { revision: 5, awakeable: 'awk_w' });
+    await published(c);
+    expect(c.cleared.filter((name) => name === 'watching')).toHaveLength(1);
+    await published(c);
+    expect(c.cleared.filter((name) => name === 'watching')).toHaveLength(1);
   });
 });

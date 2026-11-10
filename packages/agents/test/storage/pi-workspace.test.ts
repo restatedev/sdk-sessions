@@ -1,12 +1,14 @@
 // withPi over an SQL database in memory, without a Restate server: the
-// coding tools of a workspace write to the local file system.
+// coding tools of a workspace write to the local file system. The attempt has
+// the agent's companion (../support.ts): the turn publishes its steps, the
+// coding tools' too.
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createModels } from '@earendil-works/pi-ai/models';
 import { describe, expect, it } from 'vitest';
-import { sqlAttempt } from '@restatedev/sessions/test/support';
 import { callTools, fakeProvider, say } from '../fakes/pi.ts';
+import { followingOf, sqlAttempt } from '../support.ts';
 import { withPi } from '@restatedev/agents/pi';
 
 describe('withPi', () => {
@@ -23,7 +25,8 @@ describe('withPi', () => {
     );
     try {
       // An attempt over a key of its own: the log starts afresh.
-      const attempt = sqlAttempt({ map: new Map(), id: 'inv' });
+      const map = new Map<string, Uint8Array>();
+      const attempt = sqlAttempt({ map, id: 'inv' });
       const { answer, agent } = await attempt.end(() =>
         withPi(attempt.ctx, { models, model: 'scribe/scribe', workspace }, async (pi) => ({
           answer: await pi.prompt('take a note'),
@@ -34,6 +37,8 @@ describe('withPi', () => {
       expect(agent.tools.map((t) => t.name)).toEqual(['read', 'write', 'edit', 'bash']);
       expect(agent.sections.map((s) => s.key)).toContain('cwd');
       expect(await readFile(join(workspace, 'notes.md'), 'utf8')).toBe('crushed');
+      // Published once the reply with the call is stored, and once its result is.
+      expect(followingOf(map).revision).toBe(2);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

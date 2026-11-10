@@ -101,18 +101,19 @@ sequenceDiagram
   participant DB as Key's database
   participant S as Companion (signals)
   C->>A: chat("Plan my week")
-  A->>S: start(turn, settles)
+  A->>S: start(turn, settles, publishes)
   S-)S: awaitTurn(turn)
-  Note over S: status.answering = turn
-  A->>S: publish
+  Note over S: status.answering = turn, publish
+  S-->>A: the revision, and the messages steered to the turn, if any
   A->>DB: the prompt's answer? (none yet)
   A->>DB: load the transcript and the window
   A->>DB: ask: the turn's row
   loop each step of the framework
-    A->>DB: append the model's reply, the tool calls' results
-    A->>S: publish (a tool call starts, ends)
+    A->>DB: append the model's reply with tool calls, or the tool calls' results
+    A->>S: publish (after the commit)
+    S-->>A: the revision, and the messages steered to the turn, if any
   end
-  A->>DB: answered: the answer, and what the turn carries
+  A->>DB: answered: the final reply, the answer, and what the turn carries
   opt the earlier turns outgrow the budget
     A-)A: compact (runs before the next message)
   end
@@ -129,7 +130,12 @@ sequenceDiagram
    on the conversation store; see [Dead turns](#dead-turns)). A retried
    attempt calls `start` again with the same invocation, which changes
    nothing (it keeps when the turn started). `start` sends
-   `awaitTurn(turn)`, the turn's watch.
+   `awaitTurn(turn)`, the turn's watch. A followed turn says it `publishes`:
+   `start` then publishes, as the turn's first revision, and returns what
+   `publish` returns (the revision, and the messages steered to the turn),
+   so the turn makes no publish of its own to start. A companion that
+   returns nothing from `start` (an older deployment, or the Python SDK's
+   before 1.5.2) gets a `publish` from the turn instead.
 2. **The prompt.** `answerOnce` reads the prompt's answer by its id, one
    indexed read: a retried attempt of an answered turn returns it, and reads
    nothing more. Otherwise it loads the conversation
@@ -137,11 +143,17 @@ sequenceDiagram
    closes a turn left without an answer, and stores the prompt as the turn's
    row.
 3. **Steps.** The framework answers: model calls and tool calls. Each step
-   is stored as it comes (a reply in one transaction, before its tools run;
-   each result as it comes back), and each tool call publishes as it starts
-   and as it ends, so a follower sees the call start and its result.
+   is stored as it comes (a reply with tool calls in one transaction, before
+   its tools run; the tools' results before the model is asked again). A
+   final reply, which no tool waits for, is held, and commits with the
+   answer. After each write of steps that commits, the turn publishes once,
+   and waits for it (`Conversation.hold`, which `answerOnce` sets: `append`
+   and `appendReply` publish themselves; a framework that copies its steps
+   in a transaction of its own, `copyIn`, publishes once that commits). So
+   a follower sees the calls as their tools start, and their results before
+   the model's next request.
 4. **Answer.** The answer is stored on the turn's row, with what the turn
-   carries. If the turns before the next turn's window outgrow the agent's
+   carries, and the final reply, in one commit. If the turns before the next turn's window outgrow the agent's
    budget, the agent sends itself `compact`
    ([Summaries](conversation.md#summaries)).
 5. **End.** `chatHandler` calls the companion's `close(turn)` and waits for
@@ -150,7 +162,8 @@ sequenceDiagram
    the turn's error.
 
 A **background** agent (`background: true`, a subagent say) publishes its
-turn's end only: no step, nor its start, wakes a follower.
+turn's end only: no step, nor its start, wakes a follower (its `start` does
+not say it publishes).
 
 ## How a turn ends
 
@@ -445,13 +458,14 @@ sequenceDiagram
   C->>A: chat/send("Plan my week")
   A->>S: start(turn, steers)
   A->>DB: the model's reply, a tool call
+  A->>S: publish (after the commit)
   C->>V: steer("Skip Friday")
   V->>S: steer(id, text)
   S-)P: steered(id, text): queued now, behind the turn
   Note over S: inbox: the message, for this turn
-  A->>S: publish (the tool call ends)
-  S-->>A: revision, steering: [the message]
   A->>DB: the tool's result
+  A->>S: publish (after the result's commit)
+  S-->>A: revision, steering: [the message]
   A->>DB: the message, a step of the turn, and taken(id) in the transaction's outbox
   DB--)S: taken(id), once the transaction commits
   A->>A: the model's next request has it
@@ -520,10 +534,12 @@ sequenceDiagram
   being answered takes steered messages (its `start` says so,
   `Started.steers`), it holds the message for that turn (`inbox`), 16 at
   most (`STEERS`).
-- **How the turn learns of it.** From `publish`, which the turn makes at
-  each tool call's start and end anyway: the companion answers it with the
-  messages waiting for the turn (`Inbox` of common.ts). A turn that nobody
-  steers makes no call more.
+- **How the turn learns of it.** From `publish`, which the turn makes
+  anyway as it starts (its `start`) and after each write of steps that
+  commits (a reply with tool calls, the tools' results): the companion
+  answers it with the messages waiting for the turn (`Inbox` of common.ts).
+  The turn waits for the publish after the results, and its next step then
+  takes what it returned. A turn that nobody steers makes no call more.
 - **Taken once.** At a step, the framework's integration calls
   `takeSteers`: the turn stores each waiting message by its id, once, as a
   message of the user that is a step of the turn (`Turn.steer`, the
@@ -661,14 +677,17 @@ messages by id does not notice.
 
 The revision increases at:
 
-- a turn's start, and each of its tool calls' start and end (not in the
-  background): its end once its result is stored, so that a follower reads
-  it there. pi and DeepSeek store a tool's result after the tool returns (pi
-  in its next commit, DeepSeek in its next flush): they publish the end once
-  that commit has copied the result into the turn. OpenCode publishes it
-  once the copy that follows OpenCode's commit holds the result, or, in a
-  turn that takes steered messages, once the result is copied as the tool
-  returned it, before OpenCode stores it;
+- a turn's start (its companion's `start`, or the turn's own publish if
+  `start` returns nothing), and each write of its steps that commits: a
+  reply with tool calls, the tools' results (not in the background), so
+  that a follower reads them there. Claude and LangGraph publish through
+  the conversation (`append`, `appendReply`). pi, DeepSeek and OpenCode keep
+  their own history, and publish once after each of their commits that
+  copied a reply with tool calls, or tools' results, into the turn (pi's
+  commit, DeepSeek's flush, the copy that follows OpenCode's commit, or, in
+  a turn that takes steered messages, the copy of a result as the tool
+  returned it, before OpenCode stores it), and not as a tool call starts or
+  ends;
 - a turn's close: its own, its watch's, or the next turn's `start` closing
   it;
 - `settle`, once it closed a dead turn in the conversation;
@@ -678,7 +697,9 @@ The revision increases at:
 - `clear`.
 
 So a follower that reads each new revision sees every turn begin, its tool
-calls, its end, and a killed turn end.
+calls as their tools start, their results before the model's next request,
+its end, and a killed turn end. A final reply, held until the answer, shows
+with the turn's end.
 
 ## Agents of the Python SDK
 
@@ -689,7 +710,11 @@ The companion's handler names and shapes are shared with the Python SDK
 cluster's `signals` object may hold the turns of either SDK's agents. An
 agent says it has
 `settle` as it starts a turn (`Started.settles`, which `status` does not
-show), and only such a turn is sent it:
+show), and only such a turn is sent it. A turn says too whether `start`
+publishes it (`Started.publishes`): the companion then publishes and returns
+what `publish` returns; a turn that does not say so (another SDK's) gets
+nothing back, and is not published; and a turn that says so, of a companion
+that returns nothing, publishes its start itself:
 
 - an agent's turn that the other SDK's companion holds is closed in the
   companion; its agent is sent `settle` if it said it settles;

@@ -17,6 +17,7 @@ import {
   withoutIds,
   conversation,
   crashedAnywhere,
+  latestTurn,
   SAID_IN_TURNS as SAID,
   steeredAtAStep,
   followingOf,
@@ -224,23 +225,29 @@ describe('the LangGraph agent', () => {
     await expect(c.attempt('inv1', 'Please move 1 from 0 to 1')).rejects.toThrow(ENDED);
   });
 
-  it('answers a stored final reply without asking the model again', async () => {
-    let stored = 0;
+  it('stores its final reply with its answer: a crash before asks the model again, and stores one reply', async () => {
+    let reasked = 0;
     for (let at = 1; ; at++) {
       const c = conversation(prompt, `final-${at}`);
       const reply = vi.spyOn(Teller.prototype, 'reply');
       try {
         if ((await c.attempt('inv1', 'Hello', at)) !== 'crashed') break;
-        const replied = (await c.read(langgraph.messages())).messages.length > 1;
+        // The reply is stored with the answer, or not at all.
+        const stored = await c.read(latestTurn);
+        const answered = stored.status === 'answered';
+        expect(stored.steps > 0).toBe(answered);
         const asked = reply.mock.calls.length;
         expect(await c.attempt('inv1', 'Hello')).toBe('Ask me to "move 5 from 1 to 2", or to "audit" the books.');
-        if (replied) stored++;
-        expect(reply.mock.calls.length - asked).toBe(replied ? 0 : 1);
+        expect(reply.mock.calls.length - asked).toBe(answered ? 0 : 1);
+        if (!answered && asked > 0) reasked++;
+        const { messages } = await c.read(langgraph.messages());
+        expect(messages.map((m) => m.role)).toEqual(['user', 'assistant']);
       } finally {
         reply.mockRestore();
       }
     }
-    expect(stored).toBeGreaterThan(0);
+    // Some crash came after the model replied, before the reply and the answer were stored.
+    expect(reasked).toBeGreaterThan(0);
   });
 
   it('closes a turn that failed for good, and answers the next message', async () => {

@@ -141,10 +141,27 @@ const SCHEMA = new Schema('restate_agents.turns', [
   changed since a cursor. A turn's answer takes one too (`answered_seq`),
   for the summary view; its message's id is `answered_at`, the turn's last
   message of the assistant, the id the full view shows it under.
-- **Appends only.** Rows are appended, in one transaction per step (one
-  statement commits on its own). A reply at the end can be dropped (to ask
-  the model again), which is one range delete; its `seq` is kept in the
-  start row, so cursors never go back.
+- **Appends only.** Rows are appended, in one transaction per step. In
+  `answerOnce`'s run (`Conversation.hold`), a step that holds no tool call
+  nor result (the final reply, a message that asks again) is held in memory
+  and written by the next write, in its transaction: the final reply commits
+  with the turn's answer. The run writes what it holds (`flushHeld`) before
+  a publish, before each Restate call, send or wait of the library (a call
+  record, LangGraph's nodes and interrupts), and when its attempt fails
+  with an error in process; a crash loses it, and the retry makes it again.
+  A conversation written directly writes each step as it comes. A
+  reply at the end can be dropped (to ask the model again), which is one
+  range delete; its `seq` is kept in the start row, so cursors never go
+  back.
+- **A write and what the conversation keeps of it go together.** Each
+  write of the ledger (`Ledger.write`) takes the next position and `seq`
+  as it runs, and the conversation then takes its entries (the calls it
+  makes open, the results it holds, an answer). A commit is stored once it
+  is handed to Restate: a wait for Restate's acknowledgment that fails
+  after (a cancellation the SDK gives it) still has its bookkeeping made,
+  then fails; only a commit the engine refused (it rolled back) changes
+  nothing. A close waits for a write under way, so that it closes the
+  calls the write made, and never gives a stored result again.
 - **Each item is the framework's own** (a message, an event), stored and
   loaded by the framework (`Items.dump`, `Items.load`). The core reads it
   only through `Items.read`: what was said, the tool calls, the results.
@@ -554,6 +571,9 @@ invocation (the next invocation's first call replaces it):
   which it discards, so a key never written reads as empty tables. The names
   here are `restate_agents.turns` (new, the Python SDK's), `restate-agents.calls`
   (as today, the Python SDK's too) and `restate-agents.langgraph` (as today).
+  `answerOnce` applies the conversation's and the call records' (and a graph
+  of your own, its checkpoints') with `ensureSchemas(ctx.db, [...])`, in one
+  transaction: a key's first turn makes one commit for them, not one each.
 - **Steps.** A step that has run is never changed; a change is a step of its
   own. This port is the exception (D1 in [the plan](plan.md#decisions)): it
   starts new databases, with no migration from v0.3.0's tables.

@@ -25,6 +25,7 @@ import {
   followingOf,
   SAID_IN_TURNS as SAID,
   handlerOf,
+  latestTurn,
   type PromptHandler,
   sqlAttempt,
   steeredAtAStep,
@@ -327,6 +328,37 @@ describe('the Claude agent', () => {
     expect(asked[1]!.at(-1)).toEqual({ role: 'assistant', content: [{ type: 'text', text: 'Searching...' }] });
   });
 
+  it('stores a paused reply before it asks the model to go on: a crash after asks only to go on', async () => {
+    const reply = teller.reply;
+    let asked: MessageParam[][] = [];
+    teller.reply = (messages) => {
+      asked.push(structuredClone(messages));
+      const paused = !messages.some((m) => m.role === 'assistant');
+      const [text, stop] = paused ? ['Searching...', 'pause_turn'] : ['Found it.', 'end_turn'];
+      return { ...reply(messages), content: [{ type: 'text', text }], stop_reason: stop } as never;
+    };
+    let goneOn = 0;
+    try {
+      // Crashed at each state request in turn, while the model is asked to go on too.
+      for (let at = 1; ; at++) {
+        const c = conversation(prompt, `paused-crash-${at}`);
+        asked = [];
+        if ((await c.attempt('inv1', 'Hello', at)) !== 'crashed') break;
+        if (asked.length < 2) continue;
+        // Asked to go on: the paused reply was stored before, and the retry goes on from it.
+        goneOn++;
+        expect((await c.read(latestTurn)).steps).toBeGreaterThan(0);
+        asked = [];
+        expect(await c.attempt('inv1', 'Hello')).toBe('Found it.');
+        expect(asked).toHaveLength(1);
+        expect(asked[0]!.at(-1)).toEqual({ role: 'assistant', content: [{ type: 'text', text: 'Searching...' }] });
+      }
+    } finally {
+      teller.reply = reply;
+    }
+    expect(goneOn).toBeGreaterThan(0);
+  });
+
   it('sends a reply of the model with nothing in it back as one that says so: the API refuses it empty', async () => {
     const c = conversation(prompt, 'empty');
     const reply = teller.reply;
@@ -406,31 +438,36 @@ describe('the Claude agent', () => {
     expect(messages.at(-1)!.parts).toEqual([{ type: 'text', text: ENDED }]);
   });
 
-  it('answers a stored final reply without asking the model again', async () => {
+  it('stores its final reply with its answer: a crash before asks the model again, and stores one reply', async () => {
     const reply = teller.reply;
     let requests = 0;
     teller.reply = (messages) => {
       requests++;
       return reply(messages);
     };
-    let stored = 0;
+    let reasked = 0;
     try {
-      // Crashed at each state request in turn: once the final reply is stored, the retry does not ask for it again.
+      // Crashed at each state request in turn, the final commit's too.
       for (let at = 1; ; at++) {
         const c = conversation(prompt, `final-${at}`);
         requests = 0;
         if ((await c.attempt('inv1', 'Hello', at)) !== 'crashed') break;
-        const replied = (await c.read(claude.messages())).messages.length > 1;
+        // The reply is stored with the answer, or not at all.
+        const stored = await c.read(latestTurn);
+        const answered = stored.status === 'answered';
+        expect(stored.steps > 0).toBe(answered);
         const asked = requests;
         expect(await c.attempt('inv1', 'Hello')).toBe('Ask me to "move 5 from 1 to 2", or to "audit" the books.');
-        if (replied) stored++;
-        expect(requests - asked).toBe(replied ? 0 : 1);
+        expect(requests - asked).toBe(answered ? 0 : 1);
+        if (!answered && asked > 0) reasked++;
+        const { messages } = await c.read(claude.messages());
+        expect(messages.map((m) => m.role)).toEqual(['user', 'assistant']);
       }
     } finally {
       teller.reply = reply;
     }
-    // Some crash came after the reply was stored, and before the turn's answer.
-    expect(stored).toBeGreaterThan(0);
+    // Some crash came after the model replied, before the reply and the answer were stored.
+    expect(reasked).toBeGreaterThan(0);
   });
 
   it('gives the model earlier turns as their prompt and answer only', async () => {

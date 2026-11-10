@@ -9,14 +9,14 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { call, chatHandler, sessionObject, type Tool } from '@restatedev/agents';
 import { callOf, forPrompt, outcomes } from '../src/calls.ts';
-import { CANCELLED, ENDED, RETURNED_UNRECORDED, stopSignalOf, toolCallEnded, toolCallStarted } from '../src/common.ts';
+import { CANCELLED, ENDED, publish, RETURNED_UNRECORDED, stopSignalOf, toolCallStarted } from '../src/common.ts';
 import { answerOnce, Conversation, type Run, STEPS, SUMMARY, type Turn } from '../src/conversation.ts';
 import { conversationView } from '../src/messages.ts';
 import { waitFor } from '../src/tools.ts';
 import { bank } from './bank.ts';
 import { ledger } from '@restatedev/sessions/test/ledger';
 import { calling, FakeItems, type Item, ITEMS } from './fakes/items.ts';
-import { conversation as banking, followingOf, handlerOf, sqlAttempt } from './support.ts';
+import { conversation as banking, followingOf, handlerOf, latestTurn, sqlAttempt } from './support.ts';
 
 /** The results a turn stored, by their calls' ids. */
 const resultsOf = (conversation: Conversation<Item>) =>
@@ -118,7 +118,7 @@ describe("a closed turn's calls", () => {
         ]);
         await toolCallStarted(ctx);
         await lookup.run(args, { ctx, callId: 't1' });
-        await toolCallEnded(ctx); // a publish: the calls whose results are stored are forgotten
+        await publish(ctx); // the calls whose results are stored are forgotten
         throw new Error('the process crashed before the result was stored');
       }
       // The framework drops the cut-off reply, and the model makes the call again under a new id.
@@ -129,7 +129,7 @@ describe("a closed turn's calls", () => {
       await toolCallStarted(ctx);
       const output = await lookup.run(args, { ctx, callId: 't2' });
       await conversation.turn.append({ result: 't2', output });
-      await toolCallEnded(ctx);
+      await publish(ctx);
       await conversation.turn.appendReply([{ role: 'assistant', text: 'shipped' }]);
       return 'shipped';
     };
@@ -197,7 +197,7 @@ function teller(tools: Tool[], asked: { count: number } = { count: 0 }, quiet = 
           await toolCallStarted(ctx);
           const output = await tools.find((t) => t.name === c.name)!.run(c.input, { ctx, callId: c.id });
           await turn.append({ result: c.id, output });
-          if (!quiet) await toolCallEnded(ctx);
+          if (!quiet) await publish(ctx);
         }
       }
     };
@@ -605,8 +605,8 @@ describe("a framework's copy into its turn", () => {
           await gate.promise;
           await turn.copyIn(tx, [{ item: { role: 'assistant', text: 'copied' }, reply: true }]);
         });
-        // ...while the turn's own write (an ask again, say) waits for it.
-        const asking = turn.askAgain('again');
+        // ...while the turn's own write (a tool's result, say, which is not held) waits for it.
+        const asking = turn.append({ result: 'c0', output: 'found', text: 'again' });
         await new Promise((resolve) => setTimeout(resolve, 10));
         gate.resolve();
         await copying;
@@ -620,6 +620,26 @@ describe("a framework's copy into its turn", () => {
     const written = turn!.items.slice(0, 2);
     expect(written.map((e) => e.item.text)).toEqual(['copied', 'again']);
     expect(ordered).toEqual(written.map((e) => e.n));
+  });
+
+  it('writes the rows the turn holds before it first, in its transaction: in the order of their seqs', async () => {
+    const map = new Map<string, Uint8Array>();
+    const sql = sqlAttempt({ map, key: 'k', id: 'inv1' });
+    await sql.end(() =>
+      answerOnce(sql.ctx, 'q', ITEMS, async (conversation) => {
+        const turn = conversation.turn;
+        // Held: no tool waits for it.
+        await turn.askAgain('again');
+        await sql.ctx.db.transaction(async (tx) => {
+          await turn.copyIn(tx, [{ item: { role: 'assistant', text: 'copied' }, reply: true }]);
+        });
+        return 'copied';
+      }),
+    );
+    const read = sqlAttempt({ map, key: 'k', id: 'read', shared: true });
+    const rows = await read.end(() => read.view.db.values(`SELECT n, seq, item FROM ${STEPS} ORDER BY n`));
+    expect(rows.map(([, , item]) => (JSON.parse(String(item)) as Item).text)).toEqual(['again', 'copied']);
+    expect(rows.map(([, seq]) => Number(seq))).toEqual(rows.map(([, seq]) => Number(seq)).toSorted((a, b) => a - b));
   });
 
   it("gives the turn's answer a seq after the copy's, when the answer waits for the copy's transaction", async () => {
@@ -675,5 +695,102 @@ describe('a close', () => {
       expect([at, notes.length, turnResults(first!)]).toEqual([at, 1, [['c1', ENDED]]]);
     }
     expect(crashes).toBeGreaterThan(0);
+  });
+});
+
+describe("a turn's steps that no tool waits for", () => {
+  it('are held, and stored before a publish, a Restate call of the library, and as the attempt fails', async () => {
+    const map = new Map<string, Uint8Array>();
+    // What the database holds, as a follower (or a retry) reads it.
+    const stored = async () => {
+      const read = sqlAttempt({ map, key: 'k', id: `read-${Math.random()}`, shared: true });
+      return (await read.end(() => latestTurn(read.view))).steps;
+    };
+    const seen: Record<string, number> = {};
+    const sql = sqlAttempt({
+      map,
+      key: 'k',
+      id: 'inv_held',
+      published: async () => void (seen.publish ??= await stored()),
+      signal: async () => {
+        seen.wait ??= await stored();
+        return 'yes';
+      },
+    });
+    await expect(
+      sql.end(() =>
+        answerOnce(sql.ctx, 'q', ITEMS, async (conversation) => {
+          const turn = conversation.turn;
+          await turn.appendReply([{ role: 'assistant', text: 'one' }]);
+          seen.held = await stored();
+          await publish(sql.ctx);
+          await turn.appendReply([{ role: 'assistant', text: 'two' }]);
+          await waitFor(sql.ctx, 'c1', 'approval');
+          await turn.appendReply([{ role: 'assistant', text: 'three' }]);
+          throw new Error('the attempt fails');
+        }),
+      ),
+    ).rejects.toThrow('the attempt fails');
+    expect(seen).toEqual({ held: 0, publish: 1, wait: 2 });
+    expect(await stored()).toBe(3);
+  });
+
+  it('are written at once in a conversation written directly: no run holds them', async () => {
+    const map = new Map<string, Uint8Array>();
+    const sql = sqlAttempt({ map, key: 'k', id: 'inv_direct' });
+    const steps = await sql.end(async () => {
+      const conversation = await Conversation.load(sql.db, ITEMS);
+      const turn = await conversation.ask('p1', 'q');
+      await turn.appendReply([{ role: 'assistant', text: 'one' }]);
+      const read = sqlAttempt({ map, key: 'k', id: 'read', shared: true });
+      return (await read.end(() => latestTurn(read.view))).steps;
+    });
+    expect(steps).toBe(1);
+  });
+});
+
+/** What a run on the made-up framework made the companion do, past the turn's start, and what a follower saw at each publish. */
+async function publishes(run: Run<Item>, object?: { readonly name: string }) {
+  const map = new Map<string, Uint8Array>();
+  const seen: number[] = [];
+  const published = async () => {
+    const read = sqlAttempt({ map, key: 'k', id: `read-${seen.length}`, shared: true });
+    seen.push((await read.end(() => latestTurn(read.view))).steps);
+  };
+  const sql = sqlAttempt({ map, key: 'k', id: 'inv_pub', published, object });
+  await sql.end(() => answerOnce(sql.ctx, 'q', ITEMS, run));
+  return { made: followingOf(map).made, seen };
+}
+
+describe("a turn's writes in `answerOnce`'s run", () => {
+  it('publish after each write of steps that commits: a reply with tool calls, results; not held ones, nor a copy', async () => {
+    const { made, seen } = await publishes(async (conversation) => {
+      const turn = conversation.turn;
+      await turn.appendReply([calling('c1')]);
+      await turn.append({ result: 'c1', output: 'found' });
+      // A framework's copy, in its own transaction, publishes only when it says so.
+      await conversation.db.transaction(async (tx) => {
+        await turn.copyIn(tx, [{ item: calling('c2'), reply: true }]);
+      });
+      await conversation.db.transaction(async (tx) => {
+        await turn.copyIn(tx, [{ item: { result: 'c2', output: 'found' } }]);
+      });
+      await turn.stepsCommitted();
+      await turn.appendReply([{ role: 'assistant', text: 'done' }]);
+      return 'done';
+    });
+    expect(made).toEqual(['publish', 'publish', 'publish']);
+    // A follower reads each write as it is published: the final reply comes with the answer.
+    expect(seen).toEqual([1, 2, 4]);
+  });
+
+  it('publish nothing in the background: its turn publishes its end only', async () => {
+    const quiet = sessionObject({ name: 'quiet-turns', background: true, handlers: {}, views: {} });
+    const { made } = await publishes(async (conversation) => {
+      await conversation.turn.appendReply([calling('c1')]);
+      await conversation.turn.append({ result: 'c1', output: 'found' });
+      return 'done';
+    }, quiet);
+    expect(made).toEqual([]);
   });
 });

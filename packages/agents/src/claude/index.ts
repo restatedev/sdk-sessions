@@ -46,10 +46,9 @@ import {
   modelIdOf,
   modelOf,
   RETURNED_UNRECORDED,
+  toolCallStarted,
   stopSignalOf,
   type Summarize,
-  toolCallEnded,
-  toolCallStarted,
   NO_ANSWER,
 } from '../common.ts';
 import { answerOnce, type Items, type Parsed, type Run } from '../conversation.ts';
@@ -192,9 +191,9 @@ interface Agent {
 
 /**
  * The run of `agent` on the conversation: from the stored turn on, each
- * reply stored before its tools run, and their results after; each round of
- * tool calls published as it starts and ends (for the clients that follow
- * the conversation). At each step (before a request that follows the
+ * reply with tool calls stored before its tools run, and their results
+ * after; each such write published as it commits, by the conversation (for
+ * the clients that follow it), and the final reply stored with the answer. At each step (before a request that follows the
  * prompt or the tools' results), it takes the messages steered to the turn
  * (`takeSteers`): the request then goes out from the conversation's
  * history, which has them after the tools' results.
@@ -240,7 +239,6 @@ const runOf =
           await turn.append(results);
           runner.pushMessages(results);
         }
-        await toolCallEnded(ctx);
         await step();
       }
       let paused = false;
@@ -252,17 +250,21 @@ const runOf =
         // Paused (a server tool's long turn): a step of the turn, not a reply to
         // end it with, and the model goes on from it.
         if (message.stop_reason === 'pause_turn') {
+          // Stored before the model goes on: a crash in a server tool's long turn goes on from it, rather than
+          // ask the whole of it again.
           await turn.append(said);
+          await conversation.flush();
           paused = true;
           break;
         }
+        // A reply with tool calls commits, and is published, before its tools run; the final reply commits with
+        // the turn's answer.
         await turn.appendReply([said]);
         if (!message.content.some((c) => c.type === 'tool_use')) return textOf(message.content);
         await toolCallStarted(ctx);
         const results = await runner.generateToolResponse();
         check();
         if (results) await turn.append(results);
-        await toolCallEnded(ctx);
         await step();
       }
       if (!paused) throw new Error('the tool runner ended without a reply');

@@ -72,8 +72,8 @@ import {
   modelOf,
   providerOf,
   RETURNED_UNRECORDED,
+  stepped,
   stopSignalOf,
-  toolCallEnded,
   toolCallStarted,
 } from '../common.ts';
 import { answerOnce, type Items, type Parsed, type Run, type Turn } from '../conversation.ts';
@@ -455,7 +455,8 @@ const steeredId = (messageId: string) => (messageId.startsWith('steer:') ? messa
  * to continue (a step of the run's own), nor anything once the run stopped
  * or `failed()` (the harness's result of a tool that failed the attempt, or
  * was cancelled, is not the call's): the turn's close, or the retry, says
- * how it ended. `resulted` gets the calls whose results it copied.
+ * how it ended. `steps` is told when it copied a step that a follower waits
+ * for: a reply with tool calls, or a tool's result.
  */
 const copying =
   (
@@ -463,7 +464,7 @@ const copying =
     turn: Turn<Message>,
     from: () => number | undefined,
     failed: () => boolean,
-    resulted: (calls: string[]) => void,
+    steps: () => void,
   ) =>
   async (tx: Parameters<NonNullable<SqlSessionPersistence['copy']>>[0], batch: readonly SessionEvent[]) => {
     const start = from();
@@ -484,8 +485,12 @@ const copying =
       tx,
       copied.flatMap(({ steer }) => (steer === undefined ? [] : [steer])),
     );
-    resulted(batch.flatMap((e) => (e.seq > start && e.type === 'tool/result' ? [e.data.message.toolCallId] : [])));
+    if (copied.some(({ item }) => isStep(item))) steps();
   };
+
+/** Whether `m` is a step of a turn that its followers are told of: a reply with tool calls, or a tool's result. */
+const isStep = (m: Message) =>
+  m.role === 'tool' || (m.role === 'assistant' && m.content.some((c) => c.type === 'tool-call'));
 
 /**
  * The run of the harness of `options`, on the conversation: its turn's
@@ -520,14 +525,12 @@ const runOf =
     const id = again ? MessageId(`prompt:${turn.id}:again`) : promptId(turn.id);
     // Where the turn's latest ask is in the log, once it is.
     let from: number | undefined;
-    // The tool calls that returned, whose ends are published once a flush stored their results.
-    const returned = new Set<string>();
     try {
       const sessionId = SessionId(ctx.key);
       const options = {
         agentOptions: route,
         setup: (agentCtx: Context) => {
-          for (const t of tools) agentCtx.tools.register(tracked(isTool(t) ? native(t, ctx) : t, ctx, fail, returned));
+          for (const t of tools) agentCtx.tools.register(tracked(isTool(t) ? native(t, ctx) : t, ctx, fail));
           if (approval !== undefined) approving(agentCtx, ctx, approval, fail);
         },
       };
@@ -538,8 +541,9 @@ const runOf =
       agent = started.agent;
       const found = agent.session.snapshotEvents().length;
       from = agent.session.snapshotEvents().find((e) => e.type === 'user/message' && e.data.id === id)?.seq;
-      // A tool call's end is published once a flush stored its result, for followers to read it there.
-      let ended = false;
+      // A flush that copied steps (a reply with tool calls, tools' results) is published once it is stored,
+      // for followers to read them there; its answer lists the messages steered to the turn (below).
+      let copiedSteps = false;
       // The harness messages of the steered messages in the log: those before this attempt, and each flush's.
       const placed = new Set(
         agent.session
@@ -555,19 +559,19 @@ const runOf =
           turn,
           () => from,
           () => broken,
-          (calls) => {
-            for (const call of calls) if (returned.delete(call)) ended = true;
+          () => {
+            copiedSteps = true;
           },
         )(tx, batch);
       };
       persistence.flushed = async () => {
-        if (!ended) return;
-        ended = false;
+        if (!copiedSteps) return;
+        copiedSteps = false;
         // Failing, it fails the attempt, as a tool's error does: never the flush, which is done.
-        await toolCallEnded(ctx).catch(fail);
+        await stepped(ctx).catch(fail);
       };
       // The messages steered to the turn, handed to the harness's step inbox as a publish lists them: only
-      // while a tool call runs or its result is stored, so that a step after them places them, in this turn.
+      // once a reply with tool calls or a result is stored, so that a step after them places them, in this turn.
       const harnessAgent = agent;
       const given = new Set<string>();
       unlisten = inboxOf(ctx)?.listen(() => {
@@ -616,25 +620,20 @@ async function cancelTurn(harness: Context, agent: Agent) {
 }
 
 /**
- * `definition`, its calls published as they start, and as they end once
- * their results are stored (each call that returned is put in `returned`),
- * for the clients that follow the conversation; its error failing the
- * attempt.
+ * `definition`, the calls whose results are stored forgotten as each of its
+ * calls starts (its call and its result are published once a flush stores
+ * them, `runOf`); its error failing the attempt.
  */
 const tracked = (
   definition: ToolDefinition,
   ctx: restate.SessionContext,
   fail: (error: unknown) => void,
-  returned: Set<string>,
 ): ToolDefinition => ({
   ...definition,
   execute: async (args, exec) => {
     try {
       await toolCallStarted(ctx);
-      const result = await definition.execute(args, exec);
-      // Its end is published once the harness stored its result (`runOf`).
-      returned.add(exec.callId);
-      return result;
+      return await definition.execute(args, exec);
     } catch (error) {
       fromTool(ctx, error);
       fail(error);

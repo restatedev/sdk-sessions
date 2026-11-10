@@ -3,7 +3,7 @@
 // the way out of a crashed attempt, and the next attempt fences it, as Restate
 // does. Its model is the teller (../fakes/deepseek.ts). `pnpm --filter @restatedev/agents test deepseek`.
 import { describe, expect, it, vi } from 'vitest';
-import type { RequestMessage } from '@deepseek-ai/dsh-llm';
+import { type RequestMessage, ToolCallId } from '@deepseek-ai/dsh-llm';
 import * as restate from '@restatedev/restate-sdk';
 import { z } from 'zod';
 import { CANCELLED, REFUSED, tool, UNANSWERED } from '@restatedev/agents';
@@ -24,7 +24,8 @@ import {
   SAID_IN_TURNS as SAID,
   steeredAtAStep,
 } from './support.ts';
-import { teller } from './fakes/deepseek.ts';
+import { reply as tellerReply, teller } from './fakes/deepseek.ts';
+import { followedRound, THREE_TOOLS } from './following.ts';
 import * as deepseek from '@restatedev/agents/deepseek';
 import { bank } from './bank.ts';
 import { prompt } from './deepseek.ts';
@@ -164,12 +165,12 @@ describe('the DeepSeek Harness agent', () => {
     ]);
   });
 
-  it('publishes the conversation as a turn and its tool calls start and end', async () => {
+  it('publishes the conversation as a turn starts, after each commit of its steps, and as it ends', async () => {
     const { answer, parts, published, outputs } = await followedWhileWorking(
       (tools) => deepseek.chat({ tools }),
       deepseek.messages(),
     );
-    // A follower reads the call as it starts, and its output as it ends.
+    // A follower reads the call once it is stored, and its output once that is.
     expect(outputs).toEqual([undefined, 'moved 5 from account 1 to account 2']);
     expect(answer).toBe('Done: moved 5 from account 1 to account 2');
     expect(parts).toEqual([
@@ -184,8 +185,36 @@ describe('the DeepSeek Harness agent', () => {
       ],
       [{ type: 'text', text: answer }],
     ]);
-    // Published at its start, as its tool call starts and ends, and at its end.
+    // Published at its start, once its reply with the call is stored, once the call's result is, and at its end.
     expect(published).toBe(4);
+  });
+
+  it('publishes a round of tool calls once its reply is stored and once each result is, not as the calls start', async () => {
+    teller.reply = (messages) => {
+      // The harness's runtime context (after the prompt) is no message the model answers.
+      const last = messages.findLast((m) => (m.source?.kind as string | undefined) !== 'runtime-context')!;
+      const said = last.content.flatMap((c) => (c.type === 'text' ? [c.text] : [])).join('');
+      if (last.role !== 'user' || !said.endsWith(THREE_TOOLS)) return tellerReply(messages);
+      const calls = ['t1', 't2', 't3'].map((name) => ({ id: ToolCallId(`call_${name}`), name, args: {} }));
+      return { calls };
+    };
+    try {
+      const { answer, published, seen } = await followedRound((tools) => deepseek.chat({ tools }), deepseek.messages());
+      expect(answer).toBe('Done: result of t3');
+      // The tools run one after another: each result is stored with the next call (before its tool runs), the
+      // last before the next request. Each such commit is published, as is the reply with the calls.
+      expect(seen).toEqual([
+        [],
+        [null, null, null],
+        ['result of t1', null, null],
+        ['result of t1', 'result of t2', null],
+        ['result of t1', 'result of t2', 'result of t3'],
+      ]);
+      // Those publishes, and the turn's close.
+      expect(published).toBe(6);
+    } finally {
+      teller.reply = tellerReply;
+    }
   });
 
   it('answers a message once after a crash at any of its state requests', async () => {

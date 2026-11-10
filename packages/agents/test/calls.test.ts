@@ -181,3 +181,26 @@ describe('outcomes', () => {
     expect(await outcomes(attempt(state, 'inv2').ctx, ['c1'], 'inv1')).toEqual(new Map());
   });
 });
+
+describe("an attempt's call records", () => {
+  it('are read again after a read that failed (a cancelled commit of their schema, say): never kept as failed', async () => {
+    const state = new Map<string, Uint8Array>();
+    const { ctx } = attempt(state);
+    // The first read fails, as one whose wait the SDK cancels does.
+    const get = ctx.db.get.bind(ctx.db);
+    let failing = true;
+    ctx.db.get = async <T>(sql: string, params?: restate.SqlParam[]) => {
+      if (failing) {
+        failing = false;
+        throw new restate.CancelledError();
+      }
+      return get<T>(sql, params);
+    };
+    await expect(callOf(ctx, 'lookups/lookup', {}, 'c1')).rejects.toBeInstanceOf(restate.CancelledError);
+    // A stopped turn's close reads them: as stored, not as the failed read left them.
+    expect(await outcomes(ctx, ['c1'])).toEqual(new Map());
+    const made = await callOf(ctx, 'lookups/lookup', {}, 'c1');
+    await made.answered();
+    expect(await outcomes(ctx, ['c1'])).toEqual(new Map([['c1', undefined]]));
+  });
+});

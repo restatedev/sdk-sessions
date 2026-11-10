@@ -8,6 +8,7 @@ import { type AttemptContext, contextOf } from '@restatedev/sessions/internal';
 import { type AttemptOptions, sqlAttempt as baseAttempt } from '@restatedev/sessions/test/support';
 import { z } from 'zod';
 import type { Audit, Transfer } from '@restatedev/sessions/test/ledger';
+import { SCHEMA, STEPS, TURNS } from '../src/conversation.ts';
 
 /**
  * The `signals` object of an agent's tests, as far as following goes: the
@@ -20,7 +21,8 @@ export class Following {
   /** Each turn closed, by its invocation id. */
   readonly closed: string[] = [];
   /** The message being answered, from its turn's start to its close, whether its agent settles it, and whether it takes steered messages. */
-  answering: { invocationId: string; since: string; settles?: boolean; steers?: boolean } | null = null;
+  answering: { invocationId: string; since: string; settles?: boolean; steers?: boolean; publishes?: boolean } | null =
+    null;
   /** Each turn the companion would have its agent `settle`: closed as gone, by its invocation id. */
   readonly settled: string[] = [];
   /**
@@ -31,6 +33,8 @@ export class Following {
   steering: { id: string; text: string }[] = [];
   /** The ids of each `taken` the turns sent, in order. */
   readonly taken: string[][] = [];
+  /** Each call and send the turns made to the companion, by its handler's name, in order. */
+  readonly made: string[] = [];
 }
 
 /** The following of each object's state. */
@@ -73,6 +77,12 @@ export function sqlAttempt(
     signal?: (wait: { id: string; name: string; input?: unknown }) => unknown;
     /** Run at each publish, before it answers: a follower reading the conversation, say. */
     published?: () => Promise<void>;
+    /**
+     * The companion of an older deployment (or of the Python SDK's before
+     * 1.5.2): its `start` publishes nothing, and returns nothing, whatever
+     * the turn says.
+     */
+    olderCompanion?: boolean;
   },
 ) {
   const following = followingOf(options.map);
@@ -85,13 +95,15 @@ export function sqlAttempt(
     },
   });
   // The `signals` object, as the agents call it.
+  /** As the companion's `publish`: the new revision, and the messages steered to the turn that it has not taken. */
+  const published = async () => {
+    await options.published?.();
+    const revision = ++following.revision;
+    const steering = following.answering?.steers ? following.steering : [];
+    return steering.length > 0 ? { revision, steering: [...steering] } : { revision };
+  };
   const signals: Record<string, (input: never) => unknown> = {
-    publish: async () => {
-      await options.published?.();
-      const revision = ++following.revision;
-      const steering = following.answering?.steers ? following.steering : [];
-      return steering.length > 0 ? { revision, steering: [...steering] } : { revision };
-    },
+    publish: published,
     // A transaction's send: its parameter as it was stored, JSON.
     taken: (parameter: Uint8Array | string[]) => {
       const ids = (
@@ -101,10 +113,19 @@ export function sqlAttempt(
       following.steering = following.steering.filter((m) => !ids.includes(m.id));
       following.revision++;
     },
-    start: (turn: { invocationId: string; since: string; settles?: boolean; steers?: boolean }) => {
-      if (following.answering?.invocationId === turn.invocationId) return;
-      if (following.answering) closed(following.answering.invocationId, true);
-      following.answering = turn;
+    // As the companion's: a turn that says so is published as it starts, and gets what `publish` returns.
+    start: (turn: {
+      invocationId: string;
+      since: string;
+      settles?: boolean;
+      steers?: boolean;
+      publishes?: boolean;
+    }) => {
+      if (following.answering?.invocationId !== turn.invocationId) {
+        if (following.answering) closed(following.answering.invocationId, true);
+        following.answering = turn;
+      }
+      return turn.publishes && !options.olderCompanion ? published() : undefined;
     },
     // As the companion's: a turn's close publishes it.
     close: (turn: string) => closed(turn),
@@ -128,6 +149,7 @@ export function sqlAttempt(
     }
     const method = signals[c.method];
     if (!method) throw new Error(`no signals.${c.method} in this test`);
+    following.made.push(c.method);
     return method(c.parameter as never);
   };
   const sdk = {
@@ -633,4 +655,17 @@ export async function invalidArguments(chat: (tools: Tool[]) => PromptHandler) {
   const sql = sqlAttempt({ map, key: 'invalid', id: 'inv1' });
   const answer = await sql.end(() => handlerOf(chat([small]))(sql.ctx, 'Please move 5 from 1 to 2'));
   return { answer, ran };
+}
+
+/**
+ * How the latest turn of the conversation stands, as stored (a view, for a
+ * conversation's `read`): how it ended (none while it is answered), and how
+ * many steps the conversation has.
+ */
+export async function latestTurn(ctx: restate.ViewContext) {
+  await SCHEMA.ensure(ctx.db);
+  const [[status, steps]] = (await ctx.db.values(
+    `SELECT (SELECT status FROM ${TURNS} ORDER BY n DESC LIMIT 1), (SELECT COUNT(*) FROM ${STEPS})`,
+  )) as [[string | null, number]];
+  return { status: status ?? undefined, steps };
 }

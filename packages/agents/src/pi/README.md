@@ -82,7 +82,11 @@ handler does. A retried attempt opens the Harness again and carries on:
 pi keeps its own history (and compacts it); each pi commit of a prompt's run
 copies its new entries (the model's replies, the tools' results) into the
 agent's conversation of turns, in the same transaction: what `messages`
-shows ([docs/conversation.md](../../docs/conversation.md)). The views show
+shows ([docs/conversation.md](../../docs/conversation.md)). A commit that
+copied a reply with tool calls, or tools' results, is published once it is
+done (pi commits each result on its own: one publish each), and nothing else
+is: a tool call's start publishes nothing, so a follower reads the calls
+once they are stored, and each output once it is. The views show
 each turn as it was asked and answered, not pi's summaries and handoffs.
 
 The files of a `workspace` are not in the database: they last as long as the

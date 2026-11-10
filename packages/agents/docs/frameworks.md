@@ -42,7 +42,11 @@ What the core gives an integration, once ported:
   `waitFor(ctx, callId, signal, input, { approval, rejoin })` for a
   framework's own durable wait.
 - **The turn's signal** (`stopSignalOf`), refusals (`refusalOf`, `fromTool`),
-  and publishing (`toolCallStarted`, `toolCallEnded`), as today.
+  and publishing: `append` and `appendReply` publish after each write that
+  commits, in `answerOnce`'s run (`Conversation.hold`); a framework that
+  copies its steps (`copyIn`) publishes once its transaction commits
+  (`Turn.stepsCommitted`); `toolCallStarted` settles the call records
+  before a tool makes its own.
 - **Steering**: `takeSteers(ctx, conversation)` at each step, or, for a
   framework that keeps its own history, `inboxOf(ctx).listen` and
   `tookSteers` as it copies the messages its own inbox placed
@@ -62,8 +66,8 @@ stores them once in the turn:
 | LangGraph, built-in agent      | in the model node, before each request (`takeSteers`)                                                                  | they go in the request and stay in the run's state, with the id `steer:<id>` (`items.steered`)                                                                                                                                                                                                                                                                                             |
 | LangGraph, a graph of your own | none: each is a turn of its own                                                                                        | the graph keeps its own state, which the turn cannot add to in place                                                                                                                                                                                                                                                                                                                       |
 | pi                             | as a round of tool calls is done (pi-durable's `afterTools` hook)                                                      | each waiting message is submitted to pi's inbox (`whenBusy: 'steer'`, keyed `steer:<id>`, an entry of kind `restate.steer`), which pi places after the round's results (`steeringMode: 'all'`); the copy of pi's commit into the turn stores it, with `taken`                                                                                                                              |
-| DeepSeek                       | at the step after it hears of it: a publish as a tool call starts, or once its result is stored                        | each waiting message goes to the harness's step inbox (`agent.steer`, a user message `steer:<id>`), which the harness places at its next step; the copy of its flush into the turn stores it, with `taken`. A message sent while a tool runs is heard of as its result is stored, which is as the next model request goes out: it joins at the step after that request's, in the same turn |
-| OpenCode                       | as a tool call of a round returns (the tool's `execute.after` hook, which OpenCode awaits before it stores the result) | each waiting message is submitted to OpenCode (`delivery: 'steer'`, id `msg_steer_<id>`, with its steer id in `metadata.steer`), which places it at the round's next step, after the round's results; the call's result is copied as the tool returned it first, so that the end's publish lists the message in time; the copy of what OpenCode placed stores it, with `taken`             |
+| DeepSeek                       | at the step after it hears of it: a publish once a reply with tool calls, or a result, is stored                       | each waiting message goes to the harness's step inbox (`agent.steer`, a user message `steer:<id>`), which the harness places at its next step; the copy of its flush into the turn stores it, with `taken`. A message sent while a tool runs is heard of as its result is stored, which is as the next model request goes out: it joins at the step after that request's, in the same turn |
+| OpenCode                       | as a tool call of a round returns (the tool's `execute.after` hook, which OpenCode awaits before it stores the result) | each waiting message is submitted to OpenCode (`delivery: 'steer'`, id `msg_steer_<id>`, with its steer id in `metadata.steer`), which places it at the round's next step, after the round's results; the call's result is copied as the tool returned it first, so that the copy's publish lists the message in time; the copy of what OpenCode placed stores it, with `taken`            |
 
 `langgraph.chat` with options that a function gives decides per message,
 as its turn starts, from the options it gives (once per attempt): a graph of
@@ -198,8 +202,9 @@ The Anthropic SDK's tool runner (`@anthropic-ai/sdk` 0.133.0).
   - `summary`: the default.
 - **Run**: the runner's `messages` are `conversation.history()`. If the turn
   has a stored final reply (`turn.finalReply()`), that is the answer: the
-  model is not asked again (new: today the reply and the answer are one
-  write). Otherwise the open calls (`turn.openCalls()`) run with their ids,
+  model is not asked again (in `answerOnce`'s run, the final reply is held
+  and commits with the answer, so only a turn written otherwise has one).
+  Otherwise the open calls (`turn.openCalls()`) run with their ids,
   and their results are appended; then each reply is appended
   (`appendReply`) before its tools run, and its results after.
 - **Errors**: the SDK's `ToolError` is the tool's answer to the model, not
@@ -319,8 +324,9 @@ The Anthropic SDK's tool runner (`@anthropic-ai/sdk` 0.133.0).
     a result (an error if `status === 'error'`).
   - `summary`: the default.
 - **Graph**: the model node appends its reply (`turn.appendReply`) before it
-  returns; the tools node appends each `ToolMessage` as it lands (in
-  `failing`, `index.ts:69-95`), then publishes; START goes to the tools node
+  returns; the tools node appends the round's `ToolMessage`s in one write
+  once its tools ran (`toolsNode`; a crash before runs the round again, as
+  the Python SDK commits a step's results together), then publishes; START goes to the tools node
   if the turn has open calls; a stored final reply returns at once. The input
   is `{ messages: conversation.history() }`.
 - **Errors**: a `recursionLimit` of about 10 000, and LangGraph's own
@@ -341,7 +347,8 @@ The Anthropic SDK's tool runner (`@anthropic-ai/sdk` 0.133.0).
   back (Python's reads them at each `put`).
 - **A graph of your own** (`agent({ graph })`, `graph.ts`, as the Python
   SDK's `_graph.py`): framework-owned history, its checkpoints in the key's
-  database; the messages after the run's input copied by id, the prompt's id
+  database; the messages after the run's input copied by id (a step's tool
+  messages in one write, as Python's `_copied`), the prompt's id
   `prompt:<turn>`, a window of 1, a closed turn's closing record as the
   run's input; `interrupt()` as Restate signals. Unlike Python's, the run's
   prompt is stamped on its checkpoints by the saver (`metadata`), since the
@@ -493,8 +500,8 @@ allow them), and an `approval/request` answerer: a wait for the signal
 true, rejoin: true })`. Its value decides (`true`, `{ approved: true }`, or
 a text such as `approved` or `yes` allows; anything else rejects, as the
 Python SDK's `approval_of`, though the denial's reason cannot reach the
-model). Before it waits, it publishes (`toolCallStarted`), which forgets the
-calls whose results are stored. An error of the wait fails the attempt,
+model). Before it waits, it forgets the calls whose results are stored
+(`toolCallStarted`, which publishes nothing). An error of the wait fails the attempt,
 and its ask never settles, so the harness stores no decision.
 
 - **The wait rejoins.** The session is not flushed before the wait: a crash
@@ -627,12 +634,13 @@ and its ask never settles, so the harness stores no decision.
   conversation's entries after the turn's user entry (its submission's
   `entry`) and after the last copied: `pi.assistant` and `pi.tool-result`,
   each item keeping its entry id.
-- **A tool's end is published once its result is stored**: pi commits a
-  tool's result after the tool returns, so publishing as the tool returned
-  had a follower read the call without its output until the next publish.
-  The storage facade's `afterCommit` publishes it once the commit that copied
-  the result is done (DeepSeek's persistence does the same after a flush,
-  `flushed`).
+- **A commit of steps is published once it is done**: pi commits a tool's
+  result after the tool returns, so publishing as the tool returned had a
+  follower read the call without its output until the next publish. The
+  storage facade's `afterCommit` publishes once a commit that copied a reply
+  with tool calls, or results, is done, and only then: a tool call's start
+  publishes nothing (DeepSeek's persistence does the same after a flush,
+  `flushed`; OpenCode after each copy).
 - **A provider's outage** no longer ends the turn: pi-durable retried a
   failed request 3 times, then settled the submission `unanswered` for good.
   A new request id per attempt would have asked again, but with the prompt
@@ -694,8 +702,9 @@ spike, the steps) is in [OpenCode's return](opencode.md).
   OpenCode message id (and part id, for a result). OpenCode's synthetic
   messages, idle markers and compactions are not copied.
 - **Copy**: after each of OpenCode's commits, in a `ctx.db` transaction of
-  its own, idempotent by `from`, and caught up before each publish, the
-  answer and any close. An assistant message with tool calls is copied once
+  its own, idempotent by `from`, and caught up before each tool call, the
+  answer and any close; a copy of a reply with tool calls, or of results,
+  is published once committed. An assistant message with tool calls is copied once
   its stream ended and none of its calls still streams its input (a reply
   is stored before its tools run); one without, once OpenCode stored how
   its step ended (`finish`), and never if the step failed (`error`) or the

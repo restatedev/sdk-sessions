@@ -59,7 +59,8 @@ import { AIMessage, type BaseMessage, HumanMessage, ToolMessage } from '@langcha
 import { mapStoredMessagesToChatMessages } from '@langchain/core/messages';
 import type { RunnableConfig } from '@langchain/core/runnables';
 import { Command, InvalidUpdateError, type Pregel, type StateSnapshot, StateGraph } from '@langchain/langgraph';
-import { fromTool, stepped, stopSignalOf } from '../common.ts';
+import { flushHeld } from '../calls.ts';
+import { fromTool, stopSignalOf } from '../common.ts';
 import type { Conversation, Run, Turn } from '../conversation.ts';
 import { signals, signalsOf } from '../signals.ts';
 import { SqlCheckpointSaver } from './checkpointer.ts';
@@ -154,15 +155,12 @@ async function answerOf(app: App, turn: Turn<BaseMessage>, state: Record<string,
  * `prompt`), as the state holds the earlier turns too; if the graph trimmed
  * the prompt away, those whose ids are not `known`. `known` is the ids the
  * conversation has, which this adds to; the messages the conversation gave
- * the graph are not copied back. Then publish.
+ * the graph are not copied back. Tool messages that follow one another (a
+ * step's results) are copied in one write. Each write that commits is
+ * published, by the conversation (`Conversation.hold`); an AI message without
+ * tool calls is held, and is published with the next.
  */
-async function copied(
-  ctx: restate.SessionContext,
-  turn: Turn<BaseMessage>,
-  known: Set<string>,
-  messages: readonly BaseMessage[],
-  prompt: string,
-) {
+async function copied(turn: Turn<BaseMessage>, known: Set<string>, messages: readonly BaseMessage[], prompt: string) {
   const at = messages.findIndex((m) => m.id === prompt);
   const fresh = messages
     .slice(at + 1)
@@ -173,12 +171,24 @@ async function copied(
         !known.has(m.id) &&
         !CARRIED.some((prefix) => m.id!.startsWith(prefix)),
     );
+  let results: BaseMessage[] = [];
+  // The results of a step in one write: one commit, however many tools ran.
+  const stored = async () => {
+    if (results.length === 0) return;
+    await turn.append(...results);
+    for (const result of results) known.add(result.id!);
+    results = [];
+  };
   for (const message of fresh) {
-    if (AIMessage.isInstance(message)) await turn.appendReply([message]);
-    else await turn.append(message);
+    if (!AIMessage.isInstance(message)) {
+      results.push(message);
+      continue;
+    }
+    await stored();
+    await turn.appendReply([message]);
     known.add(message.id!);
   }
-  if (fresh.length > 0) await stepped(ctx);
+  await stored();
 }
 
 /** The id of a turn's prompt, as a `HumanMessage` in the graph: the conversation's id of the turn. */
@@ -276,6 +286,8 @@ async function resumesOf(ctx: restate.SessionContext, saver: SqlCheckpointSaver)
 async function resumed(ctx: restate.SessionContext, saver: SqlCheckpointSaver, snapshot: StateSnapshot) {
   const pending = interruptsOf(snapshot);
   if (pending.length === 0) return undefined;
+  // What the turn holds back is written before it waits: the waits outlive the attempt.
+  await flushHeld(ctx);
   const resumes = await resumesOf(ctx, saver);
   const values = await Promise.all(
     pending.map(({ id, value }) => {
@@ -352,7 +364,7 @@ async function runGraph(
   };
   if (asked && snapshot.next.length === 0) {
     // The run had finished, but its answer was not stored: that is the answer, rather than run again.
-    await copied(ctx, turn, known, messages, promptId);
+    await copied(turn, known, messages, promptId);
     await saver.prune([THREAD_ID]);
     return answerOf(run, turn, values, before);
   }
@@ -371,7 +383,7 @@ async function runGraph(
     try {
       for await (const state of await run.stream(start, options)) {
         values = state;
-        await copied(ctx, turn, known, (state.messages ?? []) as BaseMessage[], promptId);
+        await copied(turn, known, (state.messages ?? []) as BaseMessage[], promptId);
       }
     } catch (error) {
       // LangGraph's own error, which a retry would meet again: a run past its recursion limit, say.

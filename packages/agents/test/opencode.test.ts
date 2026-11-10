@@ -37,6 +37,7 @@ import {
   type PromptHandler,
   SAID_IN_TURNS as SAID,
 } from './support.ts';
+import { followedRound, THREE_TOOLS } from './following.ts';
 
 const NODE_24 = Number(process.versions.node.split('.')[0]) >= 24;
 
@@ -348,7 +349,7 @@ describe.skipIf(!NODE_24)('the OpenCode agent', () => {
     expect(await c.attempt('inv2', 'Hello')).toMatch(/^Ask me/);
   }, 60_000);
 
-  it('publishes the conversation as a turn and its tool calls start and end', async () => {
+  it('publishes the conversation as a turn starts, after each copy of its steps, and as it ends', async () => {
     const { answer, parts, published } = await followedWhileWorking(
       (tools) => opencode.chat({ tools }),
       opencode.messages(),
@@ -367,7 +368,28 @@ describe.skipIf(!NODE_24)('the OpenCode agent', () => {
       ],
       [{ type: 'text', text: answer }],
     ]);
+    // At its start, once the reply with the call is copied, once the call's result is, and at its end.
     expect(published).toBe(4);
+  }, 60_000);
+
+  it('publishes a round of tool calls once its reply is copied and once each result is, not as the calls start', async () => {
+    fake.script.reply = (request) => {
+      const last = request.prompt.at(-1)!;
+      if (last.role === 'tool') return { text: 'Done' };
+      if (!fake.textOf(last).endsWith(THREE_TOOLS)) return fake.teller(request);
+      const [call, ...calls] = ['t1', 't2', 't3'].map((name) => ({ id: `call_${name}`, name, input: {} }));
+      return { text: 'On it.', call, calls };
+    };
+    const { answer, published, seen } = await followedRound((tools) => opencode.chat({ tools }), opencode.messages());
+    expect(answer).toBe('Done');
+    // OpenCode runs the calls at once; each result is copied as its tool returns it, then published.
+    expect(seen.slice(0, 2)).toEqual([[], [null, null, null]]);
+    expect(seen.at(-1)).toEqual(['result of t1', 'result of t2', 'result of t3']);
+    // One publish per copy of the reply and of each result: never one that shows nothing new.
+    expect(seen).toHaveLength(5);
+    expect(new Set(seen.map((s) => JSON.stringify(s))).size).toBe(5);
+    // Those publishes, and the turn's close.
+    expect(published).toBe(6);
   }, 60_000);
 
   it('gives the conversation from the store: what was said, in order, with the tool calls', async () => {

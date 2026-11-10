@@ -507,7 +507,8 @@ in-memory copy of the object's state, through crashes and fencing.
 - `configOf`: what a session object's attempts get, for attempts of a test's own.
 
 It also has what this repository's other libraries need: `Schema` (tables a
-library owns, applied where it uses them), `database` (another database of
+library owns, applied where it uses them; `ensureSchemas` applies several in
+one commit), `database` (another database of
 the same key), `reset` (empty the key's database in a transaction), and
 `cancelled` and `cancelCalls` (explicit cancellation, for a handler with
 `explicitCancellation: true`), and `ScopeKey` and `definitionOf`, for what a

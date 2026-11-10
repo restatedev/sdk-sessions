@@ -195,6 +195,16 @@ export interface Started extends Answering {
    * cannot take them) gets none: each is answered as a turn of its own.
    */
   steers?: boolean;
+  /**
+   * Whether `start` publishes the turn's start, and returns what `publish`
+   * returns: a followed turn of this package's agents, which then makes no
+   * publish of its own to start. A turn that does not say so (of another
+   * SDK, or of an agent that runs in the background) is not published by
+   * `start`, which returns nothing; and a turn that says so, of a companion
+   * that returns nothing (an older deployment, or the Python SDK's before
+   * 1.5.2), publishes its start itself.
+   */
+  publishes?: boolean;
 }
 
 /**
@@ -243,9 +253,26 @@ interface State {
 async function publish(ctx: restate.ObjectContext<State>): Promise<Notifications> {
   const revision = ((await ctx.get('revision')) ?? 0) + 1;
   ctx.set('revision', revision);
-  for (const { awakeable } of (await ctx.get('watching')) ?? []) ctx.resolveAwakeable(awakeable, { revision });
-  ctx.clear('watching');
+  const watching = (await ctx.get('watching')) ?? [];
+  for (const { awakeable } of watching) ctx.resolveAwakeable(awakeable, { revision });
+  // Cleared only when a watch waits: most publishes have none, and a clear is a state write of its own.
+  if (watching.length > 0) ctx.clear('watching');
   return { revision };
+}
+
+/**
+ * {@link publish}, and what it answers the turn being answered: the new
+ * revision, and the messages steered to the turn that it has not taken yet.
+ */
+async function published(ctx: restate.ObjectContext<State>): Promise<Published> {
+  const notified: Published = await publish(ctx);
+  const inbox = (await ctx.get('inbox')) ?? [];
+  // Only then is the turn read: a turn that nobody steers costs one read more, of the empty inbox.
+  if (inbox.some((m) => m.text !== undefined)) {
+    const steering = waitingIn(inbox, await ctx.get('turn')).map(({ id, text }) => ({ id, text: text! }));
+    if (steering.length > 0) notified.steering = steering;
+  }
+  return notified;
 }
 
 /** Keep `inbox`, or forget it once it is empty. */
@@ -375,13 +402,19 @@ export const signals = restate.object({
      * never closed itself (its invocation was killed) closes now, if its
      * `awaitTurn` did not close it yet. `awaitTurn` watches the new turn, so
      * that it closes even if no turn comes after it.
+     *
+     * A turn that `publishes` (see {@link Started}) is published here, as
+     * the turn's first revision, and gets what `publish` returns; any other
+     * gets nothing, and publishes itself if it is followed.
      */
-    start: internal(async (ctx: restate.ObjectContext<State>, turn: Started) => {
+    start: internal(async (ctx: restate.ObjectContext<State>, turn: Started): Promise<Published | undefined> => {
       const before = (await ctx.get('turn'))?.invocationId;
-      if (before === turn.invocationId) return;
-      if (before !== undefined) await closed(ctx, before, true);
-      ctx.set('turn', turn);
-      ctx.objectSendClient(signals, ctx.key).awaitTurn(turn.invocationId);
+      if (before !== turn.invocationId) {
+        if (before !== undefined) await closed(ctx, before, true);
+        ctx.set('turn', turn);
+        ctx.objectSendClient(signals, ctx.key).awaitTurn(turn.invocationId);
+      }
+      return turn.publishes ? published(ctx) : undefined;
     }),
 
     /**
@@ -488,21 +521,12 @@ export const signals = restate.object({
      * @internal The conversation changed: increase its revision, and answer
      * the `watch`es. It answers the new revision, and the messages steered
      * to the turn being answered that it has not taken yet, if any: a turn
-     * publishes at each tool call's start and end, so it learns of them at
-     * no cost of its own.
+     * publishes as it starts (its `start` does) and after each write of its
+     * steps that commits, so it learns of them at no cost of its own.
      */
     publish: restate.handlers.object.exclusive(
       { ingressPrivate: true },
-      async (ctx: restate.ObjectContext<State>): Promise<Published> => {
-        const published: Published = await publish(ctx);
-        const inbox = (await ctx.get('inbox')) ?? [];
-        // Only then is the turn read: a turn that nobody steers costs one read more, of the empty inbox.
-        if (inbox.some((m) => m.text !== undefined)) {
-          const steering = waitingIn(inbox, await ctx.get('turn')).map(({ id, text }) => ({ id, text: text! }));
-          if (steering.length > 0) published.steering = steering;
-        }
-        return published;
-      },
+      async (ctx: restate.ObjectContext<State>): Promise<Published> => published(ctx),
     ),
 
     /**

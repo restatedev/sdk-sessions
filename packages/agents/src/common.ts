@@ -5,7 +5,7 @@
 // budget.
 import * as restate from '@restatedev/sessions';
 import { cancelCalls, cancelled, definitionOf, Link, ScopeKey } from '@restatedev/sessions/internal';
-import { settleCalls } from './calls.ts';
+import { flushHeld, settleCalls } from './calls.ts';
 import { type Published, type Steer, signals, signalsOf } from './signals.ts';
 
 /**
@@ -279,10 +279,10 @@ const signalsOfAgent = (ctx: restate.SessionContext) => ctx.rpc(signals, signals
 /**
  * The messages steered to a `chat` turn that it has not taken yet, as the
  * companion last published them. The companion answers them to every
- * `publish`, which a turn makes at each tool call's start and end: so the
- * turn knows of them without a call of its own, and finds them at its next
- * step (`takeSteers`). The newest revision wins, as tool calls that run at
- * once publish at once.
+ * `publish` (and `start`), which a turn makes as it starts and after each
+ * write of its steps that commits: so the turn knows of them without a call
+ * of its own, and finds them at its next step (`takeSteers`). The newest
+ * revision wins, as writes that run at once publish at once.
  */
 export class Inbox {
   revision = -1;
@@ -321,9 +321,11 @@ export const inboxOf = (ctx: restate.SessionContext) => INBOX.get(ctx);
  * increases, and the clients that follow it read it again; while a framework
  * answers ({@link answering}), the calls whose results it stored are
  * forgotten first. It is a call to Restate, so it also sends what the
- * handler wrote before, for them to read.
+ * handler wrote before, for them to read: the rows the conversation holds
+ * back are written first (`flushHeld`), as the clients read them once told.
  */
 export const publish = async (ctx: restate.SessionContext) => {
+  await flushHeld(ctx);
   const stored = ANSWERING.get(ctx);
   if (stored) await settled(ctx, stored);
   const published = await signalsOfAgent(ctx).publish();
@@ -336,20 +338,14 @@ export const stepped = async (ctx: restate.SessionContext) => {
 };
 
 /**
- * A tool call of the turn of `ctx` starts: {@link publish} it, which forgets
- * the calls whose results are stored (calls.ts) before the tool makes its
- * own. In the background, which publishes the turn's end only, it forgets
- * them alone.
+ * A tool call of the turn of `ctx` starts: forget the calls whose results are
+ * stored (calls.ts) before the tool makes its own. It publishes nothing: the
+ * turn publishes once the call is stored (with its reply), and once its
+ * result is ({@link stepped}).
  */
 export async function toolCallStarted(ctx: restate.SessionContext) {
-  if (!unfollowed(ctx)) return publish(ctx);
   const stored = ANSWERING.get(ctx);
   if (stored) await settled(ctx, stored);
-}
-
-/** A tool call of the turn of `ctx` (a `chat` handler's) ended: {@link publish} it, unless the agent runs in the background. */
-export async function toolCallEnded(ctx: restate.SessionContext) {
-  await stepped(ctx);
 }
 
 /** Whether a tool call's result is stored: `stored(callId, failed)`, `failed` the error the call answered with. */
@@ -372,7 +368,8 @@ function settled(ctx: restate.SessionContext, stored: Stored): Promise<void> {
 /**
  * Run `work`, a framework's turn on the conversation of turns, forgetting
  * the calls whose results it stores as it goes: each publish while it runs
- * (a tool call's start and end), and its end, forget the Restate calls of
+ * (after a write of its steps commits), each tool call's start, and its
+ * end, forget the Restate calls of
  * the tool calls whose results `stored` says are stored (calls.ts).
  */
 export async function answering<T>(ctx: restate.SessionContext, stored: Stored, work: () => Promise<T>): Promise<T> {
@@ -434,8 +431,9 @@ export const chatOf = (entry: object) => CHAT.of(entry);
  * attempt that ends first (`attemptCompletedSignal`) aborts it too, with an
  * {@link AttemptEnded}: the work stops, and the next attempt goes on with it.
  *
- * It publishes when it starts and ends ({@link publish}), for the clients
- * that follow the conversation.
+ * It publishes when it starts (its companion's `start` does, or else the
+ * turn) and ends ({@link publish}), for the clients that follow the
+ * conversation.
  *
  * As the `chat` handler of an agent, it also answers each message sent to
  * the agent's `steer` view that no turn took, as a turn of its own (the
@@ -473,13 +471,19 @@ export async function chatTurn<A>(
   const steering = !unfollowed(ctx) && (typeof steers === 'function' ? await steers(ctx) : steers);
   // Before the first publish, which may answer messages steered to the turn already (a retried attempt's).
   if (steering) INBOX.set(ctx, new Inbox());
-  await ctx.rpc(signals, signalsOf(ctx)).start({
+  // A followed turn's start is its first publish: the companion makes it, and returns what `publish` returns.
+  const followed = !unfollowed(ctx);
+  const started = await ctx.rpc(signals, signalsOf(ctx)).start({
     invocationId,
     since: new Date().toISOString(),
     ...(settles ? { settles } : {}),
     ...(steering ? { steers: steering } : {}),
+    ...(followed ? { publishes: true } : {}),
   });
-  await stepped(ctx);
+  if (typeof started === 'object' && started !== null) INBOX.get(ctx)?.saw(started);
+  // A companion that returns nothing from `start` (an older deployment's, or the Python SDK's before 1.5.2) did
+  // not publish it: the turn does.
+  else if (followed) await publish(ctx);
   // The log takes the turn's last change, then the companion closes the
   // turn, which publishes it: one revision. The close is a call the turn
   // waits for, so that it is done before the turn ends (see `awaitTurn`).

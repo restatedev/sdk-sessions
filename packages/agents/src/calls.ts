@@ -54,8 +54,11 @@ interface Calls {
   calls: Call[];
 }
 
-/** The table of the {@link Calls}: one row, of the invocation whose calls they are. */
-const SCHEMA = new Schema('restate-agents.calls', [
+/**
+ * The table of the {@link Calls}: one row, of the invocation whose calls they are. `answerOnce` applies it with
+ * the conversation's, in one commit, as a key's first turn starts.
+ */
+export const SCHEMA = new Schema('restate-agents.calls', [
   `CREATE TABLE restate_agent_calls (
     row INTEGER PRIMARY KEY CHECK (row = 0),
     invocation TEXT NOT NULL,
@@ -66,8 +69,33 @@ const SCHEMA = new Schema('restate-agents.calls', [
 /** What the calls need of a handler's context. */
 type CallsContext = Pick<restate.SessionContext, 'db' | 'request'>;
 
-/** Store `calls`, committed before the call they record is made. */
-async function store(ctx: CallsContext, { invocation, calls }: Calls) {
+/** What writes the rows the conversation of the attempt's turn holds back, by its context. */
+const HELD = new ScopeKey<() => Promise<void>>('the held rows of the conversation');
+
+/**
+ * Have {@link flushHeld} write, with `flush`, the rows that the conversation
+ * of the attempt's turn holds back (`Conversation.hold`): `answerOnce` does.
+ */
+export const holding = (ctx: restate.SessionContext, flush: () => Promise<void>) => HELD.set(ctx, flush);
+
+/**
+ * Write the rows that the conversation of the attempt's turn holds back, if
+ * any (see `Conversation.hold`). Call it before what another party sees, or
+ * what outlives the attempt: a publish, a Restate call, send or wait. A held
+ * row is lost in a crash, and the retried attempt makes it again; what was
+ * seen or called must not depend on it.
+ */
+export async function flushHeld(ctx: restate.SessionContext) {
+  await HELD.get(ctx)?.();
+}
+
+/**
+ * Store `calls`, committed before the call they record is made. The rows the
+ * conversation holds back are written first: the call outlives the attempt,
+ * and what led to it must too.
+ */
+async function store(ctx: restate.SessionContext, { invocation, calls }: Calls) {
+  await flushHeld(ctx);
   await ctx.db.execute('INSERT OR REPLACE INTO restate_agent_calls (row, invocation, calls) VALUES (0, ?, ?)', [
     invocation,
     JSON.stringify(calls),
@@ -85,12 +113,25 @@ async function load(ctx: CallsContext, invocation: string): Promise<Calls> {
     : { invocation, calls: [] };
 }
 
-/** Each attempt's id, and its calls, by its context. */
-const ATTEMPT = new ScopeKey<{ id: string; calls: Promise<Calls> }>('the calls of an attempt');
+/** Each attempt's id, and its calls, by its context, once they are being read. */
+const ATTEMPT = new ScopeKey<{ id: string; calls?: Promise<Calls> }>('the calls of an attempt');
 
-/** The attempt of `ctx`: its id, and the calls of its invocation (loaded once, shared by calls made at once). */
-function attemptOf(ctx: restate.SessionContext) {
-  return ATTEMPT.of(ctx, () => ({ id: randomUUID(), calls: load(ctx, ctx.request.id) }));
+/**
+ * The attempt of `ctx`: its id, and the calls of its invocation (loaded once,
+ * shared by calls made at once). A load that fails (its schema's commit
+ * cancelled, say) is not kept: the next asks again, so that a stopped turn's
+ * close reads the calls as stored, rather than fail on the load it found.
+ */
+function attemptOf(ctx: restate.SessionContext): { id: string; calls: Promise<Calls> } {
+  const attempt = ATTEMPT.of(ctx, () => ({ id: randomUUID() }));
+  if (attempt.calls === undefined) {
+    const calls = load(ctx, ctx.request.id);
+    attempt.calls = calls;
+    calls.catch(() => {
+      if (attempt.calls === calls) attempt.calls = undefined;
+    });
+  }
+  return attempt as { id: string; calls: Promise<Calls> };
 }
 
 /** `value` as JSON with its objects' keys sorted: the same input, however its keys came, is the same call. */

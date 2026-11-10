@@ -68,8 +68,10 @@ stored.
 
 - **Each reply is stored before its tools run, and their results before the
   next request.** So a crash during the tools resumes them with the same tool
-  call ids, without asking the model again; and a stored final reply is the
-  answer, without asking the model for it again.
+  call ids, without asking the model again. The final reply, which no tool
+  waits for, is stored with the turn's answer, in one commit: a crash before
+  it asks the model again. A paused reply (`pause_turn`, a server tool's long
+  turn) is stored before the model goes on from it.
 - **A tool is idempotent by its tool call id** (`callId` of `tool()`'s
   `run`, or `callId(context)` for the SDK's tools), which it passes on, such
   as in an idempotency key.

@@ -123,8 +123,10 @@ OpenCode keeps its own history, and compacts it itself: `window`, `budget`
 and summaries do not apply. What OpenCode stores of a turn (the model's
 replies, the tools' results) is copied into the turn after each of
 OpenCode's commits, in a `ctx.db` transaction of its own, by OpenCode's
-message and part ids, so a copy a crash missed is caught up, before each
-publish, the answer, and any close of the turn. That is what `messages`
+message and part ids, so a copy a crash missed is caught up, before a tool
+call runs, the answer, and any close of the turn. A copy of a reply with
+tool calls, or of tools' results, is published once it is committed, and
+nothing else is: a tool call's start publishes nothing. That is what `messages`
 shows ([docs/conversation.md](../../docs/conversation.md)); OpenCode's own
 "Continue" after a restart, its idle markers and its compactions are not
 copied. A reply with tool calls is copied as its stream ends, before the

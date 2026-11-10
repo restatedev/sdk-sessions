@@ -19,8 +19,10 @@
 // what clients read, and how turns end. What OpenCode stores of a turn (the
 // model's replies, the tools' results) is copied into the turn after each of
 // OpenCode's commits, in a `ctx.db` transaction of its own, idempotently (by
-// OpenCode's message and part ids), and caught up before each publish, the
-// answer, and any close of the turn. OpenCode boots lazily, as a turn runs:
+// OpenCode's message and part ids), and caught up before a tool call runs, the
+// answer, and any close of the turn. A copy of steps (a reply with tool calls,
+// tools' results) is published once it commits, and nothing else is: followers
+// read the conversation then. OpenCode boots lazily, as a turn runs:
 // an answered prompt's retry boots nothing.
 //
 // OpenCode records an execution claim as a turn starts, and every boot sweeps
@@ -55,8 +57,8 @@
 // step, after the round's results. Once, by its steer id (`msg_steer_<id>`,
 // which OpenCode takes once, also from a retried attempt). In such a turn,
 // the tool's `execute.after` hook, which OpenCode awaits before it stores the
-// result, copies the result as the tool returned it and publishes the call's
-// end, whose answer lists the messages, then submits them: so OpenCode places
+// result, copies the result as the tool returned it and publishes the copy,
+// whose answer lists the messages, then submits them: so OpenCode places
 // them at the step that follows, never past the turn's end. The copy stores
 // each as a steered message of the turn, in its place, and tells the
 // companion it is taken.
@@ -92,8 +94,8 @@ import {
   refusal,
   REFUSED,
   RETURNED_UNRECORDED,
+  stepped,
   stopSignalOf,
-  toolCallEnded,
   toolCallStarted,
 } from '../common.ts';
 import { answerOnce, invocationOf, type Call, type Items, type Parsed, STEPS, type Turn } from '../conversation.ts';
@@ -365,8 +367,8 @@ interface Returned {
  * companion told it is taken in the transaction). Each once: by OpenCode's
  * ids, a steered message by its steer id too. Not the prompt, nor what asks
  * again (the turn has them), nor OpenCode's synthetic messages, idle markers
- * and compactions. In a `ctx.db` transaction of its own. The ids of the
- * calls whose results it copied.
+ * and compactions. In a `ctx.db` transaction of its own. Whether it copied a
+ * step that a follower waits for: a reply with tool calls, or a tool's result.
  *
  * With `own`, a call's result as its tool returned it, before OpenCode
  * stores it: copied too (after its reply), under the id OpenCode's part has.
@@ -377,14 +379,13 @@ async function copyInto(
   turn: Turn<Item>,
   own?: Returned,
   steersOnly = false,
-): Promise<string[]> {
-  if (!turn.writable) return [];
+): Promise<boolean> {
+  if (!turn.writable) return false;
   const after = await messagesAfter(host, messageIdOf(turn.id));
-  if (!after) return [];
+  if (!after) return false;
   const have = new Set(turn.items.flatMap((e) => (e.item.from ? [e.item.from] : [])));
   const held = new Set(turn.steered().map((e) => e.steer));
   const copied: { item: Item; reply?: boolean; steer?: string }[] = [];
-  const resulted: string[] = [];
   for (const m of after) {
     const steer = steerOf(m);
     if (steer !== undefined) {
@@ -436,15 +437,13 @@ async function copyInto(
         ...(status === 'error' ? { error: true } : {}),
       };
       copied.push({ item: { type: 'results', results: [result], from } });
-      resulted.push(t.id!);
       have.add(from);
     }
   }
   if (own && !have.has(own.from) && have.has(own.from.split('/')[0]!)) {
     copied.push({ item: { type: 'results', results: [own.result], from: own.from } });
-    resulted.push(own.result.id);
   }
-  if (copied.length === 0) return [];
+  if (copied.length === 0) return false;
   const done = await ctx.db.transaction(async (tx) => {
     if (!(await turn.copyIn(tx, copied))) return false;
     tookSteers(
@@ -454,7 +453,10 @@ async function copyInto(
     );
     return true;
   });
-  return done ? resulted : [];
+  return (
+    done &&
+    copied.some(({ item }) => item.type === 'results' || (item.type === 'assistant' && (item.calls?.length ?? 0) > 0))
+  );
 }
 
 /** Where a prompt is: not in the session, its turn running, or ended with an answer or a failure. */
@@ -931,19 +933,17 @@ export const withOpenCode = async <T>(
   let turn: Turn<Item> | undefined;
   // Once the turn is stopped, nothing more is copied: its close says how it ended.
   let stopping = false;
-  // The calls that returned, whose ends are published once their results are copied.
-  const returned = new Set<string>();
   // The copies, one after another.
   let copying: Promise<unknown> = Promise.resolve();
   /**
    * Copy what OpenCode has of the turn, and `own`, a call's result as its tool returned it (see {@link copyInto}):
-   * once the turn is stopped, only with `steersOnly`, its messages steered to the turn.
+   * once the turn is stopped, only with `steersOnly`, its messages steered to the turn. A copy of steps (a reply
+   * with tool calls, tools' results) is published once it is committed, for followers to read them there.
    */
   const copy = (own?: Returned, steersOnly = false) => {
     const next = copying.then(async () => {
       if (!turn || (stopping && !steersOnly) || fence.closed) return undefined;
-      const resulted = await copyInto(ctx, await host(), turn, own, steersOnly);
-      if (resulted.some((id) => returned.delete(id))) await toolCallEnded(ctx);
+      if (await copyInto(ctx, await host(), turn, own, steersOnly)) await stepped(ctx);
       return undefined;
     });
     copying = next.catch(() => {});
@@ -986,12 +986,13 @@ export const withOpenCode = async <T>(
   };
 
   /**
-   * Publish a tool call's start, once the reply that makes it is copied, and
-   * its end, once its result is. In a turn that takes steered messages, the
-   * result is copied as the tool returns it (OpenCode stores it after this
-   * hook, and goes on to the round's next step without waiting for a copy):
-   * the end's publish lists the messages steered to the turn, which are
-   * submitted before OpenCode stores the result ({@link steer}).
+   * Copy the reply that makes a tool call before the call runs (its copy is
+   * published), then forget the calls whose results are stored. In a turn
+   * that takes steered messages, the result is copied as the tool returns it
+   * (OpenCode stores it after this hook, and goes on to the round's next step
+   * without waiting for a copy): the copy's publish lists the messages
+   * steered to the turn, which are submitted before OpenCode stores the
+   * result ({@link steer}).
    */
   const followPlugin: Plugin.Plugin = {
     id: 'restate-agents.follow',
@@ -1002,7 +1003,6 @@ export const withOpenCode = async <T>(
           .catch(fail);
       });
       const after = await plugin.tool.hook('execute.after', async (event) => {
-        returned.add(event.id);
         if (!inboxOf(ctx)) return;
         const output =
           event.status === 'error'
