@@ -12,18 +12,25 @@
 // processes so often that a write of the warehouse, the key every order of a
 // SKU goes through, could not finish. Each kind of agent runs in its own: the pi, LangGraph and DeepSeek Harness agents
 // (AGENT_ABORT_PER_MILLE, default 3: a pi or DeepSeek Harness prompt makes
-// some hundreds of state requests), and the Claude agents (the same).
+// some hundreds of state requests), the Claude agents (the same), and the
+// OpenCode agents (OPENCODE_ABORT_PER_MILLE, default AGENT_ABORT_PER_MILLE;
+// Node 24, as OpenCode needs).
 // The agents get the same prompts. Each request is resent until answered,
-// some twice.
+// some twice. Some of the OpenCode agents' prompts are killed instead
+// (Restate's kill of their invocation): at a random moment, once their
+// transfer call shows in the conversation, or once the ledger answered it. A
+// killed turn is closed (by the next prompt), never finished, and its money
+// moves at most once.
 //
-// The agents' models are the scripted tellers (@restatedev/agents/test/fakes/fakes.ts), which need
-// no API key: "move 5 from 1 to 2" makes a transfer.
+// The agents' models are the scripted tellers (@restatedev/agents/test/fakes/fakes.ts, and for
+// OpenCode ./opencode-teller.ts), which need no API key: "move 5 from 1 to 2" makes a transfer.
 //
 // Checks: the warehouses' books balance and agree with every order; every
 // transfer between accounts is on both of its keys or on neither, and the
 // money adds up; every view read along the way saw a committed state (books
 // that balance, order statuses that only move forward, a slow view's two
-// reads alike); and every agent prompt moved money exactly once.
+// reads alike); and every agent prompt moved money exactly once, a killed one
+// at most once, each transfer made by the turn of its prompt.
 //
 // Every random choice comes from one seed, printed at the start: ABORT_SEED=n
 // runs with the same abort points (counted in each process's state requests)
@@ -62,10 +69,11 @@ const INGRESS = 'http://127.0.0.1:8080';
 const ADMIN = 'http://127.0.0.1:9070';
 const PER_MILLE = Number(process.env.ABORT_PER_MILLE ?? 15);
 const AGENT_PER_MILLE = Number(process.env.AGENT_ABORT_PER_MILLE ?? 3);
+const OPENCODE_PER_MILLE = Number(process.env.OPENCODE_ABORT_PER_MILLE ?? AGENT_PER_MILLE);
 /**
  * A service process: its name, the groups of serve.ts it serves, its port
- * and abort rate; the port of the proxy in front of it, if any; and its
- * environment beyond the run's.
+ * and abort rate; the port of the proxy in front of it, if any; its
+ * environment beyond the run's; and modules it imports beyond the fakes.
  */
 interface Process {
   name: string;
@@ -74,6 +82,7 @@ interface Process {
   perMille: number;
   behind?: number;
   env?: Record<string, string>;
+  imports?: string[];
 }
 const SHOP_PROXY = 9182;
 const BANK_PROXY = 9190;
@@ -94,10 +103,24 @@ const PROCESSES: Process[] = [
   // then failed). At the agents' rate, an attempt survives five times as often.
   { name: 'claude', groups: ['claude'], port: 9187, perMille: AGENT_PER_MILLE },
   { name: 'deepseek', groups: ['deepseek'], port: 9188, perMille: AGENT_PER_MILLE },
+  // OpenCode's model is a plugin's: its process swaps the module that boots
+  // OpenCode for one that gives every boot the teller.
+  {
+    name: 'opencode',
+    groups: ['opencode'],
+    port: 9189,
+    perMille: OPENCODE_PER_MILLE,
+    env: { MODEL: 'scripted/scripted' },
+    imports: [fileURLToPath(new URL('opencode-teller.ts', import.meta.url))],
+  },
 ];
-// The agents: the pi one, the LangGraph one, the Claude one and the DeepSeek
-// Harness one, with the same prompts.
-const AGENTS = ['Agent', 'GraphAgent', 'ClaudeAgent', 'DeepSeekAgent'];
+// The agents: the pi one, the LangGraph one, the Claude one, the DeepSeek
+// Harness one and the OpenCode one, with the same prompts.
+const AGENTS = ['Agent', 'GraphAgent', 'ClaudeAgent', 'DeepSeekAgent', 'OpenCodeAgent'];
+// The agents some of whose prompts are killed, and which: one of each three,
+// never one sent twice nor the audit. Each kill is checked in their conversation.
+const KILLED = new Set(['OpenCodeAgent']);
+const killedPrompt = (name: string, p: number) => KILLED.has(name) && p % 3 === 2;
 const FAKES = fileURLToPath(import.meta.resolve('@restatedev/agents/test/fakes/fakes'));
 const EXPIRY_MS = 1500;
 const SKUS = ['apple', 'pear', 'plum'];
@@ -176,7 +199,7 @@ const listening = (port: number) =>
  * faults.ts) is a SIGKILL; any other exit is a failure, such as a port taken
  * at startup, restarted after a pause, and ending the run if it repeats.
  */
-function supervise({ name, groups, port, env }: Process, perMille: number): Supervised {
+function supervise({ name, groups, port, env, imports = [] }: Process, perMille: number): Supervised {
   let failures = 0;
   // The process's own random numbers, from the run's seed and its place in
   // PROCESSES: the order in which processes restart changes nothing it draws.
@@ -188,7 +211,11 @@ function supervise({ name, groups, port, env }: Process, perMille: number): Supe
     const seed = Math.floor(random() * 2 ** 32);
     return spawn(
       process.execPath,
-      ['--import', FAKES, fileURLToPath(new URL('serve.ts', import.meta.url)), ...groups],
+      [
+        ...[FAKES, ...imports].flatMap((module) => ['--import', module]),
+        fileURLToPath(new URL('serve.ts', import.meta.url)),
+        ...groups,
+      ],
       {
         env: {
           ...process.env,
@@ -648,13 +675,97 @@ function promptText(s: number, p: number) {
   const to = (s + 3 * p + 1) % ACCOUNTS;
   return `Please move ${1 + p} from ${from} to ${to === from ? (to + 1) % ACCOUNTS : to}`;
 }
+/**
+ * When a prompt is killed: after a random while; once its transfer call shows
+ * in the conversation (stored before it runs); or once the ledger answered
+ * it (the money moved, the turn not yet answered).
+ */
+const HOW = ['at random', 'after its call', 'after the ledger'] as const;
+/** A killed prompt: its invocation, how it was killed, and whether the kill found it running or answered. */
+interface Kill {
+  name: string;
+  s: number;
+  p: number;
+  invocation: string;
+  how: (typeof HOW)[number];
+  outcome: 'killed' | 'answered';
+  /** Whether the conversation had its model's last reply ("Done: …") once it was killed. */
+  repliedAtKill: boolean;
+}
+const killed: Kill[] = [];
+/**
+ * Send session `s`'s prompt `p` and kill its invocation (HOW); then wait
+ * until Restate completed it, killed or, if the kill came too late, answered.
+ */
+async function killPrompt(name: string, s: number, p: number, random: () => number): Promise<Kill> {
+  const text = promptText(s, p);
+  const how = HOW[(2 * s + Math.floor(p / 3)) % HOW.length]!;
+  const { invocationId: invocation } = await call<{ invocationId: string }>(`${name}/s${s}/chat/send`, text, {
+    'idempotency-key': `s${s}-p${p}`,
+  });
+  const completion = async () => {
+    const rows = await query<{ status: string; result: string | null; failure: string | null }>(
+      `SELECT status, completion_result AS result, completion_failure AS failure FROM sys_invocation WHERE id = '${invocation}'`,
+    );
+    return rows === null ? null : (rows[0] ?? 'gone'); // null: the server is away
+  };
+  /** Whether the moment to kill came. */
+  const due = async () => {
+    if (how === 'after its call') {
+      const { messages } = await call<Messages>(`${name}/s${s}/messages`, { limit: 6 });
+      const at = messages.findLastIndex((m) => m.role === 'user' && (m.parts[0] as { text: string }).text === text);
+      const parts = at < 0 ? [] : messages.slice(at + 1).flatMap((m) => m.parts);
+      return parts.some((part) => part.type === 'tool' && part.name === 'transfer');
+    }
+    const rows = await query<{ status: string }>(
+      `SELECT status FROM sys_invocation WHERE invoked_by_id = '${invocation}' AND target_service_name = 'Ledger'`,
+    );
+    return rows?.some((r) => r.status === 'completed') ?? false;
+  };
+  if (how === 'at random') await sleep(Math.floor(random() * 1500));
+  else {
+    // Until it is due, or the prompt was answered first.
+    for (const deadline = Date.now() + 120_000; Date.now() < deadline; await sleep(50)) {
+      if (await due()) break;
+      const now = await completion();
+      if (now !== null && (now === 'gone' || now.status === 'completed')) break;
+    }
+  }
+  for (;;) {
+    const r = await fetch(`${ADMIN}/invocations/${invocation}/kill`, { method: 'PATCH' }).catch(() => null);
+    if (r && r.status < 500) break;
+    await sleep(100);
+  }
+  for (;;) {
+    const now = await completion();
+    if (now === 'gone') throw new Error(`${name}/s${s} ${invocation}: gone before its idempotency key expired`);
+    if (now?.status === 'completed') {
+      const { messages } = await call<Messages>(`${name}/s${s}/messages`, { limit: 6 });
+      const at = messages.findLastIndex((m) => m.role === 'user' && (m.parts[0] as { text: string }).text === text);
+      const repliedAtKill =
+        at >= 0 &&
+        messages.slice(at + 1).some((m) => m.parts.some((x) => x.type === 'text' && x.text.startsWith('Done:')));
+      if (now.result === 'success') return { name, s, p, invocation, how, outcome: 'answered', repliedAtKill };
+      assert.match(now.failure ?? '', /killed/, `${name}/s${s} ${invocation}: failed, not killed`);
+      return { name, s, p, invocation, how, outcome: 'killed', repliedAtKill };
+    }
+    await sleep(100);
+  }
+}
 const sessions = AGENTS.flatMap((name) => Array.from({ length: SESSIONS }, (_, s) => [name, s] as const));
 const agents = pool(
   sessions.length,
   sessions.map(([name, s]) => async () => {
+    // The session's own random numbers, for its kills.
+    const random = seeded(SEED + 1000 + AGENTS.indexOf(name) * SESSIONS + s);
     for (let p = 0; p < PROMPTS; p++) {
       const id = `s${s}-p${p}`;
       const text = promptText(s, p);
+      if (killedPrompt(name, p)) {
+        killed.push(await killPrompt(name, s, p, random));
+        step();
+        continue;
+      }
       // Sent again, by its idempotency key: the same invocation, and answer.
       for (let n = 0; n < (p % 3 === 0 ? 2 : 1); n++) {
         const answer = await call<string>(`${name}/s${s}/chat`, text, { 'idempotency-key': id });
@@ -700,7 +811,18 @@ await Promise.all(services.map((s) => s.stop()));
 services = PROCESSES.map((p) => supervise(p, 0));
 
 // Each agent's conversation has each prompt once, in order, however often
-// its attempts crashed and its messages were sent again.
+// its attempts crashed and its messages were sent again; a killed prompt's
+// turn, only if it started.
+const ledgerIds = Map.groupBy(await call<string[]>('Ledger/bank/transfers'), (id) =>
+  id.split('/').slice(0, 2).join('/'),
+);
+/** How many killed prompts moved no money: each other prompt moved it once. */
+let unmoved = 0;
+/**
+ * Killed turns that hold their model's last reply: copied as it streamed,
+ * before the kill landed ahead of the answer. Still closed unanswered.
+ */
+const repliedThenKilled: string[] = [];
 for (const [name, s] of sessions) {
   // A page at a time, from the latest back.
   const said: Messages['messages'] = [];
@@ -708,12 +830,73 @@ for (const [name, s] of sessions) {
     page = await call<Messages>(`${name}/s${s}/messages`, { limit: 20, before: said[0]?.id });
     said.unshift(...page.messages);
   }
-  const asked = said.filter((m) => m.role === 'user').map((m) => (m.parts[0] as { text: string }).text);
+  // Its turns: each prompt, and the messages that answer it.
+  const turns: { text: string; said: Messages['messages'] }[] = [];
+  for (const m of said) {
+    if (m.role === 'user') turns.push({ text: (m.parts[0] as { text: string }).text, said: [m] });
+    else turns.at(-1)?.said.push(m);
+  }
+  const asked = turns.map((t) => t.text);
+  const killedHere = new Map(
+    killed.filter((k) => k.name === name && k.s === s).map((k) => [promptText(s, k.p), k] as const),
+  );
   assert.deepEqual(
     asked,
-    [...Array.from({ length: PROMPTS }, (_, p) => promptText(s, p)), 'audit the books'],
+    [...Array.from({ length: PROMPTS }, (_, p) => promptText(s, p)), 'audit the books'].filter(
+      (text) => asked.includes(text) || killedHere.get(text)?.outcome !== 'killed',
+    ),
     `${name}/s${s}`,
   );
+  if (!KILLED.has(name)) continue;
+  // Each transfer of the ledger was made by a call of one turn (by its id,
+  // or the id it retries): one per prompt answered, at most one per prompt
+  // killed, whose turn ended unanswered.
+  const session = `${name}/s${s}`;
+  const made = new Map(turns.map((t) => [t, 0]));
+  for (const id of ledgerIds.get(session) ?? []) {
+    const callId = id.slice(session.length + 1);
+    const turn = turns.find((t) =>
+      t.said.some((m) =>
+        m.parts.some(
+          (part) =>
+            part.type === 'tool' &&
+            part.name === 'transfer' &&
+            (part.id === callId || (part.input as { retryOf?: string }).retryOf === callId),
+        ),
+      ),
+    );
+    if (!turn) {
+      // Which invocation made it, and for which prompt: the ledger's input.
+      const [maker] =
+        (await query<{ by: string; prompt: string }>(
+          `SELECT l.invoked_by_id AS by, a.idempotency_key AS prompt FROM sys_invocation l JOIN sys_invocation a ON a.id = l.invoked_by_id WHERE l.target_service_name = 'Ledger' AND l.idempotency_key LIKE '%:${callId}'`,
+        )) ?? [];
+      assert.fail(
+        `${session}: transfer ${id} is no turn's, made by ${maker ? `${maker.by} (${maker.prompt})` : 'an invocation not found'}; ` +
+          `killed: ${JSON.stringify([...killedHere.values()])}; the conversation: ${JSON.stringify(said)}`,
+      );
+    }
+    made.set(turn, made.get(turn)! + 1);
+  }
+  for (const [turn, n] of made) {
+    const kill = killedHere.get(turn.text);
+    const texts = turn.said
+      .flatMap((m) => (m.role === 'assistant' ? m.parts : []))
+      .flatMap((part) => (part.type === 'text' ? [part.text] : []));
+    const evidence = `${session} "${turn.text}"${kill ? ` (${kill.invocation} killed ${kill.how})` : ''}: ${n} transfers, ${JSON.stringify(turn.said)}`;
+    if (kill?.outcome === 'killed') {
+      assert.ok(n <= 1, `moved more than once: ${evidence}`);
+      // Closed, not answered: its last word is the closing note, after
+      // whatever its own invocation's model said.
+      assert.match(texts.at(-1) ?? '', /^Ended: /, `a killed turn not closed: ${evidence}`);
+      if (texts.some((t) => t.startsWith('Done:'))) {
+        repliedThenKilled.push(`${kill.invocation}${kill.repliedAtKill ? '' : ', copied after the kill'}`);
+      }
+      if (n === 0) unmoved++;
+    } else if (turn.text === 'audit the books') assert.equal(n, 0, evidence);
+    else assert.equal(n, 1, evidence);
+  }
+  for (const text of killedHere.keys()) if (!asked.includes(text)) unmoved++; // killed before its turn started
 }
 
 // Unpaid orders expire.
@@ -749,20 +932,15 @@ for (const [id, answer] of paid) {
 }
 
 const audit = await call<Audit>('Ledger/bank/audit');
-if (audit.transfers !== AGENTS.length * SESSIONS * PROMPTS) {
+// Exactly one per prompt, but the killed prompts that moved none.
+const transfers = AGENTS.length * SESSIONS * PROMPTS - unmoved;
+if (audit.transfers !== transfers) {
   // Which sessions moved money more often than they were asked to.
-  const ids = await call<string[]>('Ledger/bank/transfers');
-  const bySession = Map.groupBy(ids, (id) => id.split('/').slice(0, 2).join('/'));
-  for (const [session, made] of bySession) {
+  for (const [session, made] of ledgerIds) {
     if (made.length !== PROMPTS) console.error(`${session}: ${made.length} transfers: ${made.join(', ')}`);
   }
 }
-assert.deepEqual(audit, {
-  accounts: ACCOUNTS,
-  total: ACCOUNTS * OPENING,
-  transfers: AGENTS.length * SESSIONS * PROMPTS, // exactly one per prompt
-  inconsistent: 0,
-});
+assert.deepEqual(audit, { accounts: ACCOUNTS, total: ACCOUNTS * OPENING, transfers, inconsistent: 0 });
 
 // The bank: once the credits in flight arrive, every transfer is on both of
 // its keys or neither, and the money adds up.
@@ -809,11 +987,38 @@ const invocations = async (service: string, handler: string): Promise<number> =>
   return rows[0]!.n;
 };
 assert.equal(await invocations('Warehouse', 'reserve'), rounds * ORDERS, 'reserve invocations');
-assert.equal(await invocations('Ledger', 'transfer'), AGENTS.length * SESSIONS * PROMPTS, 'transfer invocations');
+// A killed prompt's invocation called the ledger at most once, its turn never
+// again under the next prompt's: one call per prompt, and per killed one that moved money.
+const ledgerCalls = await query<{ by: string; n: number }>(
+  `SELECT invoked_by_id AS by, count(*) AS n FROM sys_invocation WHERE target_service_name = 'Ledger' AND target_handler_name = 'transfer' GROUP BY invoked_by_id`,
+);
+assert.ok(ledgerCalls, 'the admin API answers');
+for (const { invocation, name, s, p } of killed) {
+  const n = ledgerCalls.find((r) => r.by === invocation)?.n ?? 0;
+  assert.ok(n <= 1, `${name}/s${s} p${p}: the killed ${invocation} made ${n} ledger transfers`);
+}
+const killedCalls = ledgerCalls.filter((r) => killed.some((k) => k.outcome === 'killed' && k.invocation === r.by));
+assert.equal(
+  await invocations('Ledger', 'transfer'),
+  AGENTS.length * SESSIONS * PROMPTS - killed.filter((k) => k.outcome === 'killed').length + killedCalls.length,
+  'transfer invocations',
+);
 
 console.error(`rounds: ${rounds}; orders: ${JSON.stringify(counts)}`);
 console.error(`views read: ${JSON.stringify(viewReads)}`);
 console.error(`cancellations found their transfer: ${JSON.stringify(cancelledWhile)}`);
+const killedBy = Map.groupBy(killed, (k) => `${k.name} ${k.outcome} ${k.how}`);
+console.error(
+  `prompts killed: ${[...killedBy].map(([what, ks]) => `${ks.length} ${what}`).join(', ')}; ` +
+    `${killedCalls.length} of the killed had called the ledger, ${unmoved} moved no money, ` +
+    `${repliedThenKilled.length} held their model's reply (${repliedThenKilled.join(', ')})`,
+);
+for (const name of KILLED) {
+  assert.ok(
+    killed.some((k) => k.name === name && k.outcome === 'killed'),
+    `no kill of ${name} found its prompt running`,
+  );
+}
 for (const { names, served } of proxies)
   console.error(`${names.join(' and ')} served ${served.join(' and ')} connections`);
 console.error(`memory, most (MiB): ${memory()}`);
