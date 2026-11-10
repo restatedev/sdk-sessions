@@ -9,7 +9,9 @@ server, are in its `test/` directory (`pnpm test` at the root runs them all).
   [`@restatedev/agents`'s tests](../agents/test) and the sessions of
   [`@restatedev/sessions`'s](../sessions/test) (the ledger, the shop, and the bank
   of one account per key), through crashes: the services abort at random, the
-  server is killed twice, transfers are cancelled, and views are read all
+  server is killed twice, transfers are cancelled, some of the OpenCode
+  agent's prompts are killed (their turns closed, never finished, their
+  money moved at most once), and views are read all
   along (`pnpm --filter e2e crash`). The shop's services run in two processes
   behind one deployment, one with a small page cache, and take turns; the
   bank's, in two more behind another. Every random choice comes from a seed it

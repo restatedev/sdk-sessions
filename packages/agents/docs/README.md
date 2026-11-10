@@ -11,10 +11,10 @@ and the plan to get there.
 **Status: implemented.** These pages describe the code, after
 [the plan](plan.md)'s steps (its Status lists them). Where these pages say "today", they mean v0.3.0, before the port: kept to
 explain why the model is as it is. Where the
-code differs from the design: OpenCode left the package (the plan's D6, see
-[The frameworks](frameworks.md#opencode)); snapshots are not ported (D3);
-DeepSeek's harness has no compaction mounted, and a pi provider's outage
-still ends its turn (both in [The frameworks](frameworks.md)).
+code differs from the design: OpenCode left the package after its first
+spike (the plan's D6), and came back on the store, its dead turns closed by
+OpenCode's resume budget ([OpenCode's return](opencode.md),
+[The frameworks](frameworks.md#opencode)); snapshots are not ported (D3).
 
 ## In brief
 
@@ -77,6 +77,7 @@ flowchart LR
 | [Turn semantics](turns.md)            | what a turn is; its life, its end, attempts, stops, dead turns and `settle`; the turn model in code; what clients see; the guarantees                   |
 | [The conversation](conversation.md)   | the data layout (every table), a worked example, which turns a turn loads, what the model gets, framework-owned history, the call records, the schemas  |
 | [The frameworks](frameworks.md)       | per framework: how it works today (with the problems found), the library's own model, and how it maps onto the store                                    |
+| [OpenCode's return](opencode.md)      | how OpenCode came back on the store, its dead turns closed by OpenCode's resume budget (`maxAttempts: 0`); the alternatives, the steps, what is left    |
 | [Testing](testing.md)                 | how the agents are tested, and each past bug brought back to see which tests notice (`scripts/resurrect.ts`)                                            |
 | [Access patterns](access-patterns.md) | what a conversation asks of Restate state, turn after turn, warm and in a new process (`scripts/access-patterns.ts`)                                    |
 
@@ -133,15 +134,16 @@ chain here, `Stop.guard` is a race with the turn's `AbortSignal`
 ### Where this package differs on purpose
 
 - **Framework-owned history** is a way of its own here. Three of this
-  package's frameworks (pi, DeepSeek) are durable engines with their
+  package's frameworks (pi, DeepSeek, OpenCode) are durable engines with their
   own stores, which cannot be handed a list of messages: each keeps its
   history, and its turns hold copies of its messages
   ([The conversation](conversation.md#framework-owned-history)). The Python
   SDK has this only for a LangGraph graph of your own (`graph=`).
 - **`waitFor` can rejoin** (`rejoin`), which Python's `wait_for` never does:
-  the DeepSeek Harness makes a call cut off by a crash again under a new id,
-  so its approvals join the earlier attempt's wait by their input, as
-  Restate's own tools do. Pydantic AI keeps a deferred call's id.
+  the DeepSeek Harness and OpenCode make a call cut off by a crash again
+  under a new id, so their approvals join the earlier attempt's wait by
+  their input, as Restate's own tools do. Pydantic AI keeps a deferred
+  call's id.
 - **Snapshots are not ported** (no framework here needs them). Their table is
   created anyway, so that the schema is the Python SDK's, step for step.
 - **Names** follow this package: `answerOnce`, `askAgain`, `stopSignalOf`,

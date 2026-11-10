@@ -222,6 +222,8 @@ const internal = (items: Items<unknown> | undefined) => ({
       // Read first, which also makes the reset apply the conversation's schema again.
       await SCHEMA.ensure(ctx.db);
       const start = await nextStart(ctx.db);
+      // A framework's database of its own first: the conversation's rows say what is left.
+      await items?.erase?.(ctx);
       await ctx.db.transaction(async (tx) => {
         await reset(tx);
         await restart(tx, start);

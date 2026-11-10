@@ -18,6 +18,7 @@ that put them together. New to it all? Begin with
 | [`langgraph.ts`](basic/langgraph.ts) | The same agent on LangGraph                                                                                                                |
 | [`claude.ts`](basic/claude.ts)       | The same agent on Claude (the Anthropic SDK's tool runner; `ANTHROPIC_API_KEY`)                                                            |
 | [`deepseek.ts`](basic/deepseek.ts)   | The same agent on the DeepSeek Harness (`DEEPSEEK_API_KEY`)                                                                                |
+| [`opencode.ts`](basic/opencode.ts)   | The same agent on OpenCode, embedded in the handler                                                                                        |
 | [`models.ts`](basic/models.ts)       | Models you set up yourself: LangGraph on `ChatOpenAI`s of your own (a gateway, no retries of its own; a high temperature)                  |
 | [`memory.ts`](basic/memory.ts)       | An assistant that remembers facts about you in its own SQL table, through its tools (`ctx.db`), with a view of your own beside the agent's |
 | [`notes.ts`](basic/notes.ts)         | SQL in a virtual object, with `ctx.db`, and no agent                                                                                       |
@@ -36,12 +37,12 @@ that put them together. New to it all? Begin with
 
 ### Advanced
 
-| Folder                                   | What                                                                                                                                                                                                                                                                   |
-| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`gateway/`](advanced/gateway/README.md) | A tool gateway for agents: one per tenant, holding dangerous calls for approval, with limits per tenant and user, and an agent per case                                                                                                                                |
-| [`factory/`](advanced/factory/README.md) | A software factory on Linear: a webhook starts it; a triage agent (pi) asks a planner (pi) for a structured plan, then hands each part to a coder (pi), at once, and a reviewer (pi) reads each pull request; each moves its issue along, through Linear's MCP server  |
-| [`pairing/`](advanced/pairing/README.md) | A pair programmer you talk with from a terminal, about a project: its loop in Restate, pi's coding tools in the project's directory; you talk with it as it works; a reviewer on another model reads its diff; it ships through a workflow once you approve            |
-| [`foreman/`](advanced/foreman/README.md) | A big model that delegates to small ones: a boss (Astra) briefs a worker (Luna), checks its work itself, sends a failed result back once, and moves it to a senior (Sol) only after you approve; one tool per move, each gated by a policy, and a ledger of every move |
+| Folder                                   | What                                                                                                                                                                                                                                                                       |
+| ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`gateway/`](advanced/gateway/README.md) | A tool gateway for agents: one per tenant, holding dangerous calls for approval, with limits per tenant and user, and an agent per case                                                                                                                                    |
+| [`factory/`](advanced/factory/README.md) | A software factory on Linear: a webhook starts it; a triage agent (pi) asks a planner (pi) for a structured plan, then hands each part to a coder (pi), at once, and a reviewer (pi) reads each pull request; each moves its issue along, through Linear's MCP server      |
+| [`pairing/`](advanced/pairing/README.md) | A pair programmer you talk with from a terminal, about a project: its loop in Restate, pi's coding tools in the project's directory; you talk with it as it works; a reviewer on another model reads its diff; it ships through a workflow once you approve                |
+| [`foreman/`](advanced/foreman/README.md) | A big model that delegates to small ones: a boss (Fable 5.2) briefs a worker (Sonnet 5.5), checks its work itself, sends a failed result back once, and moves it to a senior only after you approve; one tool per move, each gated by a policy, and a ledger of every move |
 
 Each agent is a virtual object, one per key, whose conversation is in the
 object's SQL database: a message is answered once per invocation, and a
@@ -75,11 +76,11 @@ npx @restatedev/restate deployments register http://host.docker.internal:9080
 ```
 
 The examples take OpenAI's models, with `OPENAI_API_KEY` (all but
-`claude.ts` and `deepseek.ts`, on their providers' own, and `factory/`, on
-OpenAI's and Anthropic's). `MODEL` picks another model, such as
+`claude.ts` and `deepseek.ts`, on their providers' own, `foreman/`, on
+Anthropic's, and `factory/`, on OpenAI's and Anthropic's). `MODEL` picks another model, such as
 `MODEL=anthropic/claude-sonnet-5-5` with `ANTHROPIC_API_KEY`, for the agents
-on pi, LangGraph (OpenAI's and Anthropic's) and the DeepSeek
-Harness; Claude takes Anthropic's models alone, and refuses another
+on pi, LangGraph (OpenAI's and Anthropic's), the DeepSeek Harness and
+OpenCode; Claude takes Anthropic's models alone, and refuses another
 provider's `MODEL` when it starts (see
 [the models](../agents/README.md#models)). To call an agent from code,
 or to send a message again safely, see

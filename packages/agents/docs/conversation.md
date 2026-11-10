@@ -417,10 +417,11 @@ sequenceDiagram
 
 ## Framework-owned history
 
-Two frameworks here are durable engines of their own, which keep a
+Three frameworks here are durable engines of their own, which keep a
 conversation in their own store and read only that: pi (pi-durable's
-entries) and the DeepSeek Harness (its event log). (OpenCode, the third,
-left the package: [The frameworks](frameworks.md#opencode).) None of them can be handed a list of messages as its history. Their
+entries), the DeepSeek Harness (its event log) and OpenCode (its own
+database, beside the object's: [The frameworks](frameworks.md#opencode)).
+None of them can be handed a list of messages as its history. Their
 turns are stored as every framework's are, but the model's history is the
 framework's:
 
@@ -437,16 +438,19 @@ framework's:
   stores (its replies, tool calls and results) into the turn as items
   (`Turn.copyIn`), in the same transaction as the framework's own write of
   them (pi's commit, DeepSeek's flush), so that a crash copies nothing twice
-  and loses nothing copied.
+  and loses nothing copied. OpenCode's database is another SQL session,
+  which shares no transaction with `ctx.db`: its copy follows each of
+  OpenCode's commits in a transaction of its own, keyed by OpenCode's
+  message and part ids, and catches up before each publish, the answer and
+  any close (`Items.settleOwn`), so a crash only delays it.
 - **What the framework says to itself is not the conversation.** Messages
   the framework makes for its own loop (DeepSeek's `CONTINUE`, runtime
-  context) are not copied, or are items whose `read`
+  context, OpenCode's "Continue" after a restart) are not copied, or are items whose `read`
   says nothing; and the framework's own copy of the prompt is not copied
   (the turn's row is the prompt).
 - **The model's input is the framework's.** `history()`, `window`, `budget`
   and summaries do not apply: the framework compacts its history itself (pi
-  does on its own; DeepSeek once `dsh-compaction-basic` is mounted, not
-  yet).
+  and OpenCode on their own, DeepSeek with `dsh-compaction-basic`, mounted).
 - **Closing reaches the framework too.** A turn that closes (stopped,
   refused, failed, ended) gets its closing record in the store, as any turn
   does, and the framework's next model request must see how the turn ended:
@@ -454,7 +458,8 @@ framework's:
   prompt), while the views show the prompt as asked.
 - **A dead turn is not resumed by the framework.** The framework must not
   finish another invocation's run: before it resumes anything, a dead turn's
-  run is aborted, or closed in the framework's own store.
+  run is aborted, or closed in the framework's own store (OpenCode's by its
+  resume budget, then copied, then closed in the store).
 - **The window still loads**, as for any framework (it is bounded), so that
   `answerOnce` can close a turn left without an answer and knows the turn
   being answered.

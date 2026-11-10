@@ -5,10 +5,10 @@ import { reviewText } from '../prompts.ts';
 import { diffOf } from '../workspace.ts';
 import { briefOf, gate, record, taskName } from './ledger.ts';
 
-/** A second opinion on a task's diff, from a model of another family than the worker's. */
+/** A second opinion on a task's diff, from the reviewer (best on a model of another family than the worker's). */
 export const reviewTask = tool({
   name: 'review_task',
-  description: "A second opinion on a task's diff, from a model of another family. Answers with its findings.",
+  description: "A second opinion on a task's diff, from the reviewer. Answers with its findings.",
   input: z.object({ name: taskName }),
   run: async ({ name }, { ctx, callId, idempotencyKey }) => {
     const { state } = await gate(ctx, idempotencyKey, name, 'review');
