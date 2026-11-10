@@ -281,7 +281,7 @@ sequenceDiagram
 | `settle`, from the next turn's `start` | after the next turn, which closed it first | (the next turn did)                                   |
 | the next turn's `answerOnce`           | before its prompt                          | read, if still stored (the next turn stored none yet) |
 
-A framework with its own history (pi, DeepSeek) must also not
+A framework with its own history (pi, DeepSeek, OpenCode) must also not
 resume a dead turn's run in its own store, and must give its next model
 request the closing record
 ([Framework-owned history](conversation.md#framework-owned-history)).
@@ -528,8 +528,8 @@ sequenceDiagram
   `takeSteers`: the turn stores each waiting message by its id, once, as a
   message of the user that is a step of the turn (`Turn.steer`, the
   `restate_agent_steers` table: [Steered messages](conversation.md#steered-messages)),
-  and the integration puts it in the request about to go out. pi and
-  DeepSeek, which keep their own history, hand it to their own step inbox
+  and the integration puts it in the request about to go out. pi, DeepSeek
+  and OpenCode, which keep their own history, hand it to their own step inbox
   instead, and their copy into the turn stores it as steered. Either way,
   the transaction that stores the messages sends the companion `taken` from
   its outbox, once, with the commit; the companion marks them taken, and
@@ -555,11 +555,13 @@ sequenceDiagram
     the turn to change course sooner).
   - A turn takes at most 16 messages in all; past them, each is a turn of
     its own.
-  - pi and DeepSeek hear of a message only at a publish: pi submits it as a
+  - pi, DeepSeek and OpenCode hear of a message only at a publish: pi submits it as a
     round of tool calls ends, and places it after their results; DeepSeek
     hears of one sent while a tool runs once its result is stored, as its
     next model request goes out, and places it at the step after that
-    request's, in the same turn ([The frameworks](frameworks.md#steering)).
+    request's, in the same turn; OpenCode, as pi, submits it as a tool call
+    of a round returns, and places it after the round's results
+    ([The frameworks](frameworks.md#steering)).
   - A LangGraph graph of your own (`graph`), a background agent, and an
     agent whose `chat` is no framework's `chat()` take none: each message
     is a turn of its own (the latter refuses `steer`, having no `chat` to
@@ -663,7 +665,10 @@ The revision increases at:
   background): its end once its result is stored, so that a follower reads
   it there. pi and DeepSeek store a tool's result after the tool returns (pi
   in its next commit, DeepSeek in its next flush): they publish the end once
-  that commit has copied the result into the turn;
+  that commit has copied the result into the turn. OpenCode publishes it
+  once the copy that follows OpenCode's commit holds the result, or, in a
+  turn that takes steered messages, once the result is copied as the tool
+  returned it, before OpenCode stores it;
 - a turn's close: its own, its watch's, or the next turn's `start` closing
   it;
 - `settle`, once it closed a dead turn in the conversation;

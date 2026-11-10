@@ -11,10 +11,10 @@ and the plan to get there.
 **Status: implemented.** These pages describe the code, after
 [the plan](plan.md)'s steps (its Status lists them). Where these pages say "today", they mean v0.3.0, before the port: kept to
 explain why the model is as it is. Where the
-code differs from the design: OpenCode left the package (the plan's D6, see
-[The frameworks](frameworks.md#opencode)); snapshots are not ported (D3);
-DeepSeek's harness has no compaction mounted, and a pi provider's outage
-still ends its turn (both in [The frameworks](frameworks.md)).
+code differs from the design: OpenCode left the package after its first
+spike (the plan's D6), and came back on the store, its dead turns closed by
+OpenCode's resume budget ([OpenCode's return](opencode.md),
+[The frameworks](frameworks.md#opencode)); snapshots are not ported (D3).
 
 ## In brief
 

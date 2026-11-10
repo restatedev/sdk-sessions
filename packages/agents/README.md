@@ -1,8 +1,8 @@
 # @restatedev/agents
 
-Durable agents on Restate: an agent of one of four frameworks (pi,
-LangGraph, Claude, the DeepSeek Harness) in a Restate virtual object, its
-conversation in the object's own SQL database. A crash, a restart or a
+Durable agents on Restate: an agent of one of five frameworks (pi,
+LangGraph, Claude, the DeepSeek Harness, OpenCode) in a Restate virtual
+object, its conversation in the object's own SQL database. A crash, a restart or a
 person who takes a day to approve changes nothing: each message is answered
 once, and each tool call is made once.
 
@@ -81,6 +81,7 @@ the handler `chat` (a message in, the answer out), and the views
 | [`@restatedev/agents/langgraph`](src/langgraph/README.md) | LangGraph                       | You use LangChain: its tools, a chat model of your own, or a graph of your own                |
 | [`@restatedev/agents/claude`](src/claude/README.md)       | the Anthropic SDK's tool runner | You want Claude with nothing in between: the lightest, the API's own messages                 |
 | [`@restatedev/agents/deepseek`](src/deepseek/README.md)   | DeepSeek Harness                | You want DeepSeek's harness: DeepSeek's models, or any pi-ai knows                            |
+| [`@restatedev/agents/opencode`](src/opencode/README.md)   | OpenCode                        | You want OpenCode's agent: its own coding tools in a workspace, any provider it serves        |
 
 Each framework's packages are optional peer dependencies of
 @restatedev/agents: a project installs @restatedev/agents, whose required peers
@@ -98,25 +99,32 @@ npm install @restatedev/agents @earendil-works/pi-ai @deepseek-ai/cordis \
   @deepseek-ai/{dsh-session-checkpoint-policy,dsh-session-persistence,dsh-session-projection}@0.2.1-rc.2 \
   @deepseek-ai/{dsh-system-prompt,dsh-tools,dsh-user-approval}@0.2.1-rc.2 \
   @deepseek-ai/{dsh-commands,dsh-compaction,dsh-compaction-basic,dsh-compaction-tool-result-pruner,dsh-token-meter}@0.2.1-rc.2   # DeepSeek
+npm install @restatedev/agents @opencode/{core,sdk,server,plugin}@2.2.6 effect@4.1.0                     # OpenCode, on Node 24
 ```
 
-OpenCode (`@restatedev/agents/opencode`: `@opencode/{core,sdk,server,plugin}`
-2.2.6 and `effect` 4.1.0, on Node 24) is back on the conversation of turns,
-not yet documented here: a turn whose invocation is gone (killed) is closed,
-never finished, through OpenCode's resume budget (see
-[docs/opencode.md](docs/opencode.md), which also lists what is left: its
-`retry` hook, permissions, the crash test). A subpath whose packages are
-missing fails as it is imported, naming the first it lacks. The packages
-are not published yet:
+A subpath whose packages are missing fails as it is imported, naming the
+first it lacks. The packages are not published yet:
 [`pnpm --filter e2e packaging`](../e2e/packaging.ts) installs them from
 their tarballs, with pi alone. In this repository the frameworks' packages
 are @restatedev/agents' development dependencies, so every example runs as it is.
 
 Every framework takes `model`, `system`, `tools` and `output` (a
-[structured answer](#structured-answers)); pi takes a
-`workspace` too, a directory for its coding tools. `system` is the whole
+[structured answer](#structured-answers)); pi and OpenCode take a
+`workspace` too, a directory for their coding tools. `system` is the whole
 system prompt for Claude and LangGraph, and is added to the framework's own
-(which tells the model about its tools) for pi and DeepSeek.
+(which tells the model about its tools) for pi, DeepSeek and OpenCode.
+
+**OpenCode** runs embedded in the handler, on Node 24 (its sources do not
+load on Node 22), and keeps its own history in a database of the key's own,
+beside the object's: each turn holds copies of what OpenCode stored of it.
+A crashed attempt's turn is resumed by OpenCode; a killed invocation's turn
+is closed, never finished, without asking the model (OpenCode's resume
+budget), and the next prompt tells the model how it ended and which of its
+calls did happen. With a `workspace`, the agent has OpenCode's own coding
+tools, but for its subagent and question tools, and its shell runs no
+background jobs. Not there yet: OpenCode's `retry` hook (its own retries
+apply), permissions asked through Restate, and a change of `model` for a
+key that has a session already ([its README](src/opencode/README.md)).
 
 Every agent takes these too, beside its framework's options:
 
@@ -129,8 +137,8 @@ Every agent takes these too, beside its framework's options:
 | `budget`      | How many tokens of the turns before the window its model sees, as their messages and answers (default 32 000); `summarize` summarizes the rest   |
 
 `window` and `budget` bound what Claude's and LangGraph's model is sent
-([what the model gets](docs/conversation.md)); pi and the DeepSeek Harness
-keep their own history, and compact it themselves. An object holds one
+([what the model gets](docs/conversation.md)); pi, the DeepSeek Harness and
+OpenCode keep their own history, and compact it themselves. An object holds one
 framework's conversation: its turns are that framework's messages.
 
 ## Calling an agent
@@ -210,8 +218,8 @@ curl localhost:8080/assistant/alice/steer -H 'idempotency-key: 7f3c…' -d 'Skip
 step, or `turn: null` if it is answered as a turn of its own; `status`
 lists the messages the turn holds and has not taken yet (`steering`). A
 turn takes at most 16. Claude and LangGraph's built-in agent take them
-before each model request that follows a round of tool calls; pi and
-DeepSeek through their own inboxes; a LangGraph graph of your own, and a
+before each model request that follows a round of tool calls; pi, DeepSeek
+and OpenCode through their own inboxes; a LangGraph graph of your own, and a
 background agent, take none ([Steering a turn](docs/turns.md#steering-a-turn)).
 To change course outright, stop the turn (`stop`) and send the message that
 replaces it.
@@ -416,7 +424,7 @@ and Restate retries it: the tool call runs again.
 **Once.** A crash runs an unfinished tool call again with the same call id.
 A tool that must not run twice passes its `idempotencyKey` on (made of the
 invocation's id and the call id), as Restate's tools do with each call they
-make: run again, it is the same call. The DeepSeek Harness tells
+make: run again, it is the same call. The DeepSeek Harness and OpenCode tell
 the model that a cut-off tool call was interrupted instead, and the model
 makes it again as a new tool call: Restate's tools then make the same call,
 if the input is the same (so a wait for an approval outlasts a restart), and
@@ -574,9 +582,10 @@ environment variable, or else OpenAI's `openai/gpt-6-sol`, with
 pi.agent({ name: 'assistant', model: 'anthropic/claude-sonnet-5-5' }); // with ANTHROPIC_API_KEY
 ```
 
-pi and the DeepSeek Harness take any provider they know (the
-DeepSeek Harness, pi-ai's); LangGraph OpenAI's and Anthropic's models (and
-any LangChain chat model, as `model`); Claude Anthropic's.
+pi, the DeepSeek Harness and OpenCode take any provider they know (the
+DeepSeek Harness, pi-ai's; OpenCode, its own providers'); LangGraph OpenAI's
+and Anthropic's models (and any LangChain chat model, as `model`); Claude
+Anthropic's.
 
 A wrong model fails at once: a model that is not `provider/model-id`, or
 another provider's for an agent of one provider's models, when the agent is

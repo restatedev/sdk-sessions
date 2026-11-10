@@ -101,7 +101,7 @@ of all.
 | D3  | **Snapshots are not ported.** Their table is created (the schema's steps stay Python's), and nothing writes it.                                                                                                                                                                                     | No framework here takes a list of items and compacts it itself.                                                                             |
 | D4  | **Two ways to give the model its history**: the turn projection (Claude, LangGraph's built-in agent), and framework-owned history (DeepSeek, pi, OpenCode).                                                                                                                                         | DeepSeek, pi and OpenCode are durable engines with their own stores, which cannot be handed a list of messages ([why](frameworks.md)).      |
 | D5  | **pi keeps pi-durable**, on framework-owned history, rather than the turn projection on pi-ai alone.                                                                                                                                                                                                | The other way drops pi-durable's harness, coding tools, compaction and `withPi`, which the README's default and tutorial lesson 16 rely on. |
-| D6  | **OpenCode goes last, after a spike.** If a dead turn cannot be closed through OpenCode's public API (it resumes a claimed turn at every boot), OpenCode leaves the package for now.                                                                                                                | It is the riskiest port: a second database, messages changed in place, no shared transaction.                                               |
+| D6  | **OpenCode goes last, after a spike.** If a dead turn cannot be closed through OpenCode's public API (it resumes a claimed turn at every boot), OpenCode leaves the package for now. **Done**: it left, and is back ([OpenCode's return](opencode.md)).                                             | It is the riskiest port: a second database, messages changed in place, no shared transaction.                                               |
 | D7  | **One framework per object.** An object's conversation holds its framework's items (from its `messages` view); `answerOnce` refuses another framework's items in the same object.                                                                                                                   | The rows are the framework's own items; two formats in one conversation can't be read.                                                      |
 | D8  | **A dead turn is closed, never finished**, in every framework.                                                                                                                                                                                                                                      | Finishing it answers a prompt nobody waits for, under the wrong idempotency keys.                                                           |
 | D9  | **`output` asks again within the turn** (`check`), once; a second reply that does not fit fails the turn, terminal, as today.                                                                                                                                                                       | Asking again is a step of the turn, not a turn of its own.                                                                                  |
@@ -312,7 +312,8 @@ invocation failed; `status` shows `invocationId` and `since` only.
 - a `messages` view on the store is the framework's, made with its `Items`
   (a function of this step, `conversationView(items)` say), and carries them,
   so that `sessionObject` finds them (after the merge, nothing else uses
-  `alsoClearing`, OpenCode's `clear` of its own database, which is gone);
+  `alsoClearing`, OpenCode's `clear` of its own database, which is gone;
+  OpenCode's return clears it through `Items.erase`);
 - the private handlers `settle(invocationId)` (close the turn, then publish)
   and `compact()` (from the agent's settings), for an agent on the store;
   `settle` and `compact` become reserved names;
@@ -436,9 +437,8 @@ and a refusal's notes; the copy across crashes; the e2e crash test's
 
 First a spike (D6): can a dead turn be closed without OpenCode resuming it,
 through its public API? Report it in the PR. If it can, OpenCode moves onto
-framework-owned history as
-[The frameworks](frameworks.md#target-framework-owned-history-after-a-spike)
-designs it (the copy keyed by OpenCode's message ids, at each publish), with
+framework-owned history as [The frameworks](frameworks.md#opencode)
+designed it (the copy keyed by OpenCode's message ids, at each publish), with
 the same tests as step 6 and the e2e crash test's `OpenCodeAgent`. If it
 cannot, OpenCode leaves the package, with everything that uses it (listed
 there), and the README says why.
@@ -446,6 +446,10 @@ there), and the README says why.
 **Done when** the spike's findings and the decision are in the PR, and
 either OpenCode's tests pass on the store, or nothing in the repository uses
 it; `pnpm --filter e2e crash` passes either way.
+
+**Outcome**: the spike found no public call that closes a claimed turn, and
+OpenCode left the package. It came back since, on the store, its dead turns
+closed by OpenCode's resume budget ([OpenCode's return](opencode.md)).
 
 ### Step 9: the old way goes
 
@@ -640,7 +644,8 @@ own).
 - [x] Step 5: LangGraph's built-in agent
 - [x] Step 6: DeepSeek
 - [x] Step 7: pi (spike, then port)
-- [x] Step 8: OpenCode (spike, then port or remove)
+- [x] Step 8: OpenCode (spike, then port or remove): removed; since back on
+      the store ([OpenCode's return](opencode.md))
 - [x] Step 9: the old way goes
 - [x] Step 10: the docs, the examples, the template
 - [x] Fixes after the review of the steps, each with a test that fails

@@ -18,6 +18,7 @@ that put them together. New to it all? Begin with
 | [`langgraph.ts`](basic/langgraph.ts) | The same agent on LangGraph                                                                                                                |
 | [`claude.ts`](basic/claude.ts)       | The same agent on Claude (the Anthropic SDK's tool runner; `ANTHROPIC_API_KEY`)                                                            |
 | [`deepseek.ts`](basic/deepseek.ts)   | The same agent on the DeepSeek Harness (`DEEPSEEK_API_KEY`)                                                                                |
+| [`opencode.ts`](basic/opencode.ts)   | The same agent on OpenCode, embedded in the handler                                                                                        |
 | [`models.ts`](basic/models.ts)       | Models you set up yourself: LangGraph on `ChatOpenAI`s of your own (a gateway, no retries of its own; a high temperature)                  |
 | [`memory.ts`](basic/memory.ts)       | An assistant that remembers facts about you in its own SQL table, through its tools (`ctx.db`), with a view of your own beside the agent's |
 | [`notes.ts`](basic/notes.ts)         | SQL in a virtual object, with `ctx.db`, and no agent                                                                                       |
@@ -78,8 +79,8 @@ The examples take OpenAI's models, with `OPENAI_API_KEY` (all but
 `claude.ts` and `deepseek.ts`, on their providers' own, `foreman/`, on
 Anthropic's, and `factory/`, on OpenAI's and Anthropic's). `MODEL` picks another model, such as
 `MODEL=anthropic/claude-sonnet-5-5` with `ANTHROPIC_API_KEY`, for the agents
-on pi, LangGraph (OpenAI's and Anthropic's) and the DeepSeek
-Harness; Claude takes Anthropic's models alone, and refuses another
+on pi, LangGraph (OpenAI's and Anthropic's), the DeepSeek Harness and
+OpenCode; Claude takes Anthropic's models alone, and refuses another
 provider's `MODEL` when it starts (see
 [the models](../agents/README.md#models)). To call an agent from code,
 or to send a message again safely, see

@@ -56,13 +56,14 @@ joins it at a step: after a reply's tool results, before the next model
 request. Each integration puts the messages in that request, in place, and
 stores them once in the turn:
 
-|                                | Where it takes them                                                                             | How                                                                                                                                                                                                                                                                                                                                                                                        |
-| ------------------------------ | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Claude                         | before the turn's first request, and after each round's results (`takeSteers`)                  | the runner leaves the history to its caller once the messages are taken: its next request is `history()`, which has them after the results. Not after a paused reply, which goes back as the last message                                                                                                                                                                                  |
-| LangGraph, built-in agent      | in the model node, before each request (`takeSteers`)                                           | they go in the request and stay in the run's state, with the id `steer:<id>` (`items.steered`)                                                                                                                                                                                                                                                                                             |
-| LangGraph, a graph of your own | none: each is a turn of its own                                                                 | the graph keeps its own state, which the turn cannot add to in place                                                                                                                                                                                                                                                                                                                       |
-| pi                             | as a round of tool calls is done (pi-durable's `afterTools` hook)                               | each waiting message is submitted to pi's inbox (`whenBusy: 'steer'`, keyed `steer:<id>`, an entry of kind `restate.steer`), which pi places after the round's results (`steeringMode: 'all'`); the copy of pi's commit into the turn stores it, with `taken`                                                                                                                              |
-| DeepSeek                       | at the step after it hears of it: a publish as a tool call starts, or once its result is stored | each waiting message goes to the harness's step inbox (`agent.steer`, a user message `steer:<id>`), which the harness places at its next step; the copy of its flush into the turn stores it, with `taken`. A message sent while a tool runs is heard of as its result is stored, which is as the next model request goes out: it joins at the step after that request's, in the same turn |
+|                                | Where it takes them                                                                                                    | How                                                                                                                                                                                                                                                                                                                                                                                        |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Claude                         | before the turn's first request, and after each round's results (`takeSteers`)                                         | the runner leaves the history to its caller once the messages are taken: its next request is `history()`, which has them after the results. Not after a paused reply, which goes back as the last message                                                                                                                                                                                  |
+| LangGraph, built-in agent      | in the model node, before each request (`takeSteers`)                                                                  | they go in the request and stay in the run's state, with the id `steer:<id>` (`items.steered`)                                                                                                                                                                                                                                                                                             |
+| LangGraph, a graph of your own | none: each is a turn of its own                                                                                        | the graph keeps its own state, which the turn cannot add to in place                                                                                                                                                                                                                                                                                                                       |
+| pi                             | as a round of tool calls is done (pi-durable's `afterTools` hook)                                                      | each waiting message is submitted to pi's inbox (`whenBusy: 'steer'`, keyed `steer:<id>`, an entry of kind `restate.steer`), which pi places after the round's results (`steeringMode: 'all'`); the copy of pi's commit into the turn stores it, with `taken`                                                                                                                              |
+| DeepSeek                       | at the step after it hears of it: a publish as a tool call starts, or once its result is stored                        | each waiting message goes to the harness's step inbox (`agent.steer`, a user message `steer:<id>`), which the harness places at its next step; the copy of its flush into the turn stores it, with `taken`. A message sent while a tool runs is heard of as its result is stored, which is as the next model request goes out: it joins at the step after that request's, in the same turn |
+| OpenCode                       | as a tool call of a round returns (the tool's `execute.after` hook, which OpenCode awaits before it stores the result) | each waiting message is submitted to OpenCode (`delivery: 'steer'`, id `msg_steer_<id>`, with its steer id in `metadata.steer`), which places it at the round's next step, after the round's results; the call's result is copied as the tool returned it first, so that the end's publish lists the message in time; the copy of what OpenCode placed stores it, with `taken`             |
 
 `langgraph.chat` with options that a function gives decides per message,
 as its turn starts, from the options it gives (once per attempt): a graph of
@@ -78,14 +79,14 @@ background agent takes none.
 
 ### At a glance, the target
 
-|                     | Claude                         | LangGraph (built-in agent)    | DeepSeek Harness                          | pi                                   | OpenCode                                  |
-| ------------------- | ------------------------------ | ----------------------------- | ----------------------------------------- | ------------------------------------ | ----------------------------------------- |
-| The model's history | turn projection (`history()`)  | turn projection (`history()`) | its own (the harness's event log)         | its own (pi-durable's entries)       | its own (its database)                    |
-| An item             | a `BetaMessageParam`           | a LangChain `BaseMessage`     | a dsh-llm `Message`, with its harness seq | a pi-ai `Message`, with its entry id | an OpenCode message                       |
-| Steps stored from   | the run loop, before tools run | the graph's nodes             | each flush, in its transaction            | each pi commit, in its transaction   | each publish, after OpenCode's own commit |
-| Long conversations  | our summaries (`compact`)      | our summaries (`compact`)     | `dsh-compaction-basic`, mounted           | pi's own compaction                  | OpenCode's own compaction                 |
-| A turn carries      | nothing                        | nothing                       | nothing (in its log)                      | nothing (in pi's documents)          | nothing (in its database)                 |
-| Order in the plan   | step 4                         | step 5                        | step 6                                    | step 7, after a spike                | step 8, after a spike (or dropped)        |
+|                     | Claude                         | LangGraph (built-in agent)    | DeepSeek Harness                          | pi                                   | OpenCode                                                              |
+| ------------------- | ------------------------------ | ----------------------------- | ----------------------------------------- | ------------------------------------ | --------------------------------------------------------------------- |
+| The model's history | turn projection (`history()`)  | turn projection (`history()`) | its own (the harness's event log)         | its own (pi-durable's entries)       | its own (its database)                                                |
+| An item             | a `BetaMessageParam`           | a LangChain `BaseMessage`     | a dsh-llm `Message`, with its harness seq | a pi-ai `Message`, with its entry id | an OpenCode message                                                   |
+| Steps stored from   | the run loop, before tools run | the graph's nodes             | each flush, in its transaction            | each pi commit, in its transaction   | each OpenCode commit, copied after it, in a transaction of its own    |
+| Long conversations  | our summaries (`compact`)      | our summaries (`compact`)     | `dsh-compaction-basic`, mounted           | pi's own compaction                  | OpenCode's own compaction                                             |
+| A turn carries      | nothing                        | nothing                       | nothing (in its log)                      | nothing (in pi's documents)          | nothing (in its database)                                             |
+| Order in the plan   | step 4                         | step 5                        | step 6                                    | step 7, after a spike                | step 8, after a spike: dropped, then back ([its return](opencode.md)) |
 
 ### What all five do today
 
@@ -642,91 +643,115 @@ and its ask never settles, so the harness stores no decision.
 
 ## OpenCode
 
-It is back ([OpenCode's return](opencode.md)): a dead turn is closed by
-OpenCode's resume budget (`maxAttempts: 0`), which the findings below
-predate.
+`@opencode/core`, `sdk`, `server` and `plugin` 2.2.6, with `effect` 4.1.0,
+pinned exactly; OpenCode needs Node 24. [`src/opencode/`](../src/opencode).
+The research behind it (what OpenCode does, the alternatives weighed, the
+spike, the steps) is in [OpenCode's return](opencode.md).
 
-`@opencode/*` 2.0.32, with `effect` 4.0.1. `src/opencode/` (removed in step 8).
+### Before
 
-### Today
+- **0.3.0** (`@opencode/*` 2.0.32) ran OpenCode embedded, in a database of
+  the key's own, and finished a dead turn: every boot of OpenCode resumes
+  every claimed turn (a synthetic "The server restarted while you were
+  working. Continue …", each running tool part failed, a new step), under
+  the next invocation's idempotency keys.
+- **Step 8's spike** found no public call that ends a claimed turn
+  (`session.interrupt` releases nothing in a process that does not run the
+  turn): so OpenCode left the package (D6), with its tests, its e2e agent and
+  the examples that used it.
+- **It came back** once a dead turn could be closed in OpenCode's own store
+  without the model: OpenCode's resume budget
+  (`SessionRestart.layer({ maxAttempts: 0 })`, in `OpenCode.create`'s
+  overrides) writes a failed idle marker and releases the claim
+  ([The spike's findings](opencode.md#the-spikes-findings)).
 
-- **A database of its own**: `database(ctx.db, 'restate-agents.opencode')`
-  (`src/opencode/index.ts:111-112`, `:448`), a second SQL database of the
-  key, in Restate's state, opened per attempt, which OpenCode reaches through
-  an Effect `SqlClient` (`db.ts:81-147`); every statement is refused once the
-  attempt's fence closes (`db.ts:54-63`). OpenCode runs its own migrations,
-  and boots only on a database that is empty or its own.
-- **Tables** (OpenCode's): `session_v2` (agent, model, permission rules,
-  directory, title, usage, the execution claim `time_suspended`,
-  `resume_attempts`), `session_message` (one row per message, updated in
-  place: user, synthetic, system, assistant with its text, reasoning and tool
-  parts, compaction, idle markers), `session_inbox`, instruction tables,
-  `event` and `event_sequence`, project, workspace, permission and account
-  tables.
-- **Once**: the prompt's inbox and message id is `msg_<invocation>[_n]`
-  (`index.ts:209`, `:463-464`); `submit` (`:361-374`) queues it unless it is
-  there, after the latest prompt settled; `settled` (`:384-400`) reads the
-  turn's end: its `idle` marker, or a later user message.
-- **Resume**: each attempt boots OpenCode on the stored database
-  (`db.ts:188-223`, with `SessionRestart.maxAttempts: Infinity`); it resumes
-  each claimed session: a synthetic message ("The server restarted while you
-  were working. Continue …"), each running tool part failed ("Tool execution
-  interrupted"), and a new step, in which the model makes the call again
-  under a new id. A tool call is committed before its tool runs, and its
-  result as it returns; parallel calls run at once.
-- **The model's input**: the messages since OpenCode's latest compaction;
-  OpenCode compacts on its own (near the window, on an overflow, or asked).
-  `system` is added per request by a hook, never stored (`index.ts:147-155`).
-- **Endings**: stopped, `session.interrupt` (tools "interrupted", an `idle`
-  marker); CANCELLED is never used. Refused: OpenCode retries, then a failed
-  `idle` and a terminal error (424 if a refusal); any other failed turn is
-  terminal. Killed: the claim stays, the tool part stays `running`, no
-  `idle` marker; the next boot finishes the turn, and `submit` waits for it.
-- **With a workspace**, OpenCode's own tools stay (`index.ts:165`): subagents
-  (child sessions, background ones too), shell (background jobs), questions,
-  web fetch. Its permission asks and question forms wait on in-memory
-  promises that nothing answers.
-- **The transcript**: `transcribe(host)` (`index.ts:526-541`) reads every
-  message through OpenCode's own client, at each publish.
+### The library
 
-### Target: framework-owned history, after a spike
+- **Embedded**: `@opencode/sdk` hosts OpenCode's whole server in the
+  process, with no HTTP listener. `db.ts` boots its workerd profile (no
+  filesystem, shell or terminal; the local ones with a workspace) on the
+  object's database, through `Database.configuredClient`, OpenCode's seam
+  for an injected Effect `SqlClient`: each OpenCode transaction an SQL
+  transaction, every statement refused once the attempt's fence closes.
+- **Event-sourced**: durable events, whose projections are the session, its
+  messages (an assistant message updated in place as it streams, its tool
+  parts with it), the inbox and idle markers. OpenCode runs its own
+  migrations, and boots only on a database that is empty or its own.
+- **An execution claim** per running turn, which every boot sweeps
+  (`SessionRestart`): it resumes each claimed turn, or, past the session's
+  resume budget, closes it.
+- **Prompts** wait in the session's inbox: `delivery: 'queue'` starts after
+  the running turn, `'steer'` joins it at its next step.
+- **Its own compaction**: near the window, on an overflow, or asked.
 
-- **OpenCode keeps its database**, its model input and its compaction.
-- **Items**: an OpenCode message. `read`: a user message is said; a
-  synthetic one says nothing; an assistant message says its text, its tool
-  parts are calls, and those completed or failed are results too, from the
-  same item. `results(calls)` has no form of OpenCode's own (it has no tool
-  result message): an assistant-shaped item with failed tool parts.
-- **Copy**: at each publish, the messages since a cursor, an assistant
-  message once its step ended, keyed by OpenCode's id; the turn ends at the
-  `idle` marker. The two databases cannot share a transaction, so the copy
-  is idempotent, and may lag a crash.
-- **The spike decides** whether a dead turn can be closed without OpenCode
-  resuming it: booting with `resume: false` (`db.ts:161-165`, `:179-182`),
-  then failing its running tool parts and releasing its claim through a
-  public API (none found so far). `settle` would boot OpenCode (about 100 ms,
-  2 s for a process's first import).
-- **If it cannot**, OpenCode leaves the package for now (D6 in
-  [the plan](plan.md#decisions)): its subpaths (`./opencode`,
-  `./opencode/db`), `src/opencode/`, its tests and fakes
-  (`test/opencode*.ts`, `test/fakes/opencode*.ts`,
-  `test/storage/opencode.test.ts`, its cases in `test/models.test.ts` and
-  `test/fakes/fakes.ts`), the e2e agent (`OpenCodeAgent` in
-  `packages/e2e/crash.ts`), the examples that use it
-  (`examples/basic/opencode.ts`, `examples/intermediate/coding.ts`,
-  `review.ts`, `team.ts`, `examples/advanced/factory/factory.ts`), its
-  devDependencies, and its rows in the READMEs.
-- **The spike's finding (step 8): it cannot.** A turn crashed in its
-  transfer, then OpenCode booted with `resume: false`, and its public
-  `session.interrupt` called: the call succeeds, but releases nothing (no
-  turn of the session is active in that process). The next prompt's boot
-  resumes the dead turn, and its transfer is made again under the new
-  invocation's idempotency key (`inv2:call_…`). No other public call ends a
-  claimed turn. So OpenCode left the package (D6): its subpaths, sources,
-  tests, fakes, the e2e agent, the OpenCode-only examples (`basic/opencode.ts`,
-  `intermediate/coding.ts`, `review.ts`); `team.ts`'s writer is a Claude
-  agent now, and the factory's coder a pi one.
-- **Risks**: three copies of each conversation (OpenCode's events, its
-  messages, our items); drift when `withOpenCode` reverts, forks, compacts
-  or switches models; messages updated in place against items appended once;
-  `clear` across two databases is not atomic (`src/object.ts:156-166`).
+### As built: framework-owned history
+
+- **OpenCode keeps its database** (`database(ctx.db, 'restate-agents.opencode')`),
+  its model input and its compaction: `answerOnce` with `ownHistory`, so
+  `window`, `budget` and summaries do not apply.
+- **Items** are the integration's own: `user`, `assistant` (its text and
+  tool calls) and `results`. Each copied from OpenCode has `from`, its
+  OpenCode message id (and part id, for a result). OpenCode's synthetic
+  messages, idle markers and compactions are not copied.
+- **Copy**: after each of OpenCode's commits, in a `ctx.db` transaction of
+  its own, idempotent by `from`, and caught up before each publish, the
+  answer and any close. An assistant message is copied once its stream
+  ended and none of its calls still streams its input (a reply is stored
+  before its tools run); a result once its call completed or failed.
+- **Once**: a prompt's OpenCode message id is `msg_<prompt id>`; OpenCode
+  boots lazily, as a turn runs, so an answered prompt's retry boots nothing.
+- **Whose claim it is** comes from `ctx.db`: the last prompt submitted to
+  OpenCode, recorded before its submit (`restate_agents_opencode`, one row).
+  A boot for that prompt resumes its turn, with no limit
+  (`maxAttempts: Infinity`: Restate's retry policy decides); a boot for any
+  other closes it (`maxAttempts: 0`), and the sweep is awaited
+  (`Host.swept`) before anything is submitted. Another prompt's input still
+  in OpenCode's inbox (a prompt killed after OpenCode queued it, before its
+  turn's claim) is cancelled.
+- **Dead turns**: `Items.settleOwn`, which `answerOnce` calls before every
+  close and `settle` before its own: OpenCode's close first, then the copy,
+  then the store's (`ended`), the only order that stays consistent across a
+  crash between the two stores. The budget leaves OpenCode's history saying
+  only that the running calls were interrupted, so the next prompt's text
+  starts with the closing note and the calls that did happen
+  (`(Ended: … These calls did happen: …)`).
+- **Stopped**: the copy, then `session.interrupt`, and nothing copied after
+  (the store's result of a cut-off call is the cancel note); a steered
+  message OpenCode placed as the turn stopped is the turn's. The next prompt
+  starts with the note.
+- **Refused, failed**: a turn OpenCode ends unanswered is a terminal error;
+  a refusal (by its message, OpenCode's error type, or a 401 or 403) a 424.
+- **Asking again** (`output`'s check): a second message,
+  `msg_<prompt id>_again`, in the same turn.
+- **Tools**: a tool's error fails the attempt and closes its fence; the
+  resumed turn gives the cut-off call an "interrupted" result, and the model
+  makes it again under a new id, which Restate's tools rejoin by tool and
+  input. With a workspace, OpenCode's own tools stay, but its subagent and
+  question tools (removed) and its shell's background jobs (refused).
+- **`clear`**: `Items.erase`, OpenCode's database, then the store; not atomic.
+- **A stalled turn** (neither running nor ended for 5 s) fails the attempt:
+  the retry's boot resumes it.
+
+### Left
+
+- **OpenCode's `retry` hook**: its own retries apply, so a provider's
+  outage longer than they last ends the turn, rather than failing the
+  attempt for Restate to retry.
+- **Permissions through Restate**: `permission.evaluate` waiting for an
+  approval, as a signal.
+- **A change of `model`** for a key whose session exists: the session is
+  created with the model, and keeps it.
+- **Background work**: OpenCode's child sessions and background shell jobs,
+  once their recovery is mapped onto turns.
+- **Risks**: two stores with no shared transaction (the copy lags a crash,
+  for followers, never for the model); three copies of each conversation
+  (OpenCode's events, its messages, the turn's items); an event log that
+  grows without bound; a boot per attempt (about 100 ms; 2 s for a process's
+  first import).
+- **Tests** (`test/opencode.test.ts`): answered once, crashes in a tool call
+  and at any state request, more resumes than OpenCode's own limit, a
+  killed turn closed by the next message and by `settle` (with the calls
+  that did happen), a prompt killed in OpenCode's inbox, a stop, a refusal,
+  publishes, the views, `clear`, asking again, the system prompt, and
+  steering; `test/opencode-spike.test.ts`, `db.ts` alone; the e2e crash
+  test's `OpenCodeAgent`, kills included.
