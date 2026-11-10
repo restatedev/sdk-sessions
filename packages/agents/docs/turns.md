@@ -109,8 +109,9 @@ sequenceDiagram
   A->>DB: load the transcript and the window
   A->>DB: ask: the turn's row
   loop each step of the framework
-    A->>DB: append the model's reply with tool calls, the tool calls' results
-    A->>S: publish (a tool call starts, ends)
+    A->>DB: append the model's reply with tool calls, or the tool calls' results
+    A->>S: publish (after the commit)
+    S-->>A: the revision, and the messages steered to the turn, if any
   end
   A->>DB: answered: the final reply, the answer, and what the turn carries
   opt the earlier turns outgrow the budget
@@ -143,10 +144,14 @@ sequenceDiagram
    row.
 3. **Steps.** The framework answers: model calls and tool calls. Each step
    is stored as it comes (a reply with tool calls in one transaction, before
-   its tools run; each result as it comes back), and each tool call
-   publishes as it starts and as it ends, so a follower sees the call start
-   and its result. A final reply, which no tool waits for, is held, and
-   commits with the answer.
+   its tools run; the tools' results before the model is asked again). A
+   final reply, which no tool waits for, is held, and commits with the
+   answer. After each write of steps that commits, the turn publishes once,
+   and waits for it (`Conversation.hold`, which `answerOnce` sets: `append`
+   and `appendReply` publish themselves; a framework that copies its steps
+   in a transaction of its own, `copyIn`, publishes once that commits). So
+   a follower sees the calls as their tools start, and their results before
+   the model's next request.
 4. **Answer.** The answer is stored on the turn's row, with what the turn
    carries, and the final reply, in one commit. If the turns before the next turn's window outgrow the agent's
    budget, the agent sends itself `compact`
@@ -453,13 +458,14 @@ sequenceDiagram
   C->>A: chat/send("Plan my week")
   A->>S: start(turn, steers)
   A->>DB: the model's reply, a tool call
+  A->>S: publish (after the commit)
   C->>V: steer("Skip Friday")
   V->>S: steer(id, text)
   S-)P: steered(id, text): queued now, behind the turn
   Note over S: inbox: the message, for this turn
-  A->>S: publish (the tool call ends)
-  S-->>A: revision, steering: [the message]
   A->>DB: the tool's result
+  A->>S: publish (after the result's commit)
+  S-->>A: revision, steering: [the message]
   A->>DB: the message, a step of the turn, and taken(id) in the transaction's outbox
   DB--)S: taken(id), once the transaction commits
   A->>A: the model's next request has it
@@ -528,10 +534,12 @@ sequenceDiagram
   being answered takes steered messages (its `start` says so,
   `Started.steers`), it holds the message for that turn (`inbox`), 16 at
   most (`STEERS`).
-- **How the turn learns of it.** From `publish`, which the turn makes at
-  each tool call's start and end anyway: the companion answers it with the
-  messages waiting for the turn (`Inbox` of common.ts). A turn that nobody
-  steers makes no call more.
+- **How the turn learns of it.** From `publish`, which the turn makes
+  anyway as it starts (its `start`) and after each write of steps that
+  commits (a reply with tool calls, the tools' results): the companion
+  answers it with the messages waiting for the turn (`Inbox` of common.ts).
+  The turn waits for the publish after the results, and its next step then
+  takes what it returned. A turn that nobody steers makes no call more.
 - **Taken once.** At a step, the framework's integration calls
   `takeSteers`: the turn stores each waiting message by its id, once, as a
   message of the user that is a step of the turn (`Turn.steer`, the
@@ -670,9 +678,11 @@ messages by id does not notice.
 The revision increases at:
 
 - a turn's start (its companion's `start`, or the turn's own publish if
-  `start` returns nothing), and each of its tool calls' start and end (not
-  in the background): its end once its result is stored, so that a follower reads
-  it there. pi and DeepSeek store a tool's result after the tool returns (pi
+  `start` returns nothing), and each write of its steps that commits: a
+  reply with tool calls, the tools' results (not in the background), so
+  that a follower reads them there. Claude and LangGraph publish through
+  the conversation (`append`, `appendReply`); a framework that copies its
+  steps into the turn publishes once the copy commits. pi and DeepSeek store a tool's result after the tool returns (pi
   in its next commit, DeepSeek in its next flush): they publish the end once
   that commit has copied the result into the turn. OpenCode publishes it
   once the copy that follows OpenCode's commit holds the result, or, in a
@@ -687,7 +697,9 @@ The revision increases at:
 - `clear`.
 
 So a follower that reads each new revision sees every turn begin, its tool
-calls, its end, and a killed turn end.
+calls as their tools start, their results before the model's next request,
+its end, and a killed turn end. A final reply, held until the answer, shows
+with the turn's end.
 
 ## Agents of the Python SDK
 

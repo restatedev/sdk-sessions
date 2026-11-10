@@ -53,10 +53,9 @@ import {
   modelOf,
   providerOf,
   RETURNED_UNRECORDED,
+  settledCalls,
   stopSignalOf,
   type Summarize,
-  toolCallEnded,
-  toolCallStarted,
   NO_ANSWER,
 } from '../common.ts';
 import { answerOnce, type Conversation, type Items, type Run, type Turn } from '../conversation.ts';
@@ -160,12 +159,13 @@ const failing = (
  * commit per round, however many tools ran (a crash before it runs the
  * round's calls again, as tools are idempotent by their call ids). Any other
  * error of a tool fails the attempt, at once (the ToolNode would hand it to
- * the model too). The round is published as it starts and ends, for the
- * clients that follow the conversation.
+ * the model too). The conversation publishes the round's reply as it
+ * commits, before the tools run, and their results as they commit, for the
+ * clients that follow it.
  */
 function toolsNode(ctx: restate.SessionContext, turn: Turn<BaseMessage>, tools: StructuredToolInterface[]) {
   return async (_state: typeof MessagesAnnotation.State, config: RunnableConfig) => {
-    await toolCallStarted(ctx);
+    await settledCalls(ctx);
     // The first error fails the attempt at once, not once the other calls end.
     const { promise: failure, reject } = Promise.withResolvers<never>();
     failure.catch(() => {});
@@ -187,9 +187,8 @@ function toolsNode(ctx: restate.SessionContext, turn: Turn<BaseMessage>, tools: 
     };
     const calls = turn.openCalls().map((c) => ({ id: c.id, name: c.name, args: c.input as Record<string, unknown> }));
     const ran = await Promise.race([Promise.all(calls.map(one)), failure]);
-    // The round's results in one write, in the order of their calls.
+    // The round's results in one write, in the order of their calls: published as it commits.
     await turn.append(...ran.flat());
-    await toolCallEnded(ctx);
     return { messages: ran.flat() };
   };
 }

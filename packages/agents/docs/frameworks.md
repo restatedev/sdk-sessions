@@ -42,7 +42,11 @@ What the core gives an integration, once ported:
   `waitFor(ctx, callId, signal, input, { approval, rejoin })` for a
   framework's own durable wait.
 - **The turn's signal** (`stopSignalOf`), refusals (`refusalOf`, `fromTool`),
-  and publishing (`toolCallStarted`, `toolCallEnded`), as today.
+  and publishing: `append` and `appendReply` publish after each write that
+  commits, in `answerOnce`'s run (`Conversation.hold`); a framework that
+  copies its steps (`copyIn`) publishes once its transaction commits
+  (`Turn.stepsCommitted`); `toolCallStarted` settles the call records
+  before a tool makes its own.
 - **Steering**: `takeSteers(ctx, conversation)` at each step, or, for a
   framework that keeps its own history, `inboxOf(ctx).listen` and
   `tookSteers` as it copies the messages its own inbox placed

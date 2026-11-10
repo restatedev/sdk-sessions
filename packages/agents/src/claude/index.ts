@@ -46,10 +46,9 @@ import {
   modelIdOf,
   modelOf,
   RETURNED_UNRECORDED,
+  settledCalls,
   stopSignalOf,
   type Summarize,
-  toolCallEnded,
-  toolCallStarted,
   NO_ANSWER,
 } from '../common.ts';
 import { answerOnce, type Items, type Parsed, type Run } from '../conversation.ts';
@@ -192,9 +191,9 @@ interface Agent {
 
 /**
  * The run of `agent` on the conversation: from the stored turn on, each
- * reply stored before its tools run, and their results after; each round of
- * tool calls published as it starts and ends (for the clients that follow
- * the conversation). At each step (before a request that follows the
+ * reply with tool calls stored before its tools run, and their results
+ * after; each such write published as it commits, by the conversation (for
+ * the clients that follow it), and the final reply stored with the answer. At each step (before a request that follows the
  * prompt or the tools' results), it takes the messages steered to the turn
  * (`takeSteers`): the request then goes out from the conversation's
  * history, which has them after the tools' results.
@@ -233,14 +232,13 @@ const runOf =
       // reply: else one of its calls could take the id of an identical call
       // answered before.
       if (turn.openCalls().length > 0) {
-        await toolCallStarted(ctx);
+        await settledCalls(ctx);
         const results = await runner.generateToolResponse();
         check();
         if (results) {
           await turn.append(results);
           runner.pushMessages(results);
         }
-        await toolCallEnded(ctx);
         await step();
       }
       let paused = false;
@@ -256,13 +254,14 @@ const runOf =
           paused = true;
           break;
         }
+        // A reply with tool calls commits, and is published, before its tools run; the final reply commits with
+        // the turn's answer.
         await turn.appendReply([said]);
         if (!message.content.some((c) => c.type === 'tool_use')) return textOf(message.content);
-        await toolCallStarted(ctx);
+        await settledCalls(ctx);
         const results = await runner.generateToolResponse();
         check();
         if (results) await turn.append(results);
-        await toolCallEnded(ctx);
         await step();
       }
       if (!paused) throw new Error('the tool runner ended without a reply');

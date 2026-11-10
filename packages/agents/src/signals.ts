@@ -521,8 +521,8 @@ export const signals = restate.object({
      * @internal The conversation changed: increase its revision, and answer
      * the `watch`es. It answers the new revision, and the messages steered
      * to the turn being answered that it has not taken yet, if any: a turn
-     * publishes as it starts (its `start` does) and at each tool call's
-     * start and end, so it learns of them at no cost of its own.
+     * publishes as it starts (its `start` does) and after each write of its
+     * steps that commits, so it learns of them at no cost of its own.
      */
     publish: restate.handlers.object.exclusive(
       { ingressPrivate: true },

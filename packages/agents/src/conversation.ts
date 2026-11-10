@@ -60,6 +60,7 @@ import {
   refusalOf,
   REFUSED,
   settingsOf,
+  stepped,
   stopSignalOf,
   storedAnswer,
   SUMMARIZE,
@@ -381,6 +382,9 @@ class Lock {
  * run writes them ({@link Conversation.flush}) before anything another party
  * sees or that outlives the attempt: a publish, a Restate call of the
  * library, the attempt failing.
+ *
+ * The run publishes after each write of steps that commits (`published`),
+ * not after held rows: they are no step that anyone waits for.
  */
 class Ledger<I> {
   /** The latest turn, if loaded whole: the only one that may be written. */
@@ -410,6 +414,8 @@ class Ledger<I> {
    * writes them first.
    */
   held: SqlParam[][] = [];
+  /** What the run makes after each write of steps that commits (a publish: {@link Conversation.hold}), if anything. */
+  published: (() => Promise<void>) | undefined;
 
   constructor(db: Database, items: Items<I>, start: Start, transcript: Entry<I>[], next: number, seq: number) {
     this.db = db;
@@ -684,14 +690,40 @@ export class Turn<I> {
 
   // Writing: only the latest turn, while it has no answer.
 
-  /** Append `items` (a tool's results, say) to the turn, in one transaction; appends at once are each stored after the ones before. */
+  /**
+   * Append `items` (a tool's results, say) to the turn, in one transaction;
+   * appends at once are each stored after the ones before. In
+   * `answerOnce`'s run, a write that commits is published
+   * ({@link Conversation.hold}).
+   */
   async append(...items: I[]): Promise<void> {
-    await this.#insert((n) => items.map((item, i) => ({ n: n + i, item })));
+    await this.#stored((n) => items.map((item, i) => ({ n: n + i, item })));
   }
 
-  /** Append the model's reply, of `items` (given by `agent`), to the turn, and return its id. */
+  /**
+   * Append the model's reply, of `items` (given by `agent`), to the turn,
+   * and return its id. In `answerOnce`'s run, a reply with tool calls
+   * commits, and is published; one without is held, and commits with the
+   * next write (the answer, for the final reply).
+   */
   appendReply(items: I[], agent?: string): Promise<number> {
-    return this.#insert((n) => items.map((item, i) => ({ n: n + i, item, reply: n, agent })));
+    return this.#stored((n) => items.map((item, i) => ({ n: n + i, item, reply: n, agent })));
+  }
+
+  /**
+   * Make what the turn's run makes after each write of its steps that
+   * commits ({@link Conversation.hold}: in `answerOnce`'s run, a publish,
+   * unless the agent runs in the background; nothing otherwise), for a
+   * framework that copies steps into the turn in a transaction of its own
+   * ({@link copyIn}): call it once that transaction has committed with
+   * steps that a tool waits for (a reply with tool calls, the tools'
+   * results), and await it before the framework's next step. `append` and
+   * `appendReply` make it themselves. The publish writes what the run holds
+   * first, and its answer (the messages steered to the turn) reaches the
+   * turn's inbox.
+   */
+  async stepsCommitted(): Promise<void> {
+    await this.#ledger.published?.();
   }
 
   /**
@@ -999,8 +1031,22 @@ export class Turn<I> {
   }
 
   /**
+   * Store the entries `made` makes ({@link #insert}), and return their
+   * position; then, if they committed (they are not held), make what the run
+   * makes after a commit ({@link stepsCommitted}). That is a publish, outside
+   * the lock, awaited before the caller goes on: the companion returns the
+   * messages steered to the turn from it, which the caller's next step
+   * takes. Writes that run at once each make their own.
+   */
+  async #stored(made: (n: number) => Entry<I>[]): Promise<number> {
+    const [n, held] = await this.#insert(made);
+    if (!held) await this.stepsCommitted();
+    return n;
+  }
+
+  /**
    * Store the entries `made` makes from the next position, and return that
-   * position.
+   * position, and whether they are held.
    *
    * Entries that hold no tool call nor result (a reply that ends the run,
    * say) are held, not written, in a conversation that holds them (see
@@ -1008,7 +1054,7 @@ export class Turn<I> {
    * Tool calls are written before their tools run, and results before the
    * model is asked again, with the rows held before them.
    */
-  #insert(made: (n: number) => Entry<I>[]): Promise<number> {
+  #insert(made: (n: number) => Entry<I>[]): Promise<[n: number, held: boolean]> {
     const ledger = this.#ledger;
     return ledger.lock.run(async () => {
       this.#checkWritable();
@@ -1020,7 +1066,7 @@ export class Turn<I> {
         ledger.seq += making.length;
         ledger.next = first + making.length;
         this.#add(making);
-        return first;
+        return [first, true];
       }
       let n = first;
       let added: Entry<I>[] = [];
@@ -1039,7 +1085,7 @@ export class Turn<I> {
         },
         () => this.#add(added),
       );
-      return n;
+      return [n, false];
     });
   }
 }
@@ -1485,9 +1531,17 @@ export class Conversation<I> {
    * library, and before its attempt fails: `answerOnce`'s. A conversation
    * that is written otherwise (step by step, from handlers of its own)
    * writes each step as it comes.
+   *
+   * `published`, if given, is awaited after each write of steps that
+   * commits (a reply with tool calls, the tools' results, with the rows held
+   * before them), outside the lock: `answerOnce` publishes there, so that a
+   * framework's integration publishes nothing by hand. Held rows make none,
+   * nor does `flush`. A framework that copies its steps in a transaction of
+   * its own makes it with {@link Turn.stepsCommitted}.
    */
-  hold() {
+  hold(published?: () => Promise<void>) {
     this.#ledger.holds = true;
+    this.#ledger.published = published;
   }
 
   /**
@@ -1581,8 +1635,9 @@ export async function answerOnce<I>(
   if (stored !== undefined) return storedAnswer(stored.answer, stored.status);
   const conversation = await Conversation.load(ctx.db, items, window, budget);
   // The turn's final reply commits with its answer; the library's publishes and Restate calls write what the
-  // run holds back first (`flushHeld`).
-  conversation.hold();
+  // run holds back first (`flushHeld`). Each write of steps that commits publishes, unless the agent runs in the
+  // background.
+  conversation.hold(() => stepped(ctx));
   holding(ctx, () => conversation.flush());
   const answered = await forPrompt(ctx, promptId, () =>
     answering(

@@ -279,10 +279,10 @@ const signalsOfAgent = (ctx: restate.SessionContext) => ctx.rpc(signals, signals
 /**
  * The messages steered to a `chat` turn that it has not taken yet, as the
  * companion last published them. The companion answers them to every
- * `publish`, which a turn makes at each tool call's start and end: so the
- * turn knows of them without a call of its own, and finds them at its next
- * step (`takeSteers`). The newest revision wins, as tool calls that run at
- * once publish at once.
+ * `publish` (and `start`), which a turn makes as it starts and after each
+ * write of its steps that commits: so the turn knows of them without a call
+ * of its own, and finds them at its next step (`takeSteers`). The newest
+ * revision wins, as writes that run at once publish at once.
  */
 export class Inbox {
   revision = -1;
@@ -372,9 +372,22 @@ function settled(ctx: restate.SessionContext, stored: Stored): Promise<void> {
 }
 
 /**
+ * Forget the calls whose results the turn of `ctx` stored (calls.ts), before
+ * its tool calls make their own, without publishing: a tool call's publish
+ * is the conversation's, once the reply that makes it is stored
+ * (`Conversation.hold`). Outside a framework's turn ({@link answering}), it
+ * does nothing.
+ */
+export async function settledCalls(ctx: restate.SessionContext) {
+  const stored = ANSWERING.get(ctx);
+  if (stored) await settled(ctx, stored);
+}
+
+/**
  * Run `work`, a framework's turn on the conversation of turns, forgetting
  * the calls whose results it stores as it goes: each publish while it runs
- * (a tool call's start and end), and its end, forget the Restate calls of
+ * (after a write of its steps commits), each tool call's start, and its
+ * end, forget the Restate calls of
  * the tool calls whose results `stored` says are stored (calls.ts).
  */
 export async function answering<T>(ctx: restate.SessionContext, stored: Stored, work: () => Promise<T>): Promise<T> {

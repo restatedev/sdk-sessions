@@ -60,7 +60,7 @@ import { mapStoredMessagesToChatMessages } from '@langchain/core/messages';
 import type { RunnableConfig } from '@langchain/core/runnables';
 import { Command, InvalidUpdateError, type Pregel, type StateSnapshot, StateGraph } from '@langchain/langgraph';
 import { flushHeld } from '../calls.ts';
-import { fromTool, stepped, stopSignalOf } from '../common.ts';
+import { fromTool, stopSignalOf } from '../common.ts';
 import type { Conversation, Run, Turn } from '../conversation.ts';
 import { signals, signalsOf } from '../signals.ts';
 import { SqlCheckpointSaver } from './checkpointer.ts';
@@ -156,15 +156,11 @@ async function answerOf(app: App, turn: Turn<BaseMessage>, state: Record<string,
  * the prompt away, those whose ids are not `known`. `known` is the ids the
  * conversation has, which this adds to; the messages the conversation gave
  * the graph are not copied back. Tool messages that follow one another (a
- * step's results) are copied in one write. Then publish.
+ * step's results) are copied in one write. Each write that commits is
+ * published, by the conversation (`Conversation.hold`); an AI message without
+ * tool calls is held, and is published with the next.
  */
-async function copied(
-  ctx: restate.SessionContext,
-  turn: Turn<BaseMessage>,
-  known: Set<string>,
-  messages: readonly BaseMessage[],
-  prompt: string,
-) {
+async function copied(turn: Turn<BaseMessage>, known: Set<string>, messages: readonly BaseMessage[], prompt: string) {
   const at = messages.findIndex((m) => m.id === prompt);
   const fresh = messages
     .slice(at + 1)
@@ -193,7 +189,6 @@ async function copied(
     known.add(message.id!);
   }
   await stored();
-  if (fresh.length > 0) await stepped(ctx);
 }
 
 /** The id of a turn's prompt, as a `HumanMessage` in the graph: the conversation's id of the turn. */
@@ -369,7 +364,7 @@ async function runGraph(
   };
   if (asked && snapshot.next.length === 0) {
     // The run had finished, but its answer was not stored: that is the answer, rather than run again.
-    await copied(ctx, turn, known, messages, promptId);
+    await copied(turn, known, messages, promptId);
     await saver.prune([THREAD_ID]);
     return answerOf(run, turn, values, before);
   }
@@ -388,7 +383,7 @@ async function runGraph(
     try {
       for await (const state of await run.stream(start, options)) {
         values = state;
-        await copied(ctx, turn, known, (state.messages ?? []) as BaseMessage[], promptId);
+        await copied(turn, known, (state.messages ?? []) as BaseMessage[], promptId);
       }
     } catch (error) {
       // LangGraph's own error, which a retry would meet again: a run past its recursion limit, say.

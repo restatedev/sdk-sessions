@@ -756,3 +756,49 @@ describe("a turn's steps that no tool waits for", () => {
     expect(steps).toBe(1);
   });
 });
+
+/** What a run on the made-up framework made the companion do, past the turn's start, and what a follower saw at each publish. */
+async function publishes(run: Run<Item>, object?: { readonly name: string }) {
+  const map = new Map<string, Uint8Array>();
+  const seen: number[] = [];
+  const published = async () => {
+    const read = sqlAttempt({ map, key: 'k', id: `read-${seen.length}`, shared: true });
+    seen.push((await read.end(() => latestTurn(read.view))).steps);
+  };
+  const sql = sqlAttempt({ map, key: 'k', id: 'inv_pub', published, object });
+  await sql.end(() => answerOnce(sql.ctx, 'q', ITEMS, run));
+  return { made: followingOf(map).made, seen };
+}
+
+describe("a turn's writes in `answerOnce`'s run", () => {
+  it('publish after each write of steps that commits: a reply with tool calls, results; not held ones, nor a copy', async () => {
+    const { made, seen } = await publishes(async (conversation) => {
+      const turn = conversation.turn;
+      await turn.appendReply([calling('c1')]);
+      await turn.append({ result: 'c1', output: 'found' });
+      // A framework's copy, in its own transaction, publishes only when it says so.
+      await conversation.db.transaction(async (tx) => {
+        await turn.copyIn(tx, [{ item: calling('c2'), reply: true }]);
+      });
+      await conversation.db.transaction(async (tx) => {
+        await turn.copyIn(tx, [{ item: { result: 'c2', output: 'found' } }]);
+      });
+      await turn.stepsCommitted();
+      await turn.appendReply([{ role: 'assistant', text: 'done' }]);
+      return 'done';
+    });
+    expect(made).toEqual(['publish', 'publish', 'publish']);
+    // A follower reads each write as it is published: the final reply comes with the answer.
+    expect(seen).toEqual([1, 2, 4]);
+  });
+
+  it('publish nothing in the background: its turn publishes its end only', async () => {
+    const quiet = sessionObject({ name: 'quiet-turns', background: true, handlers: {}, views: {} });
+    const { made } = await publishes(async (conversation) => {
+      await conversation.turn.appendReply([calling('c1')]);
+      await conversation.turn.append({ result: 'c1', output: 'found' });
+      return 'done';
+    }, quiet);
+    expect(made).toEqual([]);
+  });
+});

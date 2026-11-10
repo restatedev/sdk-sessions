@@ -87,7 +87,11 @@ async function costs(
   chat: PromptHandler,
   r: number,
   k: number,
-  { olderCompanion = false, object }: { olderCompanion?: boolean; object?: { readonly name: string } } = {},
+  {
+    olderCompanion = false,
+    object,
+    published,
+  }: { olderCompanion?: boolean; object?: { readonly name: string }; published?: () => Promise<void> } = {},
 ): Promise<Cost[]> {
   const map = new Map<string, Uint8Array>();
   const following = followingOf(map);
@@ -98,17 +102,21 @@ async function costs(
     let commits = 0;
     const made = following.made.length;
     const onSync = async () => void commits++;
-    const sql = sqlAttempt({ map, key: 'k', id: `inv${i}`, onSync, olderCompanion, object });
+    const sql = sqlAttempt({ map, key: 'k', id: `inv${i}`, onSync, olderCompanion, object, published });
     expect(await sql.end(() => handler(sql.ctx, text))).toBe('Done');
     out.push({ commits, companion: following.made.slice(made) });
   }
   return out;
 }
 
-const AGENTS: [string, () => PromptHandler][] = [
-  ['Claude', () => (claudePlanned(), claude.chat({ tools: tools() }))],
-  ['the built-in LangGraph loop', () => langgraph.chat({ model: new Planned({}), tools: tools() })],
-  ['a LangGraph graph of your own', () => langgraph.chat({ graph: ownGraph() })],
+const AGENTS: [string, () => PromptHandler, ReturnType<typeof claude.messages>][] = [
+  ['Claude', () => (claudePlanned(), claude.chat({ tools: tools() })), claude.messages()],
+  [
+    'the built-in LangGraph loop',
+    () => langgraph.chat({ model: new Planned({}), tools: tools() }),
+    langgraph.messages(),
+  ],
+  ['a LangGraph graph of your own', () => langgraph.chat({ graph: ownGraph() }), langgraph.messages()],
 ];
 
 /**
@@ -154,6 +162,46 @@ describe("a LangGraph turn's tool results", () => {
       const [, one] = await costs(chat(), 2, 1);
       const [, three] = await costs(chat(), 2, 3);
       expect(three!.commits).toBe(one!.commits);
+    },
+  );
+});
+
+describe("a turn's publishes", () => {
+  afterAll(() => {
+    teller.reply = tellerReply;
+  });
+
+  it.each(AGENTS)(
+    'are one after each write of steps that commits, none for the final reply: %s',
+    async (_name, chat) => {
+      expect((await costs(chat(), 1, 0))[1]!.companion).toEqual(['start', 'close']);
+      expect((await costs(chat(), 2, 3))[1]!.companion).toEqual(['start', 'publish', 'publish', 'close']);
+      expect((await costs(chat(), 3, 2))[1]!.companion).toEqual(['start', ...Array(4).fill('publish'), 'close']);
+    },
+  );
+
+  it.each(AGENTS)(
+    "show a follower the tool calls as their tools start, and their results before the model's next request: %s",
+    async (_name, chat, messages) => {
+      const map = new Map<string, Uint8Array>();
+      // What a follower reads at each publish of the turn: its tool calls, and how many have their output.
+      const seen: [calls: number, outputs: number][] = [];
+      let requests = 0;
+      const published = async () => {
+        const read = sqlAttempt({ map, key: 'k', id: `read${++requests}`, shared: true });
+        const page = await read.end(() => messages(read.view, {}));
+        const parts = page.messages.flatMap((m) => m.parts).filter((p) => p.type === 'tool');
+        seen.push([parts.length, parts.filter((p) => p.output !== undefined).length]);
+      };
+      Object.assign(plan, { rounds: 1, calls: 3, asked: 0 });
+      const sql = sqlAttempt({ map, key: 'k', id: 'inv', published });
+      expect(await sql.end(() => handlerOf(chat())(sql.ctx, 'go'))).toBe('Done');
+      // The start's (the companion's), the reply's, the results'.
+      expect(seen).toEqual([
+        [0, 0],
+        [3, 0],
+        [3, 3],
+      ]);
     },
   );
 });

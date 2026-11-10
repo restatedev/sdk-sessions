@@ -7,8 +7,9 @@
 // takes steered messages, holds it for that turn too (`steer` of
 // signals.ts).
 //
-// The turn learns of it from its next `publish`, which it makes at each tool
-// call's start and end anyway (`Inbox` of common.ts). At its next step, once
+// The turn learns of it from its next `publish`, which it makes anyway as it
+// starts and after each write of steps that commits (a reply with tool
+// calls, the tools' results), and waits for (`Inbox` of common.ts). At its next step, once
 // the model's reply has a result for each of its tool calls and before the
 // next model request, the framework's integration calls `takeSteers`: the
 // turn stores each message once, as a message of the user that is a step of
