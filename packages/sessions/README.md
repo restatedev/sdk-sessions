@@ -355,6 +355,22 @@ which is part of the cache keys, so one process can serve several Restate
 clusters, or a cluster that was wiped and recreated, without mixing up their
 databases.
 
+**Large databases in an object store.** By default every checkpoint pack
+stays in the object's state. Set `RESTATE_SQL_OBJECT_STORE` to a URL
+(`s3://bucket/path`, `gs://bucket/path`, `az://container/path`, or
+`file:///a/directory`), and a database whose packs in Restate pass 4 MiB
+(compressed) moves them to the object store in one upload. Restate keeps the
+head, the tail, the manifests and the last few MiB, so a database under
+4 MiB never touches the bucket. Each key's database gets its own directory
+under the URL's path. Credentials and options come from the provider's own
+variables (`AWS_ACCESS_KEY_ID`, `AWS_REGION`, `AWS_ENDPOINT` for MinIO or
+R2, `GOOGLE_SERVICE_ACCOUNT`, `AZURE_STORAGE_ACCOUNT_NAME`, and so on). Two
+rules: once a database has promoted, every process that serves it needs the
+same `RESTATE_SQL_OBJECT_STORE`, or its opens fail; and give each Restate
+cluster its own path, because a database deletes the packs under its
+directory that its own head does not need. A URL that names no store fails
+every open with its message.
+
 **No journal replay.** On a retry or a resume, the SDK normally replays the
 journal: each operation returns its recorded result, and must match it.
 That can't work here, because a later attempt makes different reads,

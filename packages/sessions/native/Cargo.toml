@@ -14,8 +14,16 @@ crate-type = ["cdylib"]
 [dependencies]
 napi = { version = "3", default-features = false, features = ["napi8", "async", "tokio_rt"] }
 napi-derive = "3"
-# The storage (`state`) and SQL on it (`sql`), with its feature `sql`.
-restate-sdk-shared-core = { version = "8.4.0", features = ["sql"] }
+# The storage (`state`) and SQL on it (`sql`), with its feature `sql`, and
+# checkpoints' packs in the object store RESTATE_SQL_OBJECT_STORE names
+# (`state::ObjectStoreL1`): S3, GCS or Azure, with their features, or a
+# directory.
+restate-sdk-shared-core = { version = "8.5.0", features = [
+  "sql",
+  "object_store_aws",
+  "object_store_gcp",
+  "object_store_azure",
+] }
 futures = "0.3"
 bytes = "1.10"
 

@@ -14,7 +14,9 @@
 //! deletes the packs no checkpoint needs; a store without keeps its garbage.
 //!
 //! Every database of the process is kept warm in one page cache
-//! ([`page_cache`]); a session itself, and its commits, is a
+//! ([`page_cache`]), and keeps the checkpoints it outgrows Restate with in
+//! the object store `RESTATE_SQL_OBJECT_STORE` names, if any
+//! ([`object_store`]); a session itself, and its commits, is a
 //! [`sql::Database`].
 //!
 //! A call runs on the JavaScript thread as far as it can ([`answer`]): one
@@ -29,7 +31,7 @@ use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::{JsValue, sys};
 use napi_derive::napi;
 use restate_sdk_shared_core::sql::{self, Numeric, Value};
-use restate_sdk_shared_core::state::{self, KvStore, PageCache, PageCacheConfig};
+use restate_sdk_shared_core::state::{self, KvStore, ObjectStoreL1, PageCache, PageCacheConfig};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io;
@@ -238,6 +240,10 @@ pub struct Database(Arc<sql::Database>);
 /// thread; else a promise of it, as it goes on in the runtime. Ready, a call
 /// spares two thread hops and a thread-safe function: what a call to the
 /// addon costs otherwise, several times the SQL it runs.
+///
+/// It is polled in the runtime's context, as it is there: a call that reads
+/// a pack in the object store makes its request here, and the request
+/// (reqwest's) takes its connection and its timers from the current runtime.
 fn answer<'env, T>(
     env: &'env Env,
     call: impl Future<Output = Result<T>> + Send + 'static,
@@ -247,7 +253,9 @@ where
 {
     use std::task::{Context, Poll, Waker};
     let mut call = Box::pin(call);
-    match call.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+    let polled =
+        within_runtime_if_available(|| call.as_mut().poll(&mut Context::from_waker(Waker::noop())));
+    match polled {
         Poll::Ready(result) => result.map(Either::A),
         Poll::Pending => env.spawn_future(call).map(Either::B),
     }
@@ -299,9 +307,23 @@ fn cache_config() -> io::Result<Option<PageCacheConfig>> {
     }))
 }
 
+/// The process's object store, the one `RESTATE_SQL_OBJECT_STORE` names
+/// ([`ObjectStoreL1::from_env`]), made once: `None` without one. Its
+/// databases share it, and its HTTP client. A `RESTATE_SQL_OBJECT_STORE`
+/// that names none fails every open, with its message, as a page cache size
+/// that is not one does.
+fn object_store() -> io::Result<Option<ObjectStoreL1>> {
+    static L1: std::sync::Mutex<Option<Option<ObjectStoreL1>>> = std::sync::Mutex::new(None);
+    let mut l1 = L1.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(l1) = &*l1 {
+        return Ok(l1.clone());
+    }
+    Ok(l1.insert(ObjectStoreL1::from_env()?).clone())
+}
+
 /// Open the database of `namespace` over `store` (see the module's doc),
-/// kept warm in the process's page cache; see [`sql::Open::reader`] for a
-/// `reader`.
+/// kept warm in the process's page cache, with its packs past L0 in the
+/// process's object store; see [`sql::Open::reader`] for a `reader`.
 #[napi(
     ts_args_type = "namespace: string, store: Store, reader?: boolean",
     ts_return_type = "Promise<Database>"
@@ -323,6 +345,9 @@ pub(crate) fn open<'env>(
         let mut open = sql::Database::open(store);
         if let Some(cache) = page_cache().await? {
             open = open.cached(&cache, &namespace);
+        }
+        if let Some(l1) = object_store()? {
+            open = open.checkpoints(Arc::new(l1.blobs(&namespace)));
         }
         if reader == Some(true) {
             open = open.reader();
