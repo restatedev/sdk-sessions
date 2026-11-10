@@ -67,6 +67,21 @@ their random names as well as the namespace: two stores
 holding different databases under one namespace (two Restate clusters, say)
 may share a process.
 
+## The object store
+
+`RESTATE_SQL_OBJECT_STORE`, a URL (`s3://`, `gs://`, `az://` or
+`file:///`), gives every database an L1 there
+(shared-core's `state::ObjectStoreL1::from_env`, made once a process): once
+L0, its packs in the object's state, holds 4 MiB, a checkpoint uploads them
+as one pack, and L0 empties. Credentials come from each provider's variables
+(`AWS_*`, `GOOGLE_*`, `AZURE_*`), as `object_store`'s `from_env` reads them.
+Its HTTP requests are reqwest's, on napi's tokio runtime: a call's first poll,
+on the JavaScript thread, enters that runtime's context (`answer` in
+`node.rs`). A namespace's packs go under
+`<path>/<namespace escaped to one segment>` (`Ledger/a` is `Ledger.2Fa`), so
+one namespace's garbage collection never lists another's packs. Not set,
+every pack stays in the state.
+
 ## Values
 
 | SQL     | JavaScript                                                       |
