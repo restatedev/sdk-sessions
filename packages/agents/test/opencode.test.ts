@@ -43,12 +43,14 @@ const NODE_24 = Number(process.versions.node.split('.')[0]) >= 24;
 /**
  * How often OpenCode was booted; `prompted`, if a test sets it, is told of each prompt OpenCode took, as it
  * returns; `transaction`, if a test sets it, runs each of OpenCode's transactions (`run`), and is given the
- * parameters of each statement of it that writes, as it runs.
+ * parameters of each statement of it that writes, as it runs; `interrupting`, if a test sets it, is awaited
+ * before each interrupt of OpenCode's turn goes to OpenCode.
  */
 const boots = vi.hoisted(() => ({
   n: 0,
   prompted: undefined as ((input: { id?: unknown }) => void) | undefined,
   transaction: undefined as ((run: () => Promise<unknown>, writes: unknown[][]) => Promise<unknown>) | undefined,
+  interrupting: undefined as (() => Promise<void>) | undefined,
 }));
 
 // Every boot of OpenCode has the teller's provider.
@@ -94,8 +96,17 @@ vi.mock('@restatedev/agents/opencode/db', async (original) => {
     // `session.prompt`, which tells `boots.prompted` once OpenCode took the prompt.
     const prompt = (input: Parameters<typeof host.client.session.prompt>[0]) =>
       host.client.session.prompt(input).pipe(Effect.tap(() => Effect.sync(() => boots.prompted?.(input))));
+    // `session.interrupt`, once `boots.interrupting` lets it.
+    const interrupt = (input: Parameters<typeof host.client.session.interrupt>[0]) =>
+      Effect.promise(async () => boots.interrupting?.()).pipe(
+        Effect.flatMap(() => host.client.session.interrupt(input)),
+      );
     const session = new Proxy(host.client.session, {
-      get: (target, key, receiver) => (key === 'prompt' ? prompt : Reflect.get(target, key, receiver)),
+      get: (target, key, receiver) => {
+        if (key === 'prompt') return prompt;
+        if (key === 'interrupt') return interrupt;
+        return Reflect.get(target, key, receiver);
+      },
     });
     const client = new Proxy(host.client, {
       get: (target, key, receiver) => (key === 'session' ? session : Reflect.get(target, key, receiver)),
@@ -123,6 +134,7 @@ beforeEach(() => {
   fake.script.reply = fake.teller;
   boots.prompted = undefined;
   boots.transaction = undefined;
+  boots.interrupting = undefined;
 });
 
 /** The texts of the user's messages of the model's latest request, in order. */
@@ -668,6 +680,76 @@ describe.skipIf(!NODE_24)('the OpenCode agent, steered', () => {
     expect(await second.end(() => chat(second.ctx, 'Hello'))).toBe('Hi.');
     const said = fake.script.requests.at(-1)!.prompt.map((m) => fake.textOf(m));
     expect(said.filter((t) => t === STEERED)).toHaveLength(taken.length);
+  }, 60_000);
+
+  it('answers once a message OpenCode placed after the stopped turn was last copied, before its interrupt', async () => {
+    const map = new Map<string, Uint8Array>();
+    const following = followingOf(map);
+    const first = sqlAttempt({ map, key: 'placed-at-stop', id: 'inv1' });
+    const transfer = tool({
+      name: 'transfer',
+      description: 'Move money.',
+      input: z.object({ from: z.number(), to: z.number(), amount: z.number() }),
+      run: () => {
+        following.steering = [{ id: 'steer-1', text: STEERED }];
+        return 'moved 5 from account 1 to account 2';
+      },
+    });
+    // The audit runs once the model was asked with the message, which OpenCode placed: it never returns,
+    // so the turn ends only by its interrupt.
+    const { promise: placed, resolve: auditing } = Promise.withResolvers<void>();
+    const audit = tool({
+      name: 'audit',
+      description: 'Check the books.',
+      input: z.object({}),
+      run: () => {
+        auditing();
+        return new Promise<string>(() => {});
+      },
+    });
+    const chat = handlerOf(opencode.chat({ tools: [transfer, audit] }));
+    fake.script.reply = steeredModel;
+    // Stopped once OpenCode took the message; OpenCode stores nothing more (its transactions wait) until
+    // the stop's copy is done and its interrupt is under way: then OpenCode places the message, and the
+    // model is asked with it, before the interrupt reaches OpenCode.
+    const { promise: interrupting, resolve: interrupted } = Promise.withResolvers<void>();
+    let holding = false;
+    boots.prompted = (input) => {
+      if (!String(input.id).startsWith('msg_steer_')) return;
+      holding = true;
+      first.cancel();
+    };
+    boots.transaction = async (run) => {
+      if (holding) await interrupting;
+      return run();
+    };
+    boots.interrupting = async () => {
+      boots.interrupting = undefined;
+      holding = false;
+      interrupted();
+      await placed;
+    };
+    const failed = await first
+      .end(() => chat(first.ctx, 'Please move 5 from 1 to 2'))
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+    boots.prompted = undefined;
+    boots.transaction = undefined;
+    expect(failed).toBeInstanceOf(restate.CancelledError);
+    // OpenCode's history has the message: the stopped turn holds it, once, and the companion is told it
+    // is taken (it answers no turn of its own).
+    expect([...new Set(following.taken.flat())]).toEqual(['steer-1']);
+    const texts = await textsOf(map, 'placed-at-stop');
+    expect(texts.filter((t) => t === STEERED)).toHaveLength(1);
+    expect(texts.at(-1)).toBe(CANCELLED);
+    // The next prompt's model has it once.
+    fake.script.reply = () => ({ text: 'Hi.' });
+    const second = sqlAttempt({ map, key: 'placed-at-stop', id: 'inv2' });
+    expect(await second.end(() => chat(second.ctx, 'Hello'))).toBe('Hi.');
+    const said = fake.script.requests.at(-1)!.prompt.map((m) => fake.textOf(m));
+    expect(said.filter((t) => t === STEERED)).toHaveLength(1);
   }, 60_000);
 });
 
