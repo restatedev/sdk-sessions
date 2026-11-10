@@ -328,6 +328,37 @@ describe('the Claude agent', () => {
     expect(asked[1]!.at(-1)).toEqual({ role: 'assistant', content: [{ type: 'text', text: 'Searching...' }] });
   });
 
+  it('stores a paused reply before it asks the model to go on: a crash after asks only to go on', async () => {
+    const reply = teller.reply;
+    let asked: MessageParam[][] = [];
+    teller.reply = (messages) => {
+      asked.push(structuredClone(messages));
+      const paused = !messages.some((m) => m.role === 'assistant');
+      const [text, stop] = paused ? ['Searching...', 'pause_turn'] : ['Found it.', 'end_turn'];
+      return { ...reply(messages), content: [{ type: 'text', text }], stop_reason: stop } as never;
+    };
+    let goneOn = 0;
+    try {
+      // Crashed at each state request in turn, while the model is asked to go on too.
+      for (let at = 1; ; at++) {
+        const c = conversation(prompt, `paused-crash-${at}`);
+        asked = [];
+        if ((await c.attempt('inv1', 'Hello', at)) !== 'crashed') break;
+        if (asked.length < 2) continue;
+        // Asked to go on: the paused reply was stored before, and the retry goes on from it.
+        goneOn++;
+        expect((await c.read(latestTurn)).steps).toBeGreaterThan(0);
+        asked = [];
+        expect(await c.attempt('inv1', 'Hello')).toBe('Found it.');
+        expect(asked).toHaveLength(1);
+        expect(asked[0]!.at(-1)).toEqual({ role: 'assistant', content: [{ type: 'text', text: 'Searching...' }] });
+      }
+    } finally {
+      teller.reply = reply;
+    }
+    expect(goneOn).toBeGreaterThan(0);
+  });
+
   it('sends a reply of the model with nothing in it back as one that says so: the API refuses it empty', async () => {
     const c = conversation(prompt, 'empty');
     const reply = teller.reply;

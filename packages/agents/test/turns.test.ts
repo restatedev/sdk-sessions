@@ -9,15 +9,7 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { call, chatHandler, sessionObject, type Tool } from '@restatedev/agents';
 import { callOf, forPrompt, outcomes } from '../src/calls.ts';
-import {
-  CANCELLED,
-  ENDED,
-  publish,
-  RETURNED_UNRECORDED,
-  stopSignalOf,
-  toolCallEnded,
-  toolCallStarted,
-} from '../src/common.ts';
+import { CANCELLED, ENDED, publish, RETURNED_UNRECORDED, stopSignalOf, toolCallStarted } from '../src/common.ts';
 import { answerOnce, Conversation, type Run, STEPS, SUMMARY, type Turn } from '../src/conversation.ts';
 import { conversationView } from '../src/messages.ts';
 import { waitFor } from '../src/tools.ts';
@@ -126,7 +118,7 @@ describe("a closed turn's calls", () => {
         ]);
         await toolCallStarted(ctx);
         await lookup.run(args, { ctx, callId: 't1' });
-        await toolCallEnded(ctx); // a publish: the calls whose results are stored are forgotten
+        await publish(ctx); // the calls whose results are stored are forgotten
         throw new Error('the process crashed before the result was stored');
       }
       // The framework drops the cut-off reply, and the model makes the call again under a new id.
@@ -137,7 +129,7 @@ describe("a closed turn's calls", () => {
       await toolCallStarted(ctx);
       const output = await lookup.run(args, { ctx, callId: 't2' });
       await conversation.turn.append({ result: 't2', output });
-      await toolCallEnded(ctx);
+      await publish(ctx);
       await conversation.turn.appendReply([{ role: 'assistant', text: 'shipped' }]);
       return 'shipped';
     };
@@ -205,7 +197,7 @@ function teller(tools: Tool[], asked: { count: number } = { count: 0 }, quiet = 
           await toolCallStarted(ctx);
           const output = await tools.find((t) => t.name === c.name)!.run(c.input, { ctx, callId: c.id });
           await turn.append({ result: c.id, output });
-          if (!quiet) await toolCallEnded(ctx);
+          if (!quiet) await publish(ctx);
         }
       }
     };

@@ -348,13 +348,6 @@ export async function toolCallStarted(ctx: restate.SessionContext) {
   if (stored) await settled(ctx, stored);
 }
 
-/**
- * A tool call of the turn of `ctx` ended: nothing to do. The turn publishes
- * once the call's result is stored, not as the call ends; kept for the
- * integrations that call it.
- */
-export async function toolCallEnded(_ctx: restate.SessionContext) {}
-
 /** Whether a tool call's result is stored: `stored(callId, failed)`, `failed` the error the call answered with. */
 export type Stored = (callId: string, failed?: string) => boolean;
 
@@ -370,18 +363,6 @@ function settled(ctx: restate.SessionContext, stored: Stored): Promise<void> {
   const done = (SETTLING.get(ctx) ?? Promise.resolve()).then(settle, settle);
   SETTLING.set(ctx, done);
   return done;
-}
-
-/**
- * Forget the calls whose results the turn of `ctx` stored (calls.ts), before
- * its tool calls make their own, without publishing: a tool call's publish
- * is the conversation's, once the reply that makes it is stored
- * (`Conversation.hold`). Outside a framework's turn ({@link answering}), it
- * does nothing.
- */
-export async function settledCalls(ctx: restate.SessionContext) {
-  const stored = ANSWERING.get(ctx);
-  if (stored) await settled(ctx, stored);
 }
 
 /**

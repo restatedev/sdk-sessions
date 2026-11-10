@@ -53,7 +53,7 @@ import {
   modelOf,
   providerOf,
   RETURNED_UNRECORDED,
-  settledCalls,
+  toolCallStarted,
   stopSignalOf,
   type Summarize,
   NO_ANSWER,
@@ -165,7 +165,7 @@ const failing = (
  */
 function toolsNode(ctx: restate.SessionContext, turn: Turn<BaseMessage>, tools: StructuredToolInterface[]) {
   return async (_state: typeof MessagesAnnotation.State, config: RunnableConfig) => {
-    await settledCalls(ctx);
+    await toolCallStarted(ctx);
     // The first error fails the attempt at once, not once the other calls end.
     const { promise: failure, reject } = Promise.withResolvers<never>();
     failure.catch(() => {});

@@ -46,7 +46,7 @@ import {
   modelIdOf,
   modelOf,
   RETURNED_UNRECORDED,
-  settledCalls,
+  toolCallStarted,
   stopSignalOf,
   type Summarize,
   NO_ANSWER,
@@ -232,7 +232,7 @@ const runOf =
       // reply: else one of its calls could take the id of an identical call
       // answered before.
       if (turn.openCalls().length > 0) {
-        await settledCalls(ctx);
+        await toolCallStarted(ctx);
         const results = await runner.generateToolResponse();
         check();
         if (results) {
@@ -250,7 +250,10 @@ const runOf =
         // Paused (a server tool's long turn): a step of the turn, not a reply to
         // end it with, and the model goes on from it.
         if (message.stop_reason === 'pause_turn') {
+          // Stored before the model goes on: a crash in a server tool's long turn goes on from it, rather than
+          // ask the whole of it again.
           await turn.append(said);
+          await conversation.flush();
           paused = true;
           break;
         }
@@ -258,7 +261,7 @@ const runOf =
         // the turn's answer.
         await turn.appendReply([said]);
         if (!message.content.some((c) => c.type === 'tool_use')) return textOf(message.content);
-        await settledCalls(ctx);
+        await toolCallStarted(ctx);
         const results = await runner.generateToolResponse();
         check();
         if (results) await turn.append(results);

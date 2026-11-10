@@ -9,7 +9,7 @@ import { invoke, Schema } from '@restatedev/sessions/internal';
 import { fakeContext, type Made } from '@restatedev/sessions/test/support';
 import { describe, expect, it } from 'vitest';
 import { chatHandler, sessionObject } from '@restatedev/agents';
-import { type Messages, stopSignalOf, toolCallEnded } from '../src/common.ts';
+import { type Messages, publish, stopSignalOf } from '../src/common.ts';
 import { answerOnce, Conversation, SCHEMA, STEERED, steerStored, STEPS, TURNS } from '../src/conversation.ts';
 import { conversationView, page } from '../src/messages.ts';
 import { takeSteers } from '../src/steering.ts';
@@ -57,8 +57,8 @@ function asker(answer: Answer, options: Parameters<typeof answerOnce>[4] = {}) {
 async function toolRound(ctx: restate.SessionContext, conversation: Conversation<Item>, callId = 'c1') {
   await conversation.turn.appendReply([calling(callId)]);
   await conversation.turn.append({ result: callId, output: 'found' });
-  // The call's end is published: the turn learns of the messages steered to it.
-  await toolCallEnded(ctx);
+  // A publish, as the conversation makes once the result is stored: the turn learns of the messages steered to it.
+  await publish(ctx);
 }
 
 const texts = (items: Item[]) => items.map((item) => item.text);
@@ -76,7 +76,7 @@ describe('a steered message', () => {
       took.push(texts(await takeSteers(ctx, conversation)));
       // A later step, with the same message still listed: it is not taken again.
       a.following.steering.push({ id: 's1', text: 'use Celsius' });
-      await toolCallEnded(ctx);
+      await publish(ctx);
       took.push(texts(await takeSteers(ctx, conversation)));
       seen = conversation.history();
       const { turn } = conversation;
@@ -113,7 +113,7 @@ describe('a steered message', () => {
     const took: (string | undefined)[][] = [];
     const a = asker(async (ctx, conversation) => {
       await conversation.turn.appendReply([calling('c1')]);
-      await toolCallEnded(ctx);
+      await publish(ctx);
       took.push(texts(await takeSteers(ctx, conversation)));
       await conversation.turn.append({ result: 'c1', output: 'found' });
       await conversation.turn.appendReply([{ role: 'assistant', text: 'done' }]);
@@ -148,7 +148,7 @@ describe('a steered message', () => {
       }
       // The companion lists it again (its `taken` came after this publish): it is stored already.
       a.following.steering.push({ id: 's1', text: 'use Celsius' });
-      await toolCallEnded(ctx);
+      await publish(ctx);
       expect(await takeSteers(ctx, conversation)).toEqual([]);
       seen.push(conversation.history());
       await conversation.turn.appendReply([{ role: 'assistant', text: 'done' }]);
@@ -328,7 +328,7 @@ describe('a steered message', () => {
       await toolRound(ctx, conversation, `c${turns}`);
       // The companion lists it to the second turn too (its close forgot it late, say).
       if (turns === 2) a.following.steering.push({ id: 's1', text: 'use Celsius' });
-      await toolCallEnded(ctx);
+      await publish(ctx);
       took.push(texts(await takeSteers(ctx, conversation)));
       await conversation.turn.appendReply([{ role: 'assistant', text: `answer ${turns}` }]);
       return `answer ${turns}`;
