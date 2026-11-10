@@ -5,7 +5,7 @@
 // budget.
 import * as restate from '@restatedev/sessions';
 import { cancelCalls, cancelled, definitionOf, Link, ScopeKey } from '@restatedev/sessions/internal';
-import { settleCalls } from './calls.ts';
+import { flushHeld, settleCalls } from './calls.ts';
 import { type Published, type Steer, signals, signalsOf } from './signals.ts';
 
 /**
@@ -321,9 +321,11 @@ export const inboxOf = (ctx: restate.SessionContext) => INBOX.get(ctx);
  * increases, and the clients that follow it read it again; while a framework
  * answers ({@link answering}), the calls whose results it stored are
  * forgotten first. It is a call to Restate, so it also sends what the
- * handler wrote before, for them to read.
+ * handler wrote before, for them to read: the rows the conversation holds
+ * back are written first (`flushHeld`), as the clients read them once told.
  */
 export const publish = async (ctx: restate.SessionContext) => {
+  await flushHeld(ctx);
   const stored = ANSWERING.get(ctx);
   if (stored) await settled(ctx, stored);
   const published = await signalsOfAgent(ctx).publish();

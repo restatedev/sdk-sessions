@@ -9,14 +9,22 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { call, chatHandler, sessionObject, type Tool } from '@restatedev/agents';
 import { callOf, forPrompt, outcomes } from '../src/calls.ts';
-import { CANCELLED, ENDED, RETURNED_UNRECORDED, stopSignalOf, toolCallEnded, toolCallStarted } from '../src/common.ts';
+import {
+  CANCELLED,
+  ENDED,
+  publish,
+  RETURNED_UNRECORDED,
+  stopSignalOf,
+  toolCallEnded,
+  toolCallStarted,
+} from '../src/common.ts';
 import { answerOnce, Conversation, type Run, STEPS, SUMMARY, type Turn } from '../src/conversation.ts';
 import { conversationView } from '../src/messages.ts';
 import { waitFor } from '../src/tools.ts';
 import { bank } from './bank.ts';
 import { ledger } from '@restatedev/sessions/test/ledger';
 import { calling, FakeItems, type Item, ITEMS } from './fakes/items.ts';
-import { conversation as banking, followingOf, handlerOf, sqlAttempt } from './support.ts';
+import { conversation as banking, followingOf, handlerOf, latestTurn, sqlAttempt } from './support.ts';
 
 /** The results a turn stored, by their calls' ids. */
 const resultsOf = (conversation: Conversation<Item>) =>
@@ -605,8 +613,8 @@ describe("a framework's copy into its turn", () => {
           await gate.promise;
           await turn.copyIn(tx, [{ item: { role: 'assistant', text: 'copied' }, reply: true }]);
         });
-        // ...while the turn's own write (an ask again, say) waits for it.
-        const asking = turn.askAgain('again');
+        // ...while the turn's own write (a tool's result, say, which is not held) waits for it.
+        const asking = turn.append({ result: 'c0', output: 'found', text: 'again' });
         await new Promise((resolve) => setTimeout(resolve, 10));
         gate.resolve();
         await copying;
@@ -620,6 +628,26 @@ describe("a framework's copy into its turn", () => {
     const written = turn!.items.slice(0, 2);
     expect(written.map((e) => e.item.text)).toEqual(['copied', 'again']);
     expect(ordered).toEqual(written.map((e) => e.n));
+  });
+
+  it('writes the rows the turn holds before it first, in its transaction: in the order of their seqs', async () => {
+    const map = new Map<string, Uint8Array>();
+    const sql = sqlAttempt({ map, key: 'k', id: 'inv1' });
+    await sql.end(() =>
+      answerOnce(sql.ctx, 'q', ITEMS, async (conversation) => {
+        const turn = conversation.turn;
+        // Held: no tool waits for it.
+        await turn.askAgain('again');
+        await sql.ctx.db.transaction(async (tx) => {
+          await turn.copyIn(tx, [{ item: { role: 'assistant', text: 'copied' }, reply: true }]);
+        });
+        return 'copied';
+      }),
+    );
+    const read = sqlAttempt({ map, key: 'k', id: 'read', shared: true });
+    const rows = await read.end(() => read.view.db.values(`SELECT n, seq, item FROM ${STEPS} ORDER BY n`));
+    expect(rows.map(([, , item]) => (JSON.parse(String(item)) as Item).text)).toEqual(['again', 'copied']);
+    expect(rows.map(([, seq]) => Number(seq))).toEqual(rows.map(([, seq]) => Number(seq)).toSorted((a, b) => a - b));
   });
 
   it("gives the turn's answer a seq after the copy's, when the answer waits for the copy's transaction", async () => {
@@ -675,5 +703,56 @@ describe('a close', () => {
       expect([at, notes.length, turnResults(first!)]).toEqual([at, 1, [['c1', ENDED]]]);
     }
     expect(crashes).toBeGreaterThan(0);
+  });
+});
+
+describe("a turn's steps that no tool waits for", () => {
+  it('are held, and stored before a publish, a Restate call of the library, and as the attempt fails', async () => {
+    const map = new Map<string, Uint8Array>();
+    // What the database holds, as a follower (or a retry) reads it.
+    const stored = async () => {
+      const read = sqlAttempt({ map, key: 'k', id: `read-${Math.random()}`, shared: true });
+      return (await read.end(() => latestTurn(read.view))).steps;
+    };
+    const seen: Record<string, number> = {};
+    const sql = sqlAttempt({
+      map,
+      key: 'k',
+      id: 'inv_held',
+      published: async () => void (seen.publish ??= await stored()),
+      signal: async () => {
+        seen.wait ??= await stored();
+        return 'yes';
+      },
+    });
+    await expect(
+      sql.end(() =>
+        answerOnce(sql.ctx, 'q', ITEMS, async (conversation) => {
+          const turn = conversation.turn;
+          await turn.appendReply([{ role: 'assistant', text: 'one' }]);
+          seen.held = await stored();
+          await publish(sql.ctx);
+          await turn.appendReply([{ role: 'assistant', text: 'two' }]);
+          await waitFor(sql.ctx, 'c1', 'approval');
+          await turn.appendReply([{ role: 'assistant', text: 'three' }]);
+          throw new Error('the attempt fails');
+        }),
+      ),
+    ).rejects.toThrow('the attempt fails');
+    expect(seen).toEqual({ held: 0, publish: 1, wait: 2 });
+    expect(await stored()).toBe(3);
+  });
+
+  it('are written at once in a conversation written directly: no run holds them', async () => {
+    const map = new Map<string, Uint8Array>();
+    const sql = sqlAttempt({ map, key: 'k', id: 'inv_direct' });
+    const steps = await sql.end(async () => {
+      const conversation = await Conversation.load(sql.db, ITEMS);
+      const turn = await conversation.ask('p1', 'q');
+      await turn.appendReply([{ role: 'assistant', text: 'one' }]);
+      const read = sqlAttempt({ map, key: 'k', id: 'read', shared: true });
+      return (await read.end(() => latestTurn(read.view))).steps;
+    });
+    expect(steps).toBe(1);
   });
 });

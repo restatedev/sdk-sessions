@@ -198,8 +198,9 @@ The Anthropic SDK's tool runner (`@anthropic-ai/sdk` 0.133.0).
   - `summary`: the default.
 - **Run**: the runner's `messages` are `conversation.history()`. If the turn
   has a stored final reply (`turn.finalReply()`), that is the answer: the
-  model is not asked again (new: today the reply and the answer are one
-  write). Otherwise the open calls (`turn.openCalls()`) run with their ids,
+  model is not asked again (in `answerOnce`'s run, the final reply is held
+  and commits with the answer, so only a turn written otherwise has one).
+  Otherwise the open calls (`turn.openCalls()`) run with their ids,
   and their results are appended; then each reply is appended
   (`appendReply`) before its tools run, and its results after.
 - **Errors**: the SDK's `ToolError` is the tool's answer to the model, not

@@ -25,6 +25,7 @@
 // and its `signal` view resolves it.
 import type * as restate from '@restatedev/sessions';
 import type { LangGraphRunnableConfig } from '@langchain/langgraph';
+import { flushHeld } from '../calls.ts';
 import { signals, signalsOf } from '../signals.ts';
 import { handlerContext } from './context.ts';
 
@@ -53,8 +54,12 @@ const CHECKPOINTER = '__pregel_checkpointer';
 const DURABILITY = '__pregel_durability';
 const TASK_ID = '__pregel_task_id';
 
-/** The run of a node of `kind`, from LangGraph's config. */
-function stepOf(config: LangGraphRunnableConfig, kind: string): Step {
+/**
+ * The run of a node of `kind`, from LangGraph's config. The rows the turn
+ * holds back are written first (`flushHeld`): the node's call, send or wait
+ * outlives the attempt.
+ */
+async function stepOf(config: LangGraphRunnableConfig, kind: string): Promise<Step> {
   const ctx = handlerContext(config.context);
   if (!ctx) {
     throw new TypeError(
@@ -82,6 +87,7 @@ function stepOf(config: LangGraphRunnableConfig, kind: string): Step {
   // run again from that checkpoint gets the same one. It holds the subgraph's path too.
   const namespace = String(configurable.checkpoint_ns || configurable[TASK_ID]);
   const node = namespace.split('|').at(-1)!.split(':')[0]!;
+  await flushHeld(ctx);
   return { ctx, node, idempotencyKey: `langgraph:${ctx.key}:${namespace}` };
 }
 
@@ -104,7 +110,7 @@ export const waitForSignal =
   // oxlint-disable-next-line typescript/no-explicit-any -- any graph's state
   (name: string, { output, input }: { output?: string; input?: (state: any) => unknown } = {}): Node =>
     async (state, config) => {
-      const step = stepOf(config, 'waitForSignal');
+      const step = await stepOf(config, 'waitForSignal');
       // The wait's id starts with the invocation's (the same in each attempt), as the waits of tools do, so that a
       // turn that ends without it (killed, say) has it closed: the companion closes the waits whose ids start with
       // the turn's.
@@ -146,7 +152,7 @@ function checkKey(target: Target, key: unknown) {
 export const call = <M>(target: Target<M>, handler: keyof M & string, options: CallOptions = {}): Node => {
   checkKey(target, options.key);
   return async (state, config) => {
-    const { ctx, idempotencyKey } = stepOf(config, 'call');
+    const { ctx, idempotencyKey } = await stepOf(config, 'call');
     const result = await ctx.rpc({
       service: target.name,
       handler,
@@ -171,7 +177,7 @@ export const send = <M>(
 ): Node => {
   checkKey(target, options.key);
   return async (state, config) => {
-    const { ctx, idempotencyKey } = stepOf(config, 'send');
+    const { ctx, idempotencyKey } = await stepOf(config, 'send');
     ctx.send({
       service: target.name,
       handler,
@@ -194,7 +200,7 @@ export const send = <M>(
 export const workflow =
   (target: restate.WorkflowDefinition<string, { run: unknown }>, { output, input, key }: CallOptions = {}): Node =>
   async (state, config) => {
-    const { ctx, idempotencyKey } = stepOf(config, 'workflow');
+    const { ctx, idempotencyKey } = await stepOf(config, 'workflow');
     const result = await ctx.rpc({
       service: target.name,
       handler: 'run',
@@ -231,7 +237,7 @@ export const subagent =
     },
   ): Node =>
   async (state, config) => {
-    const { ctx, node, idempotencyKey } = stepOf(config, 'subagent');
+    const { ctx, node, idempotencyKey } = await stepOf(config, 'subagent');
     const answer = await ctx.rpc({
       service: agent.name,
       handler,

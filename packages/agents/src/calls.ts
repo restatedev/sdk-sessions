@@ -69,8 +69,33 @@ export const SCHEMA = new Schema('restate-agents.calls', [
 /** What the calls need of a handler's context. */
 type CallsContext = Pick<restate.SessionContext, 'db' | 'request'>;
 
-/** Store `calls`, committed before the call they record is made. */
-async function store(ctx: CallsContext, { invocation, calls }: Calls) {
+/** What writes the rows the conversation of the attempt's turn holds back, by its context. */
+const HELD = new ScopeKey<() => Promise<void>>('the held rows of the conversation');
+
+/**
+ * Have {@link flushHeld} write, with `flush`, the rows that the conversation
+ * of the attempt's turn holds back (`Conversation.hold`): `answerOnce` does.
+ */
+export const holding = (ctx: restate.SessionContext, flush: () => Promise<void>) => HELD.set(ctx, flush);
+
+/**
+ * Write the rows that the conversation of the attempt's turn holds back, if
+ * any (see `Conversation.hold`). Call it before what another party sees, or
+ * what outlives the attempt: a publish, a Restate call, send or wait. A held
+ * row is lost in a crash, and the retried attempt makes it again; what was
+ * seen or called must not depend on it.
+ */
+export async function flushHeld(ctx: restate.SessionContext) {
+  await HELD.get(ctx)?.();
+}
+
+/**
+ * Store `calls`, committed before the call they record is made. The rows the
+ * conversation holds back are written first: the call outlives the attempt,
+ * and what led to it must too.
+ */
+async function store(ctx: restate.SessionContext, { invocation, calls }: Calls) {
+  await flushHeld(ctx);
   await ctx.db.execute('INSERT OR REPLACE INTO restate_agent_calls (row, invocation, calls) VALUES (0, ?, ?)', [
     invocation,
     JSON.stringify(calls),

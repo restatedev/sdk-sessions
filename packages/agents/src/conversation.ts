@@ -24,9 +24,10 @@
 // Both share one sequence of positions, which are the ids of the messages
 // the `messages` view renders (messages.ts); and each row has a `seq`, which
 // grows with every row written, for a client that reads from a cursor. Rows
-// are only appended, in one transaction per step, but for a reply at the end
-// that is dropped (to ask the model again), one range delete; and a turn's
-// answer is one update of its row.
+// are only appended, in one transaction per step (a step no tool waits for,
+// such as the final reply, is held for the next write in `answerOnce`'s run:
+// see `Ledger`), but for a reply at the end that is dropped (to ask the model
+// again), one range delete; and a turn's answer is one update of its row.
 //
 // The model gets the transcript, and the whole trajectories of the latest
 // `window` turns and of any turn after them that another invocation ended
@@ -42,9 +43,9 @@
 // gives its `Items` (how its items say what they are) and a `Run` (its own
 // loop, from the conversation to the answer, storing each step as it goes).
 import * as restate from '@restatedev/sessions';
-import type { Database, DatabaseReader, DatabaseWriter, Transaction } from '@restatedev/sessions';
+import type { Database, DatabaseReader, DatabaseWriter, SqlParam, Transaction } from '@restatedev/sessions';
 import { definitionOf, ensureSchemas, Schema } from '@restatedev/sessions/internal';
-import { forPrompt, outcomes, SCHEMA as CALLS } from './calls.ts';
+import { forPrompt, holding, outcomes, SCHEMA as CALLS } from './calls.ts';
 import {
   answering,
   AttemptEnded,
@@ -367,7 +368,20 @@ class Lock {
   }
 }
 
-/** What a conversation and its turns share: the database, the next position and `seq`, and the writes' lock. */
+/**
+ * What a conversation and its turns share: the database, the next position
+ * and `seq`, and the writes' lock.
+ *
+ * In `answerOnce`'s run ({@link Conversation.hold}), a step that no tool
+ * waits for (a reply without tool calls, say) is held rather than written
+ * (`held`): every write writes the held rows first, in its own transaction,
+ * so that a turn's final reply commits with its answer, in one flush rather
+ * than two. A held row is in memory only: lost in a crash, it is made again
+ * by the retried attempt, which runs from what the database holds. So the
+ * run writes them ({@link Conversation.flush}) before anything another party
+ * sees or that outlives the attempt: a publish, a Restate call of the
+ * library, the attempt failing.
+ */
 class Ledger<I> {
   /** The latest turn, if loaded whole: the only one that may be written. */
   latest: Turn<I> | undefined;
@@ -388,6 +402,14 @@ class Ledger<I> {
   next: number;
   /** The last `seq` given. */
   seq: number;
+  /** Whether steps that no tool waits for are held ({@link Conversation.hold}), rather than written at once. */
+  holds = false;
+  /**
+   * The rows of the trajectories given positions but not written yet, in
+   * order of position ({@link INSERT_STEP}'s parameters): the next write
+   * writes them first.
+   */
+  held: SqlParam[][] = [];
 
   constructor(db: Database, items: Items<I>, start: Start, transcript: Entry<I>[], next: number, seq: number) {
     this.db = db;
@@ -432,9 +454,18 @@ class Ledger<I> {
   async write(body: (tx: Transaction) => Promise<void>, done: () => void = () => {}): Promise<void> {
     let handed: [next: number, seq: number] | undefined;
     let before: [next: number, seq: number] = [this.next, this.seq];
+    // The held rows first, as the write runs (a framework's copy, which it may wait for, writes those it finds):
+    // they are no longer held once the write is stored, and still are if it rolls back.
+    let held: readonly SqlParam[][] = [];
+    const stored = () => {
+      this.held = this.held.filter((row) => !held.includes(row));
+      done();
+    };
     try {
       await this.db.transaction(async (tx) => {
         before = [this.next, this.seq];
+        held = this.held;
+        await writeHeld(tx, held);
         await body(tx);
         handed = [this.next, this.seq];
       });
@@ -445,10 +476,17 @@ class Ledger<I> {
         if (this.next === handed[0] && this.seq === handed[1]) [this.next, this.seq] = before;
         throw error;
       }
-      done();
+      stored();
       throw error;
     }
-    done();
+    stored();
+  }
+
+  /** Whether `entries`, which are read, are held rather than written: no tool call nor result, in a run that holds. */
+  holdsBack(entries: readonly Entry<I>[]) {
+    return (
+      this.holds && !entries.some((e) => (e.parsed?.calls ?? []).length > 0 || (e.parsed?.results ?? []).length > 0)
+    );
   }
 
   /** The agent and the framework's state that the latest answered turn left. */
@@ -456,6 +494,11 @@ class Ledger<I> {
     const latest = this.transcript.findLast((turn) => turn.answer !== undefined);
     return latest ? [latest.agent, latest.carried] : [undefined, undefined];
   }
+}
+
+/** Write the held rows `held` in `tx`, the same statement for each: the database prepares it once. */
+async function writeHeld(tx: DatabaseWriter, held: readonly SqlParam[][]) {
+  for (const row of held) await tx.execute(INSERT_STEP, row);
 }
 
 /**
@@ -550,7 +593,7 @@ export class Turn<I> {
 
   #add(entries: Entry<I>[]) {
     for (const entry of entries) {
-      entry.parsed = this.#ledger.items.read(entry.item);
+      parsedOf(this.#ledger.items, entry);
       entry.turn = this.n;
       this.#index(entry);
     }
@@ -747,6 +790,8 @@ export class Turn<I> {
     await ledger.lock.run(async () => {
       this.#checkWritable();
       const start = { ...ledger.start, seq: ledger.seq };
+      // The held rows it drops are never written; those before it are, with the deletes.
+      ledger.held = ledger.held.filter((row) => Number(row[0]) < reply);
       await ledger.write(
         async (tx) => {
           await tx.execute(`DELETE FROM ${STEPS} WHERE n >= ?`, [reply]);
@@ -777,6 +822,9 @@ export class Turn<I> {
    * in one update of its row. The answer's message is the assistant's
    * message the turn ends with; a turn that ends otherwise gets `answer` as
    * its reply first, and an empty answer gets none.
+   *
+   * The final reply, which is held (see {@link Ledger}), commits with the
+   * update: in one transaction.
    */
   async answered(answer: string, status: Status = 'answered') {
     let at = this.#answerMessage();
@@ -913,12 +961,16 @@ export class Turn<I> {
       ...(reply ? { reply: n + i, agent } : {}),
       ...(steer === undefined ? {} : { steer }),
     }));
+    // The rows held before it first, in its transaction: they go in the order of their seqs.
+    const held = ledger.held;
+    ledger.held = [];
     // A rolled back transaction fails its attempt, whose state goes with it.
     ledger.next = n + added.length;
     ledger.seq += added.length;
     this.#add(added);
     const steered = added.filter((e) => e.steer !== undefined);
     if (steered.length > 0) (this.prompt.steers ??= []).push(...steered);
+    await writeHeld(tx, held);
     for (const [i, e] of added.entries()) {
       await tx.execute(INSERT_STEP, [
         e.n,
@@ -946,12 +998,31 @@ export class Turn<I> {
     }
   }
 
-  /** Store the entries `made` makes from the next position, and return that position. */
+  /**
+   * Store the entries `made` makes from the next position, and return that
+   * position.
+   *
+   * Entries that hold no tool call nor result (a reply that ends the run,
+   * say) are held, not written, in a conversation that holds them (see
+   * {@link Ledger}): no tool waits for them, and the next write writes them.
+   * Tool calls are written before their tools run, and results before the
+   * model is asked again, with the rows held before them.
+   */
   #insert(made: (n: number) => Entry<I>[]): Promise<number> {
     const ledger = this.#ledger;
     return ledger.lock.run(async () => {
       this.#checkWritable();
-      let n = ledger.next;
+      const first = ledger.next;
+      const making = made(first);
+      for (const entry of making) parsedOf(ledger.items, entry);
+      if (ledger.holdsBack(making)) {
+        ledger.held.push(...making.map((e, i) => stepRow(this.n, ledger.seq + i + 1, ledger.items, e)));
+        ledger.seq += making.length;
+        ledger.next = first + making.length;
+        this.#add(making);
+        return first;
+      }
+      let n = first;
       let added: Entry<I>[] = [];
       // The positions and seqs taken as the write runs: a framework's copy
       // into the turn (`copyIn`, in a transaction of its own, which this one
@@ -960,17 +1031,9 @@ export class Turn<I> {
       await ledger.write(
         async (tx) => {
           n = ledger.next;
-          added = made(n);
-          for (const [i, e] of added.entries()) {
-            await tx.execute(INSERT_STEP, [
-              e.n,
-              this.n,
-              ledger.seq + i + 1,
-              ledger.items.dump(e.item),
-              e.reply ?? null,
-              e.agent ?? null,
-            ]);
-          }
+          added = n === first ? making : made(n);
+          for (const [i, e] of added.entries())
+            await tx.execute(INSERT_STEP, stepRow(this.n, ledger.seq + i + 1, ledger.items, e));
           ledger.seq += added.length;
           ledger.next = n + added.length;
         },
@@ -1119,6 +1182,16 @@ async function transcriptOf<I>(
 
 /** Store a step of a turn: its position, its turn's, its `seq`, its item, and the reply and agent it is of. */
 const INSERT_STEP = `INSERT INTO ${STEPS} (n, turn, seq, item, reply, agent) VALUES (?, ?, ?, ?, ?, ?)`;
+
+/** {@link INSERT_STEP}'s parameters for `entry`, a step of turn `turn` with `seq` `seq`. */
+const stepRow = <I>(turn: number, seq: number, items: Items<I>, entry: Entry<I>): SqlParam[] => [
+  entry.n,
+  turn,
+  seq,
+  items.dump(entry.item),
+  entry.reply ?? null,
+  entry.agent ?? null,
+];
 
 /** Mark the step at a position a message steered to its turn: the position, its turn's, and the message's id. */
 const INSERT_STEERED = `INSERT INTO ${STEERED} (n, turn, id) VALUES (?, ?, ?)`;
@@ -1406,6 +1479,31 @@ export class Conversation<I> {
   }
 
   /**
+   * Hold the steps that no tool waits for, rather than write each at once:
+   * the next write writes them (see {@link Ledger}). For a run that writes
+   * them ({@link flush}) before each publish and Restate call of the
+   * library, and before its attempt fails: `answerOnce`'s. A conversation
+   * that is written otherwise (step by step, from handlers of its own)
+   * writes each step as it comes.
+   */
+  hold() {
+    this.#ledger.holds = true;
+  }
+
+  /**
+   * Write the rows the turn's run holds (see {@link Ledger}), if any: before
+   * whatever another party sees, or outlives the attempt. A publish tells
+   * the clients to read them, and a Restate call is made once, while a held
+   * row would be lost in a crash.
+   */
+  async flush() {
+    const ledger = this.#ledger;
+    await ledger.lock.run(async () => {
+      if (ledger.held.length > 0) await ledger.write(async () => {});
+    });
+  }
+
+  /**
    * Close the conversation to writes, once those under way are stored: for
    * a stopped run, which (unwinding, or a promise of it left behind) stores
    * nothing more once its turn is closed.
@@ -1482,6 +1580,10 @@ export async function answerOnce<I>(
   // Answered (or closed) already: a retry answers, or fails, as the turn ended.
   if (stored !== undefined) return storedAnswer(stored.answer, stored.status);
   const conversation = await Conversation.load(ctx.db, items, window, budget);
+  // The turn's final reply commits with its answer; the library's publishes and Restate calls write what the
+  // run holds back first (`flushHeld`).
+  conversation.hold();
+  holding(ctx, () => conversation.flush());
   const answered = await forPrompt(ctx, promptId, () =>
     answering(
       ctx,
@@ -1566,6 +1668,11 @@ async function answerTurn<I>(
       await close(turn, 'failed', `Error: ${error.message}`);
       throw error;
     }
+    // The attempt fails, and its retry goes on from what is stored: so what
+    // the run made so far is, as when each step was written as it came.
+    // Never in place of the attempt's own error: its session may have ended
+    // with it, and then nothing more is stored.
+    await conversation.flush().catch(() => {});
     throw error;
   }
   await turn.answered(answered);

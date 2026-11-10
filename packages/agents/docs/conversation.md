@@ -141,7 +141,15 @@ const SCHEMA = new Schema('restate_agents.turns', [
   changed since a cursor. A turn's answer takes one too (`answered_seq`),
   for the summary view; its message's id is `answered_at`, the turn's last
   message of the assistant, the id the full view shows it under.
-- **Appends only.** Rows are appended, in one transaction per step. A
+- **Appends only.** Rows are appended, in one transaction per step. In
+  `answerOnce`'s run (`Conversation.hold`), a step that holds no tool call
+  nor result (the final reply, a message that asks again) is held in memory
+  and written by the next write, in its transaction: the final reply commits
+  with the turn's answer. The run writes what it holds (`flushHeld`) before
+  a publish, before each Restate call, send or wait of the library (a call
+  record, LangGraph's nodes and interrupts), and when its attempt fails
+  with an error in process; a crash loses it, and the retry makes it again.
+  A conversation written directly writes each step as it comes. A
   reply at the end can be dropped (to ask the model again), which is one
   range delete; its `seq` is kept in the start row, so cursors never go
   back.

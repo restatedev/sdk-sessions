@@ -59,6 +59,7 @@ import { AIMessage, type BaseMessage, HumanMessage, ToolMessage } from '@langcha
 import { mapStoredMessagesToChatMessages } from '@langchain/core/messages';
 import type { RunnableConfig } from '@langchain/core/runnables';
 import { Command, InvalidUpdateError, type Pregel, type StateSnapshot, StateGraph } from '@langchain/langgraph';
+import { flushHeld } from '../calls.ts';
 import { fromTool, stepped, stopSignalOf } from '../common.ts';
 import type { Conversation, Run, Turn } from '../conversation.ts';
 import { signals, signalsOf } from '../signals.ts';
@@ -276,6 +277,8 @@ async function resumesOf(ctx: restate.SessionContext, saver: SqlCheckpointSaver)
 async function resumed(ctx: restate.SessionContext, saver: SqlCheckpointSaver, snapshot: StateSnapshot) {
   const pending = interruptsOf(snapshot);
   if (pending.length === 0) return undefined;
+  // What the turn holds back is written before it waits: the waits outlive the attempt.
+  await flushHeld(ctx);
   const resumes = await resumesOf(ctx, saver);
   const values = await Promise.all(
     pending.map(({ id, value }) => {

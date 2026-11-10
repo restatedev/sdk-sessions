@@ -8,6 +8,7 @@ import { type AttemptContext, contextOf } from '@restatedev/sessions/internal';
 import { type AttemptOptions, sqlAttempt as baseAttempt } from '@restatedev/sessions/test/support';
 import { z } from 'zod';
 import type { Audit, Transfer } from '@restatedev/sessions/test/ledger';
+import { SCHEMA, STEPS, TURNS } from '../src/conversation.ts';
 
 /**
  * The `signals` object of an agent's tests, as far as following goes: the
@@ -654,4 +655,17 @@ export async function invalidArguments(chat: (tools: Tool[]) => PromptHandler) {
   const sql = sqlAttempt({ map, key: 'invalid', id: 'inv1' });
   const answer = await sql.end(() => handlerOf(chat([small]))(sql.ctx, 'Please move 5 from 1 to 2'));
   return { answer, ran };
+}
+
+/**
+ * How the latest turn of the conversation stands, as stored (a view, for a
+ * conversation's `read`): how it ended (none while it is answered), and how
+ * many steps the conversation has.
+ */
+export async function latestTurn(ctx: restate.ViewContext) {
+  await SCHEMA.ensure(ctx.db);
+  const [[status, steps]] = (await ctx.db.values(
+    `SELECT (SELECT status FROM ${TURNS} ORDER BY n DESC LIMIT 1), (SELECT COUNT(*) FROM ${STEPS})`,
+  )) as [[string | null, number]];
+  return { status: status ?? undefined, steps };
 }

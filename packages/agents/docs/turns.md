@@ -109,10 +109,10 @@ sequenceDiagram
   A->>DB: load the transcript and the window
   A->>DB: ask: the turn's row
   loop each step of the framework
-    A->>DB: append the model's reply, the tool calls' results
+    A->>DB: append the model's reply with tool calls, the tool calls' results
     A->>S: publish (a tool call starts, ends)
   end
-  A->>DB: answered: the answer, and what the turn carries
+  A->>DB: answered: the final reply, the answer, and what the turn carries
   opt the earlier turns outgrow the budget
     A-)A: compact (runs before the next message)
   end
@@ -142,11 +142,13 @@ sequenceDiagram
    closes a turn left without an answer, and stores the prompt as the turn's
    row.
 3. **Steps.** The framework answers: model calls and tool calls. Each step
-   is stored as it comes (a reply in one transaction, before its tools run;
-   each result as it comes back), and each tool call publishes as it starts
-   and as it ends, so a follower sees the call start and its result.
+   is stored as it comes (a reply with tool calls in one transaction, before
+   its tools run; each result as it comes back), and each tool call
+   publishes as it starts and as it ends, so a follower sees the call start
+   and its result. A final reply, which no tool waits for, is held, and
+   commits with the answer.
 4. **Answer.** The answer is stored on the turn's row, with what the turn
-   carries. If the turns before the next turn's window outgrow the agent's
+   carries, and the final reply, in one commit. If the turns before the next turn's window outgrow the agent's
    budget, the agent sends itself `compact`
    ([Summaries](conversation.md#summaries)).
 5. **End.** `chatHandler` calls the companion's `close(turn)` and waits for

@@ -111,10 +111,30 @@ const AGENTS: [string, () => PromptHandler][] = [
   ['a LangGraph graph of your own', () => langgraph.chat({ graph: ownGraph() })],
 ];
 
+/**
+ * The commits of a key's second turn, by agent, for a plain turn (`r = 1`)
+ * and one of a round of 3 tool calls (`r = 2, k = 3`): its row (`ask`), each
+ * reply with tool calls, the tools' results, and the final reply with the
+ * answer, in one commit. A graph of your own also commits its checkpoints.
+ */
+const COMMITS: Record<string, [plain: number, round: number]> = {
+  Claude: [2, 4],
+  'the built-in LangGraph loop': [2, 6],
+};
+
 describe("a turn's commits", () => {
   afterAll(() => {
     teller.reply = tellerReply;
   });
+
+  it.each(AGENTS.filter(([name]) => name in COMMITS))(
+    'are one for the final reply and its answer: %s',
+    async (name, chat) => {
+      const [plain, round] = COMMITS[name]!;
+      expect((await costs(chat(), 1, 0))[1]!.commits).toBe(plain);
+      expect((await costs(chat(), 2, 3))[1]!.commits).toBe(round);
+    },
+  );
 
   it.each(AGENTS)("apply a key's schemas in one commit, on its first turn: %s", async (_name, chat) => {
     for (const [r, k] of [

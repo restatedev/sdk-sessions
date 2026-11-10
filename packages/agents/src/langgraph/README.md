@@ -114,10 +114,11 @@ model sees of it (the earlier turns as their prompt and answer, within
 `budget`; the latest `window` turns whole). The handler is not replayed: a
 retried attempt runs it again from the start, from what is stored.
 
-- **The model node stores its reply before it returns, and the tools node
-  each result as it lands.** So a crash during the tools runs those without
-  a result again, with the same tool call ids, without asking the model
-  again; and a stored final reply is the answer.
+- **The model node stores its reply with tool calls before it returns, and
+  the tools node each result as it lands.** So a crash during the tools runs
+  those without a result again, with the same tool call ids, without asking
+  the model again. The final reply, which no tool waits for, is stored with
+  the turn's answer, in one commit: a crash before it asks the model again.
 - **A tool is idempotent by its tool call id** (`callId` of `tool()`'s
   `run`), which it passes on, such as in an idempotency key.
 - **A tool's error fails the attempt**, and Restate retries it (the ToolNode
