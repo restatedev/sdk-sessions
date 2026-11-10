@@ -104,8 +104,8 @@ OpenCode (`@restatedev/agents/opencode`: `@opencode/{core,sdk,server,plugin}`
 2.2.6 and `effect` 4.1.0, on Node 24) is back on the conversation of turns,
 not yet documented here: a turn whose invocation is gone (killed) is closed,
 never finished, through OpenCode's resume budget (see
-[docs/opencode.md](docs/opencode.md), which also lists what is left: steering,
-its `retry` hook, permissions, the crash test). A subpath whose packages are
+[docs/opencode.md](docs/opencode.md), which also lists what is left: its
+`retry` hook, permissions, the crash test). A subpath whose packages are
 missing fails as it is imported, naming the first it lacks. The packages
 are not published yet:
 [`pnpm --filter e2e packaging`](../e2e/packaging.ts) installs them from
