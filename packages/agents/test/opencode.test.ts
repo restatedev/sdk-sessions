@@ -633,23 +633,56 @@ describe.skipIf(!NODE_24)('the OpenCode agent, steered', () => {
   }, 60_000);
 });
 
-/** The provider's error of a request, with HTTP `statusCode`. */
-const failure = (statusCode: number) =>
+/** The provider's error of a request, with HTTP `statusCode` (and `headers`). */
+const failure = (statusCode: number, headers?: Record<string, string>) =>
   new APICallError({
     message: statusCode === 401 ? 'Incorrect API key provided' : 'Service Unavailable',
     url: 'https://scripted.invalid/v1',
     requestBodyValues: {},
     statusCode,
-    isRetryable: statusCode >= 500,
+    ...(headers && { responseHeaders: headers }),
+    isRetryable: statusCode >= 500 || statusCode === 429,
   });
 
-/** The teller, behind a provider that fails the next `n` requests with `statusCode`. */
-const failing = (n: number, statusCode = 503) => {
+/** OpenCode's own error of a request that timed out (its HTTP transport's: code `Timeout`), as OpenCode's `ai` makes it. */
+const timedOut = async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const url = await import('node:url');
+  // `@opencode/ai`, beside OpenCode's core (not a dependency of ours): the one whose errors OpenCode knows.
+  const core = fs.realpathSync(
+    url.fileURLToPath(new URL('../node_modules/@opencode/core/package.json', import.meta.url)),
+  );
+  const at = fs.realpathSync(path.join(path.dirname(core), '../ai/dist/effect.js'));
+  type Made = new (fields: Record<string, unknown>) => Error;
+  const ai = (await import(url.pathToFileURL(at).href)) as {
+    AIError: Made;
+    TransportError: Made;
+  };
+  return () =>
+    new ai.AIError({
+      reason: new ai.TransportError({
+        message: 'request timed out',
+        transport: 'http',
+        operation: 'read',
+        code: 'Timeout',
+      }),
+    });
+};
+
+/**
+ * The teller, behind a provider that fails the next `n` requests with
+ * `error`'s, or with HTTP status `error`. When each request came (ms).
+ */
+const failing = (n: number, error: number | (() => unknown) = 503) => {
   let left = n;
+  const times: number[] = [];
   fake.script.reply = (request) => {
-    if (left-- > 0) throw failure(statusCode);
+    times.push(Date.now());
+    if (left-- > 0) throw typeof error === 'number' ? failure(error) : error();
     return fake.teller(request);
   };
+  return times;
 };
 
 /** The bank's chat, asking again within a millisecond. */
@@ -700,6 +733,33 @@ describe.skipIf(!NODE_24)("the OpenCode agent through a provider's outage", () =
     expect(await c.attempt('inv1', 'Please move 5 from 1 to 2')).toBe('Done: moved 5 from account 1 to account 2');
     expect(fake.script.requests).toHaveLength(14);
     expect(c.ledger.transfers.size).toBe(1);
+    expect(await partsOf(c)).toEqual(transferred);
+  }, 60_000);
+
+  it('fails the attempt at the timeout OpenCode no longer retries, and the next attempt answers the turn', async () => {
+    // OpenCode retries 3 timeouts of a step, and proposes no retry of the 4th.
+    failing(4, await timedOut());
+    const c = conversation(quickChat(), 'timeouts');
+    const failed = await c.attempt('inv1', 'Please move 5 from 1 to 2').then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(failed).toBeInstanceOf(Error);
+    expect(failed).not.toBeInstanceOf(restate.TerminalError);
+    expect(fake.script.requests).toHaveLength(4);
+    expect(await c.attempt('inv1', 'Please move 5 from 1 to 2')).toBe('Done: moved 5 from account 1 to account 2');
+    expect(fake.script.requests).toHaveLength(6);
+    expect(c.ledger.transfers.size).toBe(1);
+    expect(await partsOf(c)).toEqual(transferred);
+  }, 60_000);
+
+  it("asks a rate-limited request again no sooner than the provider's retry-after", async () => {
+    const times = failing(1, () => failure(429, { 'retry-after': '1' }));
+    const c = conversation(quickChat(), 'retry-after');
+    expect(await c.attempt('inv1', 'Please move 5 from 1 to 2')).toBe('Done: moved 5 from account 1 to account 2');
+    expect(times).toHaveLength(3);
+    // A second, though the backoff is a millisecond.
+    expect(times[1]! - times[0]!).toBeGreaterThanOrEqual(1_000);
     expect(await partsOf(c)).toEqual(transferred);
   }, 60_000);
 

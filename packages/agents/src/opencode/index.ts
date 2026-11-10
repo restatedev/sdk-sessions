@@ -40,9 +40,10 @@
 // "interrupted" result and the model makes it again under a new id.
 //
 // A provider's outage never ends the turn: OpenCode asks the model again,
-// as its `session.retry` hook decides (`retryPlugin`: pi's backoff), and
-// the failure it would retry for the last time fails the attempt instead, as
-// a tool's error does: the next attempt resumes the turn. A refusal is never
+// as its `session.retry` hook decides (`retryPlugin`: pi's backoff, not
+// before the provider's `retry-after`), and an outage it would retry for the
+// last time, or stops retrying (timeouts), fails the attempt instead, as a
+// tool's error does: the next attempt resumes the turn. A refusal is never
 // asked again, and ends the turn (424).
 //
 // A message steered to the turn (the agent's `steer` view, ../steering.ts)
@@ -606,13 +607,16 @@ export interface Options<O extends z.ZodObject | undefined = z.ZodObject | undef
    * that passes (an overloaded or unreachable provider, a rate limit), as pi
    * does: by default without limit, 2 s after the first failure, then twice
    * as long each time, a minute apart at most (`baseDelayMs`,
-   * `maxAgentDelayMs`). A request refused for good (a wrong API key, an
+   * `maxAgentDelayMs`), but never before the provider said to try again
+   * (its `retry-after`, which the cap does not shorten: up to 15 minutes, as
+   * OpenCode takes it). A request refused for good (a wrong API key, an
    * unknown model, a request a retry would make again) is never asked again,
    * and ends the turn (424). Unlike pi, OpenCode asks again 10 times at most
-   * in a step of the turn: without `maxRetries`, the failure its 10th retry
-   * would follow fails the attempt instead, and Restate's retry of it
-   * resumes the turn, waits from 2 s again. With `maxRetries`, a failure
-   * after that many retries of a step ends the turn, and more than 10 is 10.
+   * in a step of the turn, and after its 4th timeout in a step not at all:
+   * without `maxRetries`, an outage OpenCode stops asking again about fails
+   * the attempt instead, and Restate's retry of it resumes the turn, waits
+   * from 2 s again. With `maxRetries`, a failure after that many retries of
+   * a step ends the turn, as one OpenCode stops asking again about does.
    * `enabled: false` asks no request again.
    */
   retry?: Partial<RetryPolicy>;
@@ -657,14 +661,27 @@ export interface RetryPolicy {
 /** The retries OpenCode makes of a step at most, in one attempt (its `ModelRetry` schedule's `recurs(10)`). */
 const OPENCODE_RETRIES = 10;
 
+/** The longest wait a provider's `retry-after` asks for that OpenCode takes (its `ModelRetry`'s `RETRY_AFTER_MAX`). */
+const RETRY_AFTER_MAX_MS = 15 * 60_000;
+
+/**
+ * OpenCode's error types of an outage: the failures its `AIError.isRetryable`
+ * retries (a rate limit, the provider's internal error, the transport's, one
+ * it cannot classify), as `toSessionError` names them.
+ */
+const OUTAGES = new Set(['provider.rate-limit', 'provider.internal', 'provider.transport', 'provider.unknown']);
+
 /**
  * An OpenCode plugin that decides, by its `session.retry` hook, how a failed
- * model request is asked again: OpenCode calls it for each failure it would
- * retry (`attempt` is 2 at the first), its decision proposed. A refusal is
- * never retried; an outage after `baseDelayMs` doubled each time, at most
- * `maxAgentDelayMs`. One that OpenCode would retry for the last time (with
- * no `maxRetries`) is `outage` instead, which fails the attempt: the next
- * resumes the turn, which OpenCode retries afresh.
+ * model request is asked again: OpenCode calls it for each failure while its
+ * schedule lasts (`attempt` is 2 at the first), its decision proposed. A
+ * refusal is never retried, nor a failure OpenCode would not retry that is
+ * no outage; an outage after `baseDelayMs` doubled each time, at most
+ * `maxAgentDelayMs`, and not before the provider's `retry-after`. An outage
+ * OpenCode would retry for the last time, or stopped retrying (after its 4th
+ * timeout in a step), is `outage` instead (with no `maxRetries`), which
+ * fails the attempt: the next resumes the turn, which OpenCode retries
+ * afresh.
  */
 function retryPlugin(
   { enabled = true, maxRetries = Infinity, baseDelayMs = 2_000, maxAgentDelayMs = 60_000 }: Partial<RetryPolicy>,
@@ -674,11 +691,17 @@ function retryPlugin(
     id: 'restate-agents.retry',
     async setup(ctx) {
       const hook = await ctx.session.hook('retry', (event) => {
-        const { message, type, status } = event.error;
+        const { message, type, status, retryAfterMs = 0 } = event.error;
         const retries = event.attempt - 1;
-        if (!enabled || !event.decision.retry || refusedFor(message, type, status) || retries > maxRetries) {
+        const stopped = !event.decision.retry;
+        if (
+          !enabled ||
+          refusedFor(message, type, status) ||
+          retries > maxRetries ||
+          (stopped && (maxRetries !== Infinity || !OUTAGES.has(type)))
+        ) {
           event.decision = { retry: false };
-        } else if (maxRetries === Infinity && retries >= OPENCODE_RETRIES) {
+        } else if (stopped || (maxRetries === Infinity && retries >= OPENCODE_RETRIES)) {
           outage(
             new Error(
               `the model's provider failed ${retries} times in a row (${message}): the next attempt resumes the turn`,
@@ -687,7 +710,8 @@ function retryPlugin(
           // The attempt is over: OpenCode waits until it is closed.
           event.decision = { retry: true, delay: 2 ** 31 - 1 };
         } else {
-          event.decision = { retry: true, delay: Math.min(baseDelayMs * 2 ** (retries - 1), maxAgentDelayMs) };
+          const backoff = Math.min(baseDelayMs * 2 ** (retries - 1), maxAgentDelayMs);
+          event.decision = { retry: true, delay: Math.max(backoff, Math.min(retryAfterMs, RETRY_AFTER_MAX_MS)) };
         }
       });
       return () => hook.dispose();
