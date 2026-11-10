@@ -3,9 +3,9 @@
  * cascade: each task starts on the cheapest model that can do it, and moves up only on evidence.
  *
  *   you ──chat──▶ boss (Claude Fable 5.2)  plans, briefs, checks, decides
- *                  ├─ worker   (Claude Sonnet 5.5)  the cheap tier, in the workspace
- *                  ├─ senior   (Claude Sonnet 5.5)  one rung up, only with your approval
- *                  └─ reviewer (Claude Sonnet 5.5)  a second opinion on a diff, read-only
+ *                  ├─ worker   (OpenCode, Claude Sonnet 5.5)  the cheap tier, in the workspace
+ *                  ├─ senior   (OpenCode, Claude Sonnet 5.5)  one rung up, only with your approval
+ *                  └─ reviewer (OpenCode, Claude Sonnet 5.5)  a second opinion on a diff, read-only
  *
  * The boss gets one tool per move of the cascade (tools/), and each asks policy.ts first:
  *

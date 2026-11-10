@@ -151,9 +151,18 @@ Steps 1 to 3, where they differ from the design below:
     is not a steer.
   - **No round ends the run** in OpenCode as pi's `terminate` does, so there
     is no such case.
-- **Left** (steps 4 to 6): OpenCode's `retry` hook (its own retries apply),
-  permissions through Restate, a change of `model` on an existing session,
-  `packages/e2e`'s crash test and packaging, the README and the examples.
+- **A dead prompt's queued input is cancelled.** A prompt killed once
+  OpenCode queued it, before its turn's claim, leaves no claim for the sweep
+  to close, only its input in the inbox, which the next prompt's drain ran
+  under the next invocation (the crash test found it). What waits in the
+  inbox when another prompt's turn is closed is cancelled
+  (`session.inbox.cancel`).
+- **Step 5 is done**: `OpenCodeAgent` is in `packages/e2e/crash.ts`, kills
+  included, and `packaging.ts` checks `./opencode`. Of step 6, the foreman's
+  worker, senior and reviewer are OpenCode agents.
+- **Left**: OpenCode's `retry` hook (its own retries apply), permissions
+  through Restate, a change of `model` on an existing session, the README's
+  section and tables, `frameworks.md`, `examples/basic/opencode.ts`.
 
 ## What OpenCode does, in brief
 

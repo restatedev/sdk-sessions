@@ -7,10 +7,13 @@ can do it, and moves up only on evidence.
 
 ```
 you ──chat──▶ boss (Claude Fable 5.2)   plans, briefs, checks, decides
-               ├─ worker   (Claude Sonnet 5.5)  the cheap tier: bounded tasks, in the workspace
-               ├─ senior   (Claude Sonnet 5.5)  one rung up, only after you approve
-               └─ reviewer (Claude Sonnet 5.5)  a second opinion on a diff, read-only
+               ├─ worker   (OpenCode, Claude Sonnet 5.5)  the cheap tier: bounded tasks, in the workspace
+               ├─ senior   (OpenCode, Claude Sonnet 5.5)  one rung up, only after you approve
+               └─ reviewer (OpenCode, Claude Sonnet 5.5)  a second opinion on a diff, read-only
 ```
+
+The boss is a pi agent. The agents it delegates to are OpenCode agents
+(`@restatedev/agents/opencode`), each with OpenCode's own coding tools in the workspace.
 
 The rules hold in code, not only in the boss's prompt. The boss has no free-form "ask the worker"
 tool: it has one tool per move ([`tools/`](tools/index.ts)), and each asks
@@ -33,7 +36,7 @@ same agent, and tasks with different names run at once.
 
 ## Run it
 
-The agents' coding tools (read, write, edit, bash) and the boss's checks run on this machine, not
+The agents' coding tools (OpenCode's: read, write, edit, shell, glob, grep) and the boss's checks run on this machine, not
 in a sandbox, in `WORKSPACE`: give it a throwaway clone of a git repository, never one you care
 about. The boss's checks read git, to see what changed.
 

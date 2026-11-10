@@ -1,12 +1,13 @@
 /**
  * The agents that do the delegated work, and how the boss's tools reach them.
  *
- *   worker   (pi + Claude Sonnet 5.5)   the cheap tier, in the workspace
- *   senior   (pi + Claude Sonnet 5.5)   one rung up, only with the user's approval
- *   reviewer (pi + Claude Sonnet 5.5)   a second opinion on a diff, read-only
+ *   worker   (OpenCode + Claude Sonnet 5.5)   the cheap tier, in the workspace
+ *   senior   (OpenCode + Claude Sonnet 5.5)   one rung up, only with the user's approval
+ *   reviewer (OpenCode + Claude Sonnet 5.5)   a second opinion on a diff, read-only
  *
- * All Anthropic (ANTHROPIC_API_KEY): Fable 5.2 for the boss, Sonnet 5.5 for every agent it delegates
- * to. Each model can be changed with its *_MODEL variable: a stronger SENIOR_MODEL (Opus 5.5) makes
+ * The boss is a pi agent; the agents it delegates to are OpenCode agents, each with OpenCode's own
+ * coding tools in the workspace. All Anthropic (ANTHROPIC_API_KEY): Fable 5.2 for the boss, Sonnet
+ * 5.5 for every agent it delegates to. Each model can be changed with its *_MODEL variable: a stronger SENIOR_MODEL (Opus 5.5) makes
  * the senior a real rung up.
  *
  * Each is a session object of its own, keyed `<boss key>.<task name>`: a correction goes back to the
@@ -14,19 +15,19 @@
  */
 import { join } from 'node:path';
 import { signal, subagent, type Tool } from '@restatedev/agents';
-import * as pi from '@restatedev/agents/pi';
+import * as opencode from '@restatedev/agents/opencode';
 import { z } from 'zod';
 import { REVIEWER_MODEL, SENIOR_MODEL, WORKER_MODEL } from './models.ts';
 import type { Tier } from './policy.ts';
 import * as prompts from './prompts.ts';
 
-// The agents' coding tools (read, write, edit, bash) and the boss's checks run here, on this
-// machine and not in a sandbox: point it at a throwaway clone, never at a repo you care about.
-// pi creates it if it is missing.
+// OpenCode's coding tools (read, write, edit, shell, glob, grep) and the boss's checks run here, on
+// this machine and not in a sandbox: point it at a throwaway clone, never at a repo you care about.
+// It is made if it is missing.
 export const workspace = process.env.WORKSPACE ?? join(import.meta.dirname, 'scratch');
 
 // The cheap tier.
-export const worker = pi.agent({
+export const worker = opencode.agent({
   name: 'worker',
   description: 'The cheap tier: one bounded task with a mechanical check',
   model: WORKER_MODEL,
@@ -35,7 +36,7 @@ export const worker = pi.agent({
   system: prompts.WORKER,
 });
 
-export const senior = pi.agent({
+export const senior = opencode.agent({
   name: 'senior',
   description: 'One rung up: a task the worker could not finish',
   model: SENIOR_MODEL,
@@ -45,9 +46,9 @@ export const senior = pi.agent({
 });
 
 // A reviewer of another family (another provider's model, through REVIEWER_MODEL) catches more of
-// a model's blind spots than one on the worker's own model. It has no workspace: it sees the diff
-// the boss sends, and can change nothing.
-export const reviewer = pi.agent({
+// a model's blind spots than one on the worker's own model. It has no workspace, so none of OpenCode's
+// tools: it sees the diff the boss sends, and can change nothing.
+export const reviewer = opencode.agent({
   name: 'reviewer',
   description: 'A second opinion on a diff',
   model: REVIEWER_MODEL,
