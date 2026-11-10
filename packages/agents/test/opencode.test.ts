@@ -586,4 +586,45 @@ describe.skipIf(!NODE_24)('the OpenCode agent, steered', () => {
     expect(texts).not.toContain(STEERED);
     expect(texts.at(-1)).toBe(CANCELLED);
   }, 60_000);
+
+  it('answers once a message OpenCode took as its turn was stopped', async () => {
+    const map = new Map<string, Uint8Array>();
+    const following = followingOf(map);
+    const first = sqlAttempt({ map, key: 'stopped-after', id: 'inv1' });
+    const transfer = tool({
+      name: 'transfer',
+      description: 'Move money.',
+      input: z.object({ from: z.number(), to: z.number(), amount: z.number() }),
+      run: () => {
+        following.steering = [{ id: 'steer-1', text: STEERED }];
+        return 'moved 5 from account 1 to account 2';
+      },
+    });
+    const audit = tool({ name: 'audit', description: 'Check the books.', input: z.object({}), run: () => 'fine' });
+    const chat = handlerOf(opencode.chat({ tools: [transfer, audit] }));
+    fake.script.reply = steeredModel;
+    // Stopped once OpenCode took the steered message, before the turn's next step.
+    boots.prompted = (input) => {
+      if (String(input.id).startsWith('msg_steer_')) first.cancel();
+    };
+    const failed = await first
+      .end(() => chat(first.ctx, 'Please move 5 from 1 to 2'))
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+    boots.prompted = undefined;
+    expect(failed).toBeInstanceOf(restate.CancelledError);
+    const taken = [...new Set(following.taken.flat())];
+    const texts = await textsOf(map, 'stopped-after');
+    // The message is the stopped turn's if OpenCode placed it, and then the turn holds it, once: the
+    // companion answers as a turn of its own only a message no turn took.
+    expect(texts.filter((t) => t === STEERED)).toHaveLength(taken.length);
+    // The next prompt's model has it as often as OpenCode's history does: never twice.
+    fake.script.reply = () => ({ text: 'Hi.' });
+    const second = sqlAttempt({ map, key: 'stopped-after', id: 'inv2' });
+    expect(await second.end(() => chat(second.ctx, 'Hello'))).toBe('Hi.');
+    const said = fake.script.requests.at(-1)!.prompt.map((m) => fake.textOf(m));
+    expect(said.filter((t) => t === STEERED)).toHaveLength(taken.length);
+  }, 60_000);
 });

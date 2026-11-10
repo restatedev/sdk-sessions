@@ -160,6 +160,10 @@ Steps 1 to 3, where they differ from the design below:
 - **Step 5 is done**: `OpenCodeAgent` is in `packages/e2e/crash.ts`, kills
   included, and `packaging.ts` checks `./opencode`. Of step 6, the foreman's
   worker, senior and reviewer are OpenCode agents.
+- **A message OpenCode placed as its turn was stopped is the turn's.** A
+  steer submitted before a stop may be placed by OpenCode as the turn is
+  interrupted: after the interrupt, the placed steers alone are copied, so the
+  turn holds the message and it is not answered again as a turn of its own.
 - **Left**: OpenCode's `retry` hook (its own retries apply), permissions
   through Restate, a change of `model` on an existing session, the README's
   section and tables, `frameworks.md`, `examples/basic/opencode.ts`.
@@ -204,7 +208,7 @@ dead turn is the one hole, and the copy into the store is new.
 | **The views read the store**                                                 | `transcribe` and `transcribing` go; `messages` reads the store's copies                                                                               | the log, from OpenCode's messages             |
 | **Compaction** is the framework's own                                        | OpenCode's: near the window, on an overflow, or asked; its compaction messages are not copied                                                         | the same                                      |
 | **One framework per object** (D7), **a turn carries nothing**                | as for every framework                                                                                                                                | n/a                                           |
-| **`clear`** forgets the conversation                                         | the store, then OpenCode's database (`alsoClearing`); not atomic across the two                                                                       | the same                                      |
+| **`clear`** forgets the conversation                                         | OpenCode's database first (`Items.erase`), then the store; not atomic across the two                                                                  | the same                                      |
 
 ## The approach: decide at boot whose claim it is
 
@@ -232,7 +236,9 @@ the recorded prompt's: this prompt's, or another's. The integration never
 reads OpenCode's tables, whose layout changed between 2.0.32 and 2.2.6
 (`session_part`).
 
-**The closer is a `SessionRestart` of the integration's own**, given in
+**As designed, the closer was a `SessionRestart` of the integration's own**
+(the spike made the budget, below, the default, and kept this one as an
+option of `db.ts`), given in
 `overrides` as the old `maxAttempts: Infinity` was. For each claimed
 top-level session not active in the process, if the claim may go on, it does
 what OpenCode's restart does (built inside, with `maxAttempts: Infinity`);
@@ -253,7 +259,8 @@ It resolves a promise once done: the host forks the sweep, so a prompt
 submitted before it ends could join the dead turn. The old integration
 polled for that (`STALLED_MS`); the closer is awaited instead.
 
-**The fallback, if the custom service proves too internal:**
+**The budget, which is what the code uses** (designed as the fallback, should
+the custom service prove too internal):
 `SessionRestart.layer({ maxAttempts: 0 })` when the recorded claim is
 another prompt's, `Infinity` when it is this prompt's: OpenCode's own code,
 and only an option of it. It writes the idle marker and releases the claim;
@@ -354,16 +361,16 @@ asks and questions waited on in-memory promises that nothing answered.
 
 ## Alternatives weighed
 
-| Approach                                                                | Verdict                                                                                                                                                                                                                   |
-| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **A closer `SessionRestart`**, through `overrides`                      | **Chosen.** Exported module paths and typed services, the events OpenCode's own budget publishes; the integration controls each tool part's result. Internal API: pinned exactly, and a test per seam fails on an upgrade |
-| `SessionRestart.layer({ maxAttempts: 0 })` for another prompt's claim   | **The fallback.** Only an option of OpenCode's; loses which calls happened from OpenCode's history (the note says it); error text not ours                                                                                |
-| A plugin `context` hook that throws on the restart notice               | A backup, should `overrides` go: public API, but it runs after the synthetic "Continue" and stale tools settled, compaction or a title may call a model first, and a throwing hook's outcome is undocumented              |
-| Fork at the last answered message, then remove the dead session         | Public calls only, but not atomic, a new session id per dead turn, and the event log restarts; until the remove, the next boot resumes the dead session                                                                   |
-| Export, edit, import under the same id (`/experimental/session/import`) | Would let OpenCode take the turn projection (D4's other way), but import is experimental, writes rows past the event log, and drops OpenCode's compaction                                                                 |
-| SQL on OpenCode's tables (the integration owns the database)            | No: the tables are projections of an event log, which would drift, and their layout changed in 2.2 (`session_part`)                                                                                                       |
-| `opencode serve` or ACP, which never run the sweep                      | No: claims stranded, no idle marker, and upstream treats it as a bug ([#56313](https://github.com/anomalyco/opencode/issues/56313))                                                                                       |
-| Wait for an upstream settle                                             | Propose it ([Upstream](#upstream)), don't wait for it                                                                                                                                                                     |
+| Approach                                                                | Verdict                                                                                                                                                                                                                                                                                                            |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **A closer `SessionRestart`**, through `overrides`                      | Designed as the choice; after the spike, an option of `db.ts` only (it buys little over the budget). Exported module paths and typed services, the events OpenCode's own budget publishes; the integration controls each tool part's result. Internal API: pinned exactly, and a test per seam fails on an upgrade |
+| `SessionRestart.layer({ maxAttempts: 0 })` for another prompt's claim   | **Chosen**, after the spike. Only an option of OpenCode's; loses which calls happened from OpenCode's history (the note says it); error text not ours                                                                                                                                                              |
+| A plugin `context` hook that throws on the restart notice               | A backup, should `overrides` go: public API, but it runs after the synthetic "Continue" and stale tools settled, compaction or a title may call a model first, and a throwing hook's outcome is undocumented                                                                                                       |
+| Fork at the last answered message, then remove the dead session         | Public calls only, but not atomic, a new session id per dead turn, and the event log restarts; until the remove, the next boot resumes the dead session                                                                                                                                                            |
+| Export, edit, import under the same id (`/experimental/session/import`) | Would let OpenCode take the turn projection (D4's other way), but import is experimental, writes rows past the event log, and drops OpenCode's compaction                                                                                                                                                          |
+| SQL on OpenCode's tables (the integration owns the database)            | No: the tables are projections of an event log, which would drift, and their layout changed in 2.2 (`session_part`)                                                                                                                                                                                                |
+| `opencode serve` or ACP, which never run the sweep                      | No: claims stranded, no idle marker, and upstream treats it as a bug ([#56313](https://github.com/anomalyco/opencode/issues/56313))                                                                                                                                                                                |
+| Wait for an upstream settle                                             | Propose it ([Upstream](#upstream)), don't wait for it                                                                                                                                                                                                                                                              |
 
 ## Upstream
 

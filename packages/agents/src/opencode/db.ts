@@ -20,7 +20,7 @@
 // (`SessionRestart`): `restart` says what this boot does with them (see
 // {@link Restart}), and `Host.swept` settles once the sweep is done.
 //
-// A spike (docs/opencode.md, step 0): not exported from the package yet.
+// Step 0 of docs/opencode.md (the spike) found its seams; `./opencode/db` exports it.
 import { Context, Deferred, Effect, Exit, Layer, Option, Scope } from 'effect';
 import { Reactivity } from 'effect/reactivity';
 import { SqlClient, Statement } from 'effect/sql';

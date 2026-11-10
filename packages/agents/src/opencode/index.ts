@@ -283,12 +283,8 @@ const inbox = (host: Host): Promise<{ id: string; payload: { text: string } }[]>
  * next invocation.
  */
 async function dropInbox(host: Host) {
-  const exists = await host.call(host.client.session.get({ sessionID: SESSION })).then(
-    () => true,
-    () => false,
-  );
   // No session yet (the key's first prompt): nothing waits.
-  if (!exists) return;
+  if (!(await sessionExists(host))) return;
   for (const item of await inbox(host)) {
     await host.call(host.client.session.inbox.cancel({ sessionID: SESSION, inboxID: item.id as never }));
   }
@@ -310,6 +306,14 @@ async function* newestFirst(host: Host): AsyncGenerator<Message[]> {
 
 /** The messages after message `messageId`, oldest first; undefined if the session does not have it. */
 async function messagesAfter(host: Host, messageId: string): Promise<Message[] | undefined> {
+  // One lookup says a message is not there (every new prompt's): no paging through the session for it.
+  const there = await host
+    .call(host.client.session.message.get({ sessionID: SESSION, messageID: messageId as never }))
+    .then(
+      () => true,
+      () => false,
+    );
+  if (!there) return undefined;
   const after: Message[] = [];
   for await (const page of newestFirst(host)) {
     const at = page.findIndex((m) => m.id === messageId);
@@ -346,7 +350,13 @@ interface Returned {
  * With `own`, a call's result as its tool returned it, before OpenCode
  * stores it: copied too (after its reply), under the id OpenCode's part has.
  */
-async function copyInto(ctx: restate.SessionContext, host: Host, turn: Turn<Item>, own?: Returned): Promise<string[]> {
+async function copyInto(
+  ctx: restate.SessionContext,
+  host: Host,
+  turn: Turn<Item>,
+  own?: Returned,
+  steersOnly = false,
+): Promise<string[]> {
   if (!turn.writable) return [];
   const after = await messagesAfter(host, messageIdOf(turn.id));
   if (!after) return [];
@@ -364,7 +374,7 @@ async function copyInto(ctx: restate.SessionContext, host: Host, turn: Turn<Item
       }
       continue;
     }
-    if (m.type !== 'assistant') continue;
+    if (m.type !== 'assistant' || steersOnly) continue;
     const tools = (m.content ?? []).filter((c) => c.type === 'tool' && c.id !== undefined);
     // A step's message is updated in place as it streams: copied once its stream ended, its calls' input whole.
     const streamed =
@@ -828,6 +838,9 @@ export const withOpenCode = async <T>(
       stopping = true;
       const opened = await booted;
       await opened.call(opened.client.session.interrupt({ sessionID: SESSION }));
+      // A message steered to the turn that OpenCode placed as it was stopped is the turn's: OpenCode's
+      // history has it, so the turn takes it, and it is not answered again as a turn of its own.
+      if (turn) await copyInto(ctx, opened, turn, undefined, true);
     })());
 
   const prompt = (text: string, check?: Check, reminder?: string) =>
