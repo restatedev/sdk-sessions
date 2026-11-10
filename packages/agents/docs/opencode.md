@@ -115,11 +115,45 @@ Steps 1 to 3, where they differ from the design below:
   assistant-shaped one.
 - **Background shell** is the `background` option of OpenCode's `shell`,
   which is refused; the subagent and question tools are removed.
-- **Left** (steps 4 to 6): steering (`delivery: 'steer'`; a steered message
-  is a turn of its own for now), OpenCode's `retry` hook (its own retries
-  apply), permissions through Restate, a change of `model` on an existing
-  session, `packages/e2e`'s crash test and packaging, the README and the
-  examples.
+- **Steering** (step 4), as pi's: `chat` takes steered messages. As a tool
+  call returns (the tool's `execute.after` hook, which OpenCode awaits
+  before it stores the result), each message the turn's inbox lists and the
+  turn has not taken is submitted with `delivery: 'steer'`, id
+  `msg_steer_<id>` and `metadata.steer` its steer id: OpenCode places it at
+  the round's next step, after all the round's results. Once: by its id in
+  this attempt, by the turn's steered messages, and by OpenCode, which takes
+  an id once (a retried attempt's submit of a message it has is a no-op). The
+  copy stores it as a steered item (`copyIn` with `steer`) in its place, and
+  tells the companion it is taken in the same transaction. A turn that is
+  stopping, closed or fenced submits none; a message that comes after the
+  round's last call returned (while the model writes the answer) is not
+  submitted, and is a turn of its own after the turn. Where it differs:
+  - **The call's result is copied as the tool returns it**, in the hook, not
+    after OpenCode stores it: OpenCode goes on to the next step without
+    waiting for a copy that follows its commit (that copy's publish would
+    list the message too late), and waiting for the copy inside the commit
+    deadlocks: OpenCode commits a tool's result under the session's event
+    lock, which the steer's submit needs too. So the end's publish, which
+    lists the messages, comes first, as pi's does, and no publish is added.
+    Only in a turn that takes steered messages (a `chat` turn, not a
+    background agent's); otherwise the copy follows OpenCode's commit, as
+    before. An attempt that dies between the hook and OpenCode's commit
+    leaves the turn with the result the tool returned, and OpenCode with the
+    call cut off ("Tool execution interrupted"), which its resumed turn
+    tells the model, as before.
+  - **A message submitted to OpenCode and not yet placed when the attempt
+    dies** is placed by the resumed turn, after OpenCode's "Continue".
+  - **OpenCode would take a steer at the end of a turn too** (from reading
+    `advanceToStep`, not tested): one in its inbox as the turn's last step
+    ends runs a step more, in the same turn, rather than a turn of its own. The integration never submits one there
+    (only from a tool call's hook), so a late message is a turn of its own,
+    as the contract says. The turn's end is an idle marker or a prompt that
+    is not a steer.
+  - **No round ends the run** in OpenCode as pi's `terminate` does, so there
+    is no such case.
+- **Left** (steps 4 to 6): OpenCode's `retry` hook (its own retries apply),
+  permissions through Restate, a change of `model` on an existing session,
+  `packages/e2e`'s crash test and packaging, the README and the examples.
 
 ## What OpenCode does, in brief
 

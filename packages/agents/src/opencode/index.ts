@@ -39,9 +39,20 @@
 // attempt resumes the turn, in which OpenCode gives the cut-off call an
 // "interrupted" result and the model makes it again under a new id.
 //
+// A message steered to the turn (the agent's `steer` view, ../steering.ts)
+// is submitted to OpenCode as a tool call of a round returns, before the
+// round's next step: with `delivery: 'steer'`, which joins the turn at that
+// step, after the round's results. Once, by its steer id (`msg_steer_<id>`,
+// which OpenCode takes once, also from a retried attempt). In such a turn,
+// the tool's `execute.after` hook, which OpenCode awaits before it stores the
+// result, copies the result as the tool returned it and publishes the call's
+// end, whose answer lists the messages, then submits them: so OpenCode places
+// them at the step that follows, never past the turn's end. The copy stores
+// each as a steered message of the turn, in its place, and tells the
+// companion it is taken.
+//
 // v1 leaves out OpenCode's background work: its subagent and question tools,
-// and background shell jobs. TODO: steering (`delivery: 'steer'`, the spike
-// showed it joins at the next step), OpenCode's `session.retry` hook, and
+// and background shell jobs. TODO: OpenCode's `session.retry` hook, and
 // permissions asked through Restate.
 import * as restate from '@restatedev/sessions';
 import { database, reset } from '@restatedev/sessions/internal';
@@ -58,6 +69,7 @@ import {
   type Configure,
   configured,
   fromTool,
+  inboxOf,
   modelOf,
   providerOf,
   refusal,
@@ -69,6 +81,7 @@ import {
 } from '../common.ts';
 import { answerOnce, invocationOf, type Call, type Items, type Parsed, STEPS, type Turn } from '../conversation.ts';
 import { conversationView } from '../messages.ts';
+import { tookSteers } from '../steering.ts';
 import { type Definition, sessionObject } from '../object.ts';
 import { type Answer, withChecked } from '../output.ts';
 import { isTool, type Tool as AnyTool } from '../tools.ts';
@@ -128,6 +141,9 @@ export const messageIdOf = (id: string) => `msg_${id.replace(/[^\w-]/g, '_')}`;
 /** OpenCode's message id of the message that asks again within the turn of prompt `id`. */
 const againIdOf = (id: string) => `${messageIdOf(id)}_again`;
 
+/** OpenCode's message id of the message `steerId` steered to a turn. */
+const steerIdOf = (steerId: string) => messageIdOf(`steer_${steerId}`);
+
 // The items: OpenCode's messages as the conversation keeps them.
 
 /** A tool call's result, as an item holds it. */
@@ -141,12 +157,12 @@ interface ItemResult {
 /**
  * An item of the conversation: a user's message, an assistant's message (a
  * step of OpenCode's: its text and tool calls), or tool calls' results. One
- * copied from OpenCode has `from`: the id of its OpenCode message, and for
- * a result the id of its part too (`<message>/<part>`), by which it is
- * copied once.
+ * copied from OpenCode (a message steered to the turn, say) has `from`: the
+ * id of its OpenCode message, and for a result the id of its part too
+ * (`<message>/<part>`), by which it is copied once.
  */
 export type Item =
-  | { type: 'user'; text: string }
+  | { type: 'user'; text: string; from?: string }
   | { type: 'assistant'; text: string; calls?: Call[]; from?: string }
   | { type: 'results'; results: ItemResult[]; from?: string };
 
@@ -232,7 +248,14 @@ interface Message {
   content?: Content[];
   error?: { message?: string; type?: string; status?: number };
   time?: { completed?: unknown; streamed?: unknown };
+  metadata?: Record<string, unknown>;
 }
+
+/** The id of the message steered to a turn that `m` is, if it is one: the steer id it was submitted with. */
+const steerOf = (m: Message): string | undefined => {
+  const steer = m.metadata?.steer;
+  return m.type === 'user' && typeof steer === 'string' && m.id === steerIdOf(steer) ? steer : undefined;
+};
 
 /** The text of `content`. */
 const textOf = (content: string | Content[] = []) =>
@@ -284,23 +307,44 @@ const sessionExists = (host: Host) =>
     () => false,
   );
 
+/** A tool call's result as its tool returned it, `from` its OpenCode message and part (`<message>/<part>`). */
+interface Returned {
+  result: ItemResult;
+  from: string;
+}
+
 /**
  * Copy into `turn` what OpenCode has of it that the turn lacks: each step's
  * assistant message once its stream ended (its text, its tool calls, before
- * they run), and each tool call's result once it ended. Each once: by
- * OpenCode's ids. Not the prompt, nor what asks again (the turn has them),
- * nor OpenCode's synthetic messages, idle markers and compactions. In a
- * `ctx.db` transaction of its own. The ids of the calls whose results it
- * copied.
+ * they run), each tool call's result once it ended, and each message
+ * steered to the turn that OpenCode placed at a step (stored as steered, the
+ * companion told it is taken in the transaction). Each once: by OpenCode's
+ * ids, a steered message by its steer id too. Not the prompt, nor what asks
+ * again (the turn has them), nor OpenCode's synthetic messages, idle markers
+ * and compactions. In a `ctx.db` transaction of its own. The ids of the
+ * calls whose results it copied.
+ *
+ * With `own`, a call's result as its tool returned it, before OpenCode
+ * stores it: copied too (after its reply), under the id OpenCode's part has.
  */
-async function copyInto(ctx: restate.SessionContext, host: Host, turn: Turn<Item>): Promise<string[]> {
+async function copyInto(ctx: restate.SessionContext, host: Host, turn: Turn<Item>, own?: Returned): Promise<string[]> {
   if (!turn.writable) return [];
   const after = await messagesAfter(host, messageIdOf(turn.id));
   if (!after) return [];
-  const have = new Set(turn.items.flatMap((e) => ('from' in e.item && e.item.from ? [e.item.from] : [])));
-  const copied: { item: Item; reply?: boolean }[] = [];
+  const have = new Set(turn.items.flatMap((e) => (e.item.from ? [e.item.from] : [])));
+  const held = new Set(turn.steered().map((e) => e.steer));
+  const copied: { item: Item; reply?: boolean; steer?: string }[] = [];
   const resulted: string[] = [];
   for (const m of after) {
+    const steer = steerOf(m);
+    if (steer !== undefined) {
+      if (!have.has(m.id) && !held.has(steer)) {
+        copied.push({ item: { type: 'user', text: m.text ?? '', from: m.id }, steer });
+        have.add(m.id);
+        held.add(steer);
+      }
+      continue;
+    }
     if (m.type !== 'assistant') continue;
     const tools = (m.content ?? []).filter((c) => c.type === 'tool' && c.id !== undefined);
     // A step's message is updated in place as it streams: copied once its stream ended, its calls' input whole.
@@ -332,8 +376,20 @@ async function copyInto(ctx: restate.SessionContext, host: Host, turn: Turn<Item
       have.add(from);
     }
   }
+  if (own && !have.has(own.from) && have.has(own.from.split('/')[0]!)) {
+    copied.push({ item: { type: 'results', results: [own.result], from: own.from } });
+    resulted.push(own.result.id);
+  }
   if (copied.length === 0) return [];
-  const done = await ctx.db.transaction((tx) => turn.copyIn(tx, copied));
+  const done = await ctx.db.transaction(async (tx) => {
+    if (!(await turn.copyIn(tx, copied))) return false;
+    tookSteers(
+      ctx,
+      tx,
+      copied.flatMap(({ steer }) => (steer === undefined ? [] : [steer])),
+    );
+    return true;
+  });
   return done ? resulted : [];
 }
 
@@ -350,12 +406,16 @@ async function outcome(host: Host, messageId: string): Promise<Outcome> {
   return after ? turnOutcome(after) : { state: 'absent' };
 }
 
-/** How the turn of the messages `after` a prompt ended: at an idle marker, or where a next prompt starts. */
+/**
+ * How the turn of the messages `after` a prompt ended: at an idle marker, or
+ * where a next prompt starts (a message steered to the turn is not one).
+ */
 function turnOutcome(after: Message[]): Outcome {
   let last: Message | undefined;
   for (const m of after) {
     if (m.type === 'idle') return ended(last, m);
-    if (m.type === 'user' && last !== undefined) return ended(last, { id: '', type: 'idle', outcome: 'succeeded' });
+    if (m.type === 'user' && last !== undefined && steerOf(m) === undefined)
+      return ended(last, { id: '', type: 'idle', outcome: 'succeeded' });
     if (m.type === 'assistant') last = m;
   }
   return { state: 'running' };
@@ -616,10 +676,11 @@ export const withOpenCode = async <T>(
   const returned = new Set<string>();
   // The copies, one after another.
   let copying: Promise<unknown> = Promise.resolve();
-  const copy = () => {
+  /** Copy what OpenCode has of the turn, and `own`, a call's result as its tool returned it (see {@link copyInto}). */
+  const copy = (own?: Returned) => {
     const next = copying.then(async () => {
       if (!turn || stopping || fence.closed) return undefined;
-      const resulted = await copyInto(ctx, await host(), turn);
+      const resulted = await copyInto(ctx, await host(), turn, own);
       if (resulted.some((id) => returned.delete(id))) await toolCallEnded(ctx);
       return undefined;
     });
@@ -630,7 +691,46 @@ export const withOpenCode = async <T>(
     copy().catch((error: unknown) => void fail(error));
   };
 
-  /** Publish a tool call's start, once the reply that makes it is copied. */
+  // The messages steered to the turn that this attempt submitted to OpenCode, by steer id.
+  const given = new Set<string>();
+  /**
+   * Submit to OpenCode each message steered to the turn that the inbox lists
+   * and the turn has not taken, once (keyed by its id: OpenCode takes an id
+   * once, also from a retried attempt), with `delivery: 'steer'`: OpenCode
+   * places it at the turn's next step, after the round's results. Only as a
+   * tool call of a round returns, so a step follows; none once the turn is
+   * stopped, or closed.
+   */
+  const steer = async () => {
+    const waiting = inboxOf(ctx);
+    if (!waiting || !turn) return;
+    if (stopping || cancelled !== undefined || fence.closed || stopSignalOf(ctx)?.aborted || !turn.writable) return;
+    const held = new Set(turn.steered().map((e) => e.steer));
+    const fresh = waiting.messages.filter((m) => !given.has(m.id) && !held.has(m.id));
+    if (fresh.length === 0) return;
+    const opened = await host();
+    for (const { id: steerId, text } of fresh) {
+      given.add(steerId);
+      await opened.call(
+        opened.client.session.prompt({
+          sessionID: SESSION,
+          id: steerIdOf(steerId) as never,
+          text,
+          metadata: { steer: steerId },
+          delivery: 'steer',
+        }),
+      );
+    }
+  };
+
+  /**
+   * Publish a tool call's start, once the reply that makes it is copied, and
+   * its end, once its result is. In a turn that takes steered messages, the
+   * result is copied as the tool returns it (OpenCode stores it after this
+   * hook, and goes on to the round's next step without waiting for a copy):
+   * the end's publish lists the messages steered to the turn, which are
+   * submitted before OpenCode stores the result ({@link steer}).
+   */
   const followPlugin: Plugin.Plugin = {
     id: 'restate-agents.follow',
     async setup(plugin) {
@@ -639,8 +739,22 @@ export const withOpenCode = async <T>(
           .then(() => toolCallStarted(ctx))
           .catch(fail);
       });
-      const after = await plugin.tool.hook('execute.after', (event) => {
+      const after = await plugin.tool.hook('execute.after', async (event) => {
         returned.add(event.id);
+        if (!inboxOf(ctx)) return;
+        const output =
+          event.status === 'error'
+            ? event.error.message
+            : outputOf({ type: 'tool', state: { status: 'completed', ...event.result } as Content['state'] });
+        const result: ItemResult = {
+          id: event.id,
+          name: event.tool,
+          output,
+          ...(event.status === 'error' ? { error: true } : {}),
+        };
+        await copy({ result, from: `${event.messageID}/${event.id}` })
+          .then(steer)
+          .catch(fail);
       });
       return async () => {
         await before.dispose();
@@ -797,7 +911,7 @@ export const prompt = <O extends z.ZodObject | undefined = undefined>(
  */
 export const chat = <O extends z.ZodObject | undefined = undefined>(options: Configure<Options<O>> = {}) => {
   if (typeof options === 'object' && typeof options.model !== 'object') checkModelName('opencode', options.model);
-  return chatHandler(async (ctx, message) => prompt(ctx, message, await configured(options, ctx)));
+  return chatHandler(async (ctx, message) => prompt(ctx, message, await configured(options, ctx)), { steers: true });
 };
 
 /**

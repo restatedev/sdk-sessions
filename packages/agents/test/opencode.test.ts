@@ -26,24 +26,40 @@ import {
   conversation,
   crashedAnywhere,
   followedWhileWorking,
+  followingOf,
   handlerOf,
   sqlAttempt,
+  steeredAtAStep,
   type PromptHandler,
   SAID_IN_TURNS as SAID,
 } from './support.ts';
 
 const NODE_24 = Number(process.versions.node.split('.')[0]) >= 24;
 
-/** How often OpenCode was booted. */
-const boots = vi.hoisted(() => ({ n: 0 }));
+/** How often OpenCode was booted; `prompted`, if a test sets it, is told of each prompt OpenCode took, as it returns. */
+const boots = vi.hoisted(() => ({ n: 0, prompted: undefined as ((input: { id?: unknown }) => void) | undefined }));
 
 // Every boot of OpenCode has the teller's provider.
 vi.mock('@restatedev/agents/opencode/db', async (original) => {
   const db = await original<typeof Db>();
   const { scriptedPlugin } = await import('./fakes/opencode.ts');
-  const openOpenCode: typeof db.openOpenCode = (database, fence, options) => {
+  const { Effect } = await import('effect');
+  const openOpenCode: typeof db.openOpenCode = async (database, fence, options) => {
     boots.n++;
-    return db.openOpenCode(database, fence, { ...options, plugins: [scriptedPlugin, ...(options.plugins ?? [])] });
+    const host = await db.openOpenCode(database, fence, {
+      ...options,
+      plugins: [scriptedPlugin, ...(options.plugins ?? [])],
+    });
+    // `session.prompt`, which tells `boots.prompted` once OpenCode took the prompt.
+    const prompt = (input: Parameters<typeof host.client.session.prompt>[0]) =>
+      host.client.session.prompt(input).pipe(Effect.tap(() => Effect.sync(() => boots.prompted?.(input))));
+    const session = new Proxy(host.client.session, {
+      get: (target, key, receiver) => (key === 'prompt' ? prompt : Reflect.get(target, key, receiver)),
+    });
+    const client = new Proxy(host.client, {
+      get: (target, key, receiver) => (key === 'session' ? session : Reflect.get(target, key, receiver)),
+    });
+    return { ...host, client };
   };
   return { ...db, openOpenCode };
 });
@@ -64,6 +80,7 @@ beforeEach(() => {
   if (!NODE_24) return;
   fake.script.requests.length = 0;
   fake.script.reply = fake.teller;
+  boots.prompted = undefined;
 });
 
 /** The texts of the user's messages of the model's latest request, in order. */
@@ -312,4 +329,226 @@ describe.skipIf(!NODE_24)('the OpenCode agent', () => {
       }),
     ).toEqual([]);
   }, 600_000);
+});
+
+/** The user's messages and tool results of each of the model's requests after its first, after the prompt. */
+const steps = () =>
+  fake.script.requests.slice(1).map((r) =>
+    r.prompt
+      .filter((m) => m.role === 'user' || m.role === 'tool')
+      .slice(1)
+      .map((m) => fake.textOf(m)),
+  );
+
+/** The texts of the conversation's messages, as the `messages` view of `map`'s key `key` gives them. */
+const textsOf = async (map: Map<string, Uint8Array>, key: string) => {
+  const read = sqlAttempt({ map, key, id: 'read', shared: true });
+  const { messages } = await read.end(() => opencode.messages()(read.view, {}));
+  return messages.flatMap((m) => m.parts.flatMap((p) => (p.type === 'text' ? [p.text] : [])));
+};
+
+describe.skipIf(!NODE_24)('the OpenCode agent, steered', () => {
+  /** The steered message, placed by OpenCode at the step after the transfer's round, after its result: the model audits. */
+  const SAID_STEERED = [
+    ['user', 'Please move 5 from 1 to 2'],
+    ['assistant', 'On it. + transfer'],
+    ['user', 'audit the books'],
+    ['assistant', 'audit'],
+    ['assistant', 'moved 5 from account 1 to account 2\nthe books are fine'],
+  ];
+  const STEERED = 'audit the books';
+  const INTERRUPTED = /Tool execution interrupted/;
+
+  /** How many tool calls the model made: each has an id of its own. */
+  let calls = 0;
+  const call = (name: string, input: Record<string, unknown>) => ({ id: `call_${++calls}`, name, input });
+  /**
+   * The model of `steeredAtAStep`: it transfers as asked, audits when told
+   * to (again, after a restart cut the audit off), and answers with its
+   * tools' results.
+   */
+  const steeredModel = ({ prompt: asked }: Fake.Request): Fake.Reply => {
+    const last = asked.at(-1)!;
+    const text = fake.textOf(last);
+    if (last.role === 'tool') {
+      const results = asked.flatMap((m) => (m.role === 'tool' ? [fake.textOf(m)] : []));
+      return { text: results.filter((r) => !INTERRUPTED.test(r)).join('\n') };
+    }
+    if (text === STEERED || fake.CONTINUE.test(text)) return { call: call('audit', {}) };
+    if (/move 5 from 1 to 2/.test(text))
+      return { text: 'On it.', call: call('transfer', { from: 1, to: 2, amount: 5 }) };
+    throw new Error(`unexpected request: ${text}`);
+  };
+
+  /** Whether any request to the model had the steered message. */
+  const asked = () => fake.script.requests.some((r) => r.prompt.some((m) => fake.textOf(m) === STEERED));
+
+  beforeEach(() => {
+    if (!NODE_24) return;
+    fake.script.reply = steeredModel;
+  });
+
+  it('submits a message steered while a tool runs as the round is done: the next request has it, after the results', async () => {
+    const { answer, said, audits, taken } = await steeredAtAStep(
+      (tools) => opencode.chat({ tools }),
+      opencode.messages(),
+    );
+    // Stored once, in its place: after the transfer's round.
+    expect(said).toEqual(SAID_STEERED);
+    expect(answer).toBe('moved 5 from account 1 to account 2\nthe books are fine');
+    expect(audits).toBe(1);
+    expect(taken).toEqual(['steer-1']);
+    // The model's request after the transfer's result has the message, after it: the turn's next step.
+    expect(steps()).toEqual([
+      ['moved 5 from account 1 to account 2', STEERED],
+      ['moved 5 from account 1 to account 2', STEERED, 'the books are fine'],
+    ]);
+  }, 60_000);
+
+  it('retries a turn that failed after it took the message with the message, once', async () => {
+    const { answer, failed, said, audits, taken } = await steeredAtAStep(
+      (tools) => opencode.chat({ tools }),
+      opencode.messages(),
+      { failAudit: true },
+    );
+    expect(failed).toBeInstanceOf(Error);
+    // OpenCode resumes the turn: the cut-off audit keeps OpenCode's result, and the model audits again.
+    expect(said).toEqual([...SAID_STEERED.slice(0, 4), ['assistant', 'audit'], SAID_STEERED[4]]);
+    expect(answer).toBe('moved 5 from account 1 to account 2\nthe books are fine');
+    expect(audits).toBe(2);
+    expect(taken).toEqual(['steer-1']);
+    // OpenCode has it once too: each request since has it once.
+    for (const step of steps()) expect(step.filter((s) => s === STEERED)).toHaveLength(1);
+  }, 60_000);
+
+  /**
+   * `steeredAtAStep`'s turn, whose attempt dies (killed: nothing more is
+   * stored) once OpenCode took the message (`submitted`: before OpenCode
+   * stored the transfer's result, or placed the message), or once the model
+   * is asked with it (`asked`: OpenCode placed it); then the next attempt.
+   * Its answer, the message's `taken`s, whether the turn had stored it when
+   * the attempt died, and the conversation's texts and steered rows then.
+   */
+  async function diedAfterSteer(at: 'submitted' | 'asked') {
+    const key = `died-${at}`;
+    const map = new Map<string, Uint8Array>();
+    const following = followingOf(map);
+    const transfer = tool({
+      name: 'transfer',
+      description: 'Move money.',
+      input: z.object({ from: z.number(), to: z.number(), amount: z.number() }),
+      run: () => {
+        if (!following.taken.flat().includes('steer-1')) following.steering = [{ id: 'steer-1', text: STEERED }];
+        return 'moved 5 from account 1 to account 2';
+      },
+    });
+    const audit = tool({ name: 'audit', description: 'Check the books.', input: z.object({}), run: () => 'fine' });
+    const chat = handlerOf(opencode.chat({ tools: [transfer, audit] }));
+    const fence = { closed: false };
+    const first = sqlAttempt({ map, fence, key, id: 'inv1' });
+    const died = Promise.withResolvers<void>();
+    let storedThen: boolean | undefined;
+    const die = () => {
+      if (fence.closed) return;
+      storedThen = following.taken.length > 0;
+      fence.closed = true;
+      first.abort();
+      died.resolve();
+    };
+    if (at === 'submitted') boots.prompted = (input) => String(input.id).startsWith('msg_steer_') && die();
+    fake.script.reply = (request) => {
+      if (at === 'asked' && fake.textOf(request.prompt.at(-1)!) === STEERED) die();
+      return steeredModel(request);
+    };
+    const answering = first.end(() => chat(first.ctx, 'Please move 5 from 1 to 2')).catch(() => {});
+    await died.promise;
+    await answering;
+    boots.prompted = undefined;
+    const second = sqlAttempt({ map, key, id: 'inv1' });
+    const answer = await second.end(() => chat(second.ctx, 'Please move 5 from 1 to 2'));
+    const read = sqlAttempt({ map, key, id: 'rows', shared: true });
+    const rows = await read.end(() => read.view.db.values('SELECT turn, id FROM restate_agent_steers'));
+    // Each `taken` once: the outbox sends one again after a crash, under the same idempotency key.
+    const taken = [...new Set(following.taken.flat())];
+    return { answer, taken, storedThen, texts: await textsOf(map, key), rows };
+  }
+
+  it('stores the message once when the attempt dies once OpenCode took it, before OpenCode placed it', async () => {
+    const { answer, taken, storedThen, texts, rows } = await diedAfterSteer('submitted');
+    expect(storedThen).toBe(false);
+    // The resumed turn places it, after OpenCode's "Continue": the model audits. OpenCode never stored the
+    // transfer's result, which it then gives as cut off (the turn keeps it as the tool returned it).
+    expect(steps()[0]!.slice(-2)).toEqual([expect.stringMatching(fake.CONTINUE), STEERED]);
+    expect(answer).toBe('fine');
+    expect(taken).toEqual(['steer-1']);
+    // The view has it once, after the transfer's round; the store holds it once, as the turn's.
+    expect(texts.filter((t) => t === STEERED)).toHaveLength(1);
+    expect(texts.indexOf(STEERED)).toBe(texts.indexOf('On it.') + 1);
+    expect(rows).toEqual([[0, 'steer-1']]);
+    for (const step of steps()) expect(step.filter((s) => s === STEERED).length).toBeLessThanOrEqual(1);
+  }, 60_000);
+
+  it('stores the message once when the attempt dies once the model is asked with it', async () => {
+    const { answer, taken, texts, rows } = await diedAfterSteer('asked');
+    expect(answer).toBe('moved 5 from account 1 to account 2\nfine');
+    expect(taken).toEqual(['steer-1']);
+    expect(texts.filter((t) => t === STEERED)).toHaveLength(1);
+    expect(texts.indexOf(STEERED)).toBe(texts.indexOf('On it.') + 1);
+    expect(rows).toEqual([[0, 'steer-1']]);
+    for (const step of steps()) expect(step.filter((s) => s === STEERED).length).toBeLessThanOrEqual(1);
+  }, 60_000);
+
+  it('takes no message steered as the model writes the final answer: a turn of its own answers it', async () => {
+    const map = new Map<string, Uint8Array>();
+    const following = followingOf(map);
+    fake.script.reply = (request) => {
+      // The final answer: no step follows it.
+      if (request.prompt.at(-1)!.role === 'tool') following.steering = [{ id: 'steer-1', text: STEERED }];
+      return steeredModel(request);
+    };
+    const transfer = tool({
+      name: 'transfer',
+      description: 'Move money.',
+      input: z.object({ from: z.number(), to: z.number(), amount: z.number() }),
+      run: () => 'moved 5 from account 1 to account 2',
+    });
+    const sql = sqlAttempt({ map, key: 'late', id: 'inv1' });
+    const chat = handlerOf(opencode.chat({ tools: [transfer] }));
+    expect(await sql.end(() => chat(sql.ctx, 'Please move 5 from 1 to 2'))).toBe('moved 5 from account 1 to account 2');
+    // Not taken: the message waits for the turn's end, then its own turn (`steered`) answers it.
+    expect(following.taken).toEqual([]);
+    expect(asked()).toBe(false);
+    expect(await textsOf(map, 'late')).not.toContain(STEERED);
+  }, 60_000);
+
+  it('takes no message into a turn that is stopped', async () => {
+    const map = new Map<string, Uint8Array>();
+    const following = followingOf(map);
+    const first = sqlAttempt({ map, key: 'stopped', id: 'inv1' });
+    const transfer = tool({
+      name: 'transfer',
+      description: 'Move money.',
+      input: z.object({ from: z.number(), to: z.number(), amount: z.number() }),
+      // The message comes as the turn is stopped; the call returns anyway.
+      run: async () => {
+        following.steering = [{ id: 'steer-1', text: STEERED }];
+        first.cancel();
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        return 'moved 5 from account 1 to account 2';
+      },
+    });
+    const chat = handlerOf(opencode.chat({ tools: [transfer] }));
+    const failed = await first
+      .end(() => chat(first.ctx, 'Please move 5 from 1 to 2'))
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+    expect(failed).toBeInstanceOf(restate.CancelledError);
+    expect(following.taken).toEqual([]);
+    expect(asked()).toBe(false);
+    const texts = await textsOf(map, 'stopped');
+    expect(texts).not.toContain(STEERED);
+    expect(texts.at(-1)).toBe(CANCELLED);
+  }, 60_000);
 });
