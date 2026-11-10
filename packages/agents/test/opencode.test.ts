@@ -7,9 +7,13 @@
 // older Node the suite is skipped, and nothing of OpenCode is imported.
 // `pnpm --filter @restatedev/agents exec vitest run test/opencode.test.ts`.
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { randomUUID } from 'node:crypto';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { APICallError } from '@ai-sdk/provider';
 import * as restate from '@restatedev/sessions';
-import { invoke } from '@restatedev/sessions/internal';
+import { database as databaseOf, invoke } from '@restatedev/sessions/internal';
 import { fakeContext } from '@restatedev/sessions/test/support';
 import { z } from 'zod';
 import { tool } from '@restatedev/agents';
@@ -739,6 +743,217 @@ describe.skipIf(!NODE_24)("the OpenCode agent through a provider's outage", () =
       [{ type: 'text', text: CANCELLED }],
       [{ type: 'text', text: 'Hello' }],
       [{ type: 'text', text: 'Ask me to "move 5 from 1 to 2", or to "audit" the books.' }],
+    ]);
+  }, 60_000);
+});
+
+/** A workspace of its own, with a `.env`, which OpenCode's build agent asks about before it reads it. */
+async function workspaceOf() {
+  const dir = await mkdtemp(join(tmpdir(), 'opencode-permission-'));
+  await writeFile(join(dir, '.env'), 'SECRET=42\n');
+  return dir;
+}
+
+/** The model of the permission asks: it reads `.env`, then answers with what the read returned. */
+function reader({ prompt: asked }: Fake.Request): Fake.Reply {
+  const last = asked.at(-1)!;
+  if (last.role === 'tool') return { text: `Read: ${fake.textOf(last)}` };
+  return { call: { id: `call_${randomUUID()}`, name: 'read', input: { path: '.env' } } };
+}
+
+/** A permission's denial with `message`, as the model gets it: OpenCode's tool error. */
+const refusalOf = (message: string) => JSON.stringify({ error: { type: 'permission.rejected', message }, content: [] });
+
+/** What the shell runs: it appends a line to `ran.txt` of the workspace, once each time it runs. */
+const COMMAND = 'echo ran >> ran.txt';
+
+/** How often {@link COMMAND} ran in `workspace`. */
+const runs = async (workspace: string) =>
+  (await readFile(join(workspace, 'ran.txt'), 'utf8').catch(() => '')).split('\n').filter(Boolean).length;
+
+/** OpenCode's rules, as a plugin's: every shell command asks. */
+const askShell: NonNullable<OpenCode.Options['plugins']>[number] = {
+  id: 'test.ask-shell',
+  async setup(ctx) {
+    const transform = await ctx.agent.transform((editor) => {
+      for (const agent of editor.list()) {
+        editor.update(agent.id, (a) => a.permissions.push({ action: 'shell', resource: '*', effect: 'ask' }));
+      }
+    });
+    return () => transform.dispose();
+  },
+};
+
+/**
+ * The model: it runs the command, again under a new id when a restart cut
+ * it off, then answers with its result.
+ */
+const runner = ({ prompt: asked }: Fake.Request): Fake.Reply => {
+  const last = asked.at(-1)!;
+  if (last.role === 'tool' && !/Tool execution interrupted/.test(fake.textOf(last)))
+    return { text: `Done: ${fake.textOf(last)}` };
+  return { call: { id: `call_${randomUUID()}`, name: 'shell', input: { command: COMMAND } } };
+};
+
+/** The wait of invocation `inv1` for the approval of the command's tool call `callId`. */
+const approvalOf = (callId: string) => ({
+  id: `inv1:${callId}`,
+  name: opencode.APPROVAL,
+  input: { tool: 'shell', args: { command: COMMAND }, action: 'shell', resources: expect.any(Array) },
+});
+/** The agent, whose asks wait for a person's approval, in `workspace`. */
+const approving = (workspace: string) => opencode.chat({ workspace, approval: true, plugins: [askShell] });
+
+describe.skipIf(!NODE_24)("the OpenCode agent's permission asks", () => {
+  it('OpenCode alone asks in memory, and waits for a reply that nothing gives: the turn never ends', async () => {
+    // OpenCode's build agent allows every action but `read` of `*.env`, which it asks about.
+    const db = await import('@restatedev/agents/opencode/db');
+    fake.script.reply = reader;
+    const workspace = await workspaceOf();
+    const sql = sqlAttempt({ map: new Map(), key: 'alone', id: 'inv1' });
+    const { asked, ended } = await sql.end(async () => {
+      const host = await db.openOpenCode(
+        databaseOf(sql.ctx.db, 'restate-agents.opencode'),
+        { closed: false },
+        { config: { default_agent: 'build' }, local: true },
+      );
+      try {
+        const sessionID = 'ses_alone' as never;
+        await host.call(
+          host.client.session.create({
+            id: sessionID,
+            model: fake.MODEL as never,
+            agent: 'build' as never,
+            location: { directory: workspace as never },
+          }),
+        );
+        await host.call(host.client.session.prompt({ sessionID, text: 'Read .env', delivery: 'queue' }));
+        let pending: unknown[] = [];
+        for (let n = 0; n < 400 && pending.length === 0; n++) {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+          pending = (await host.call(host.client.permission.list({ sessionID }))) as unknown[];
+        }
+        // Nothing replies: the turn still runs a while later.
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+        const turns: Record<string, unknown> = await host.call(host.client.session.active());
+        return { asked: pending, ended: turns[sessionID as string] === undefined };
+      } finally {
+        await host.close();
+      }
+    });
+    expect(asked).toMatchObject([{ action: 'read', resources: ['.env'] }]);
+    expect(ended).toBe(false);
+  }, 60_000);
+
+  it('denies an ask by default, as OpenCode denies one nobody is present for: the model is told, the turn ends', async () => {
+    fake.script.reply = reader;
+    const c = conversation(opencode.chat({ workspace: await workspaceOf() }), 'denied');
+    const denial = 'Permission read needs approval, and nobody is present to give it';
+    expect(await c.attempt('inv1', 'Read .env')).toBe(`Read: ${refusalOf(denial)}`);
+    expect(c.signals.waits).toEqual([]);
+    const { messages } = await c.read(opencode.messages(), {});
+    expect(messages[1]!.parts).toEqual([
+      { type: 'tool', id: expect.any(String), name: 'read', input: { path: '.env' }, output: denial, error: true },
+    ]);
+  }, 60_000);
+
+  it('runs a tool call OpenCode asks about once a person approved it, and not before', async () => {
+    fake.script.reply = runner;
+    const workspace = await workspaceOf();
+    const c = conversation(approving(workspace), 'approved');
+    // How often the command had run as each wait was made.
+    const before: number[] = [];
+    c.signals.answer = async () => {
+      before.push(await runs(workspace));
+      return 'approved';
+    };
+    expect(await c.attempt('inv1', 'Run it')).toBe('Done: (no output)');
+    expect(before).toEqual([0]);
+    expect(await runs(workspace)).toBe(1);
+    const { messages } = await c.read(opencode.messages(), {});
+    const call = messages[1]!.parts[0] as { id: string };
+    expect(call).toMatchObject({ type: 'tool', name: 'shell', input: { command: COMMAND } });
+    // The wait is the call's, and shows its tool and arguments, and the permission asked.
+    expect(c.signals.waits).toEqual([approvalOf(call.id)]);
+  }, 60_000);
+
+  it('never runs a tool call a person denied, and the model is told why', async () => {
+    fake.script.reply = runner;
+    const workspace = await workspaceOf();
+    const c = conversation(approving(workspace), 'refused');
+    c.signals.answer = () => 'no, not today';
+    const denied = 'The user denied tool "shell": no, not today';
+    expect(await c.attempt('inv1', 'Run it')).toBe(`Done: ${refusalOf(denied)}`);
+    expect(await runs(workspace)).toBe(0);
+    const { messages } = await c.read(opencode.messages(), {});
+    expect(messages[1]!.parts).toEqual([
+      { type: 'tool', id: expect.any(String), name: 'shell', input: { command: COMMAND }, output: denied, error: true },
+    ]);
+  }, 60_000);
+
+  it('waits for an approval through a crash: the person is asked once, and the tool runs once, after it', async () => {
+    fake.script.reply = runner;
+    const workspace = await workspaceOf();
+    const c = conversation(approving(workspace), 'approval-crash');
+    const before: number[] = [];
+    const asked = Promise.withResolvers<void>();
+    // No decision yet: the attempt crashes (or is suspended) while it waits.
+    c.signals.answer = async () => {
+      before.push(await runs(workspace));
+      asked.resolve();
+      return new Promise(() => {});
+    };
+    c.attempt('inv1', 'Run it').catch(() => {});
+    await asked.promise;
+    c.signals.answer = async () => {
+      before.push(await runs(workspace));
+      return 'approved';
+    };
+    // The resumed turn cuts the call off, and the model makes it again under a new id: it joins the first's wait.
+    expect(await c.attempt('inv1', 'Run it')).toBe('Done: (no output)');
+    expect(continued()).toBe(true);
+    const [wait, again] = c.signals.waits;
+    expect(c.signals.waits).toHaveLength(2);
+    expect(again).toEqual(wait);
+    expect(before).toEqual([0, 0]);
+    expect(await runs(workspace)).toBe(1);
+  }, 60_000);
+
+  it('ends a turn stopped while it waits for an approval cancelled, and never runs the tool', async () => {
+    fake.script.reply = runner;
+    const workspace = await workspaceOf();
+    const map = new Map<string, Uint8Array>();
+    const chat = handlerOf(opencode.chat({ workspace, approval: true, plugins: [askShell] }));
+    const asked = Promise.withResolvers<void>();
+    const sql = sqlAttempt({
+      map,
+      key: 'approval-cancel',
+      id: 'inv1',
+      signal: () => {
+        asked.resolve();
+        return new Promise(() => {});
+      },
+    });
+    const answering = sql.end(() => chat(sql.ctx, 'Run it'));
+    await asked.promise;
+    sql.cancel();
+    await expect(answering).rejects.toBeInstanceOf(restate.CancelledError);
+    expect(await runs(workspace)).toBe(0);
+    const read = sqlAttempt({ map, key: 'approval-cancel', id: 'read', shared: true });
+    const { messages } = await read.end(() => opencode.messages()(read.view, {}));
+    expect(messages.map((m) => m.parts)).toEqual([
+      [{ type: 'text', text: 'Run it' }],
+      [
+        {
+          type: 'tool',
+          id: expect.any(String),
+          name: 'shell',
+          input: { command: COMMAND },
+          output: CANCELLED,
+          error: true,
+        },
+      ],
+      [{ type: 'text', text: CANCELLED }],
     ]);
   }, 60_000);
 });

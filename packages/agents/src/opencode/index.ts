@@ -58,11 +58,19 @@
 // companion it is taken.
 //
 // v1 leaves out OpenCode's background work: its subagent and question tools,
-// and background shell jobs. TODO: permissions asked through Restate.
+// and background shell jobs.
+//
+// With a workspace, an ask of OpenCode's permission rules (a read of `.env`,
+// by default) is denied, as OpenCode denies one nobody is present for; with
+// `approval`, its tool call waits for a person's approval, through Restate
+// (`permissionPlugin`).
+//
+// TODO: a change of `model` on an existing session.
 import * as restate from '@restatedev/sessions';
 import { database, reset } from '@restatedev/sessions/internal';
 import { mkdir } from 'node:fs/promises';
 import type { Plugin } from '@opencode/plugin';
+import { toSessionError } from '@opencode/core/session/to-session-error';
 import type { StandardSchemaV1 } from '@standard-schema/spec';
 import type { z } from 'zod';
 import {
@@ -89,7 +97,7 @@ import { conversationView } from '../messages.ts';
 import { tookSteers } from '../steering.ts';
 import { type Definition, sessionObject } from '../object.ts';
 import { type Answer, withChecked } from '../output.ts';
-import { isTool, type Tool as AnyTool } from '../tools.ts';
+import { isTool, type Tool as AnyTool, waitFor } from '../tools.ts';
 import { type Fence, type Host, openOpenCode, type Restart } from './db.ts';
 
 /** An OpenCode model reference. */
@@ -609,6 +617,18 @@ export interface Options<O extends z.ZodObject | undefined = z.ZodObject | undef
    */
   retry?: Partial<RetryPolicy>;
   /**
+   * With a workspace, OpenCode's own tools ask before what its permission
+   * rules say to ask about (by default, a read of a `.env` file). Without
+   * `approval`, nobody answers such an ask: it is denied, as OpenCode denies
+   * one nobody is present for, and the model gets the denial as the tool's
+   * error. With `approval`, the tool call waits for the signal
+   * {@link APPROVAL} to the agent, which `pending` shows with the call's tool
+   * and arguments and the permission asked (`action`, `resources`); `true`,
+   * or a text such as "approved" or "yes", allows it, anything else denies
+   * it (a text, or `{ reason }`, is the denial's reason, for the model).
+   */
+  approval?: boolean;
+  /**
    * The answer as data: a zod object, whose JSON the agent replies with
    * (checked), and `chat` and `prompt` answer with (see output.ts).
    */
@@ -728,6 +748,100 @@ function toolsPlugin(
   };
 }
 
+/** The signal that an OpenCode tool call waits for, to the agent, when OpenCode asks for a permission (`approval`). */
+export const APPROVAL = 'approval';
+
+/** The texts that approve an ask, whatever their case. */
+const APPROVED: ReadonlySet<string> = new Set(['approved', 'approve', 'yes', 'ok', 'allow', 'allowed']);
+
+/**
+ * What the value of an {@link APPROVAL} signal decides: `true`,
+ * `{ "approved": true }`, or a text such as "approved" or "yes" allows;
+ * anything else denies, with the reason it gives, if any (a text, or
+ * `{ "reason": "..." }`).
+ */
+function decided(value: unknown): { allowed: true } | { allowed: false; reason?: string } {
+  if (value === true) return { allowed: true };
+  if (typeof value === 'string') {
+    const text = value.trim();
+    return APPROVED.has(text.toLowerCase()) ? { allowed: true } : { allowed: false, ...(text ? { reason: text } : {}) };
+  }
+  if (typeof value === 'object' && value !== null) {
+    const { approved, reason } = value as { approved?: unknown; reason?: unknown };
+    if (approved === true) return { allowed: true };
+    return { allowed: false, ...(typeof reason === 'string' && reason.trim() ? { reason: reason.trim() } : {}) };
+  }
+  return { allowed: false };
+}
+
+/**
+ * An OpenCode plugin that settles each permission OpenCode would ask for
+ * (its `permission.evaluate` hook, which OpenCode awaits before it asks):
+ * what OpenCode's rules allow or deny stays so. An ask would wait in
+ * OpenCode's memory for a reply nothing gives, and its turn would never end.
+ *
+ * Without `approval`, it is denied, as OpenCode denies an ask nobody is
+ * present for (its `Unattended` rules): the model gets the denial as the
+ * tool's error. With `approval`, an ask of a tool call waits for the signal
+ * {@link APPROVAL} (`waitFor`), which `pending` shows with the call's tool
+ * and arguments, and the permission asked: its answer allows or denies.
+ *
+ * OpenCode stores the call (running) before it runs the tool, which asks;
+ * but a crash, or a suspension, while it waits has the resumed turn give the
+ * call OpenCode's "interrupted" result, and the model makes it again under a
+ * new id: made with the same tool and arguments, it joins the wait
+ * (`rejoin`), so the person is asked once. The wait is an approval
+ * (`approval`): a stopped turn does not report its call as done because it
+ * was approved. An error of the wait fails the attempt (`fail`), and the ask
+ * never settles.
+ *
+ * The wait is the tool call's: a call that asks more than once (another
+ * directory, then the file) has each ask answered by the first's answer.
+ * OpenCode's hook does not tell an ask from a probe (`permission.allows`,
+ * which an edit's miss hint makes), so a probe that would ask waits too.
+ */
+function permissionPlugin(
+  ctx: restate.SessionContext,
+  approval: boolean,
+  fail: (error: unknown) => Promise<never>,
+): Plugin.Plugin {
+  return {
+    id: 'restate-agents.permission',
+    async setup(plugin) {
+      // Each tool call's tool and arguments, by call id: what `pending` shows of an ask.
+      const calls = new Map<string, { tool: string; args: unknown }>();
+      const before = await plugin.tool.hook('execute.before', (event) => {
+        calls.set(event.id, { tool: event.tool, args: event.input });
+      });
+      const evaluate = await plugin.permission.hook('evaluate', async (event) => {
+        if (event.effect !== 'ask') return;
+        const callId = event.source?.type === 'tool' ? event.source.id : undefined;
+        if (!approval || callId === undefined) {
+          event.effect = 'deny';
+          event.message = `Permission ${event.action} needs approval, and nobody is present to give it`;
+          return;
+        }
+        const call = calls.get(callId);
+        const asked = { ...call, action: event.action, resources: [...event.resources] };
+        // An error of the wait fails the attempt: the ask never settles.
+        const value = await waitFor(ctx, callId, APPROVAL, asked, { approval: true, rejoin: true }).catch(fail);
+        const decision = decided(value);
+        if (decision.allowed) {
+          event.effect = 'allow';
+          return;
+        }
+        event.effect = 'deny';
+        const which = call ? `tool "${call.tool}"` : `permission ${event.action}`;
+        event.message = `The user denied ${which}${decision.reason ? `: ${decision.reason}` : ''}`;
+      });
+      return async () => {
+        await before.dispose();
+        await evaluate.dispose();
+      };
+    },
+  };
+}
+
 /**
  * Run `work(opencode)` with OpenCode over the object's database: `model` is
  * the session's model, `plugins` OpenCode plugins (such as the model's), and
@@ -736,7 +850,7 @@ function toolsPlugin(
  */
 export const withOpenCode = async <T>(
   ctx: restate.SessionContext,
-  { plugins = [], model: named, system, tools = [], workspace: where, retry }: Options,
+  { plugins = [], model: named, system, tools = [], workspace: where, retry, approval = false }: Options,
   work: (opencode: OpenCodeSession) => Promise<T>,
 ): Promise<T> => {
   const model = typeof named === 'object' ? named : modelRef(modelOf(named));
@@ -844,7 +958,8 @@ export const withOpenCode = async <T>(
         if (!inboxOf(ctx)) return;
         const output =
           event.status === 'error'
-            ? event.error.message
+            ? // As OpenCode stores it: a denied permission's reason, say, not the tool's "Unable to read".
+              toSessionError(event.error).message
             : outputOf({ type: 'tool', state: { status: 'completed', ...event.result } as Content['state'] });
         const result: ItemResult = {
           id: event.id,
@@ -882,6 +997,7 @@ export const withOpenCode = async <T>(
             fail,
             workspace !== undefined,
           ),
+          permissionPlugin(ctx, approval, fail),
           ...(system ? [systemPlugin(system)] : []),
           // An outage OpenCode would stop retrying fails the attempt, as a tool's error does (never a refusal).
           retryPlugin(retry ?? {}, (error) => void fail(error)),
