@@ -101,10 +101,10 @@ sequenceDiagram
   participant DB as Key's database
   participant S as Companion (signals)
   C->>A: chat("Plan my week")
-  A->>S: start(turn, settles)
+  A->>S: start(turn, settles, publishes)
   S-)S: awaitTurn(turn)
-  Note over S: status.answering = turn
-  A->>S: publish
+  Note over S: status.answering = turn, publish
+  S-->>A: the revision, and the messages steered to the turn, if any
   A->>DB: the prompt's answer? (none yet)
   A->>DB: load the transcript and the window
   A->>DB: ask: the turn's row
@@ -129,7 +129,12 @@ sequenceDiagram
    on the conversation store; see [Dead turns](#dead-turns)). A retried
    attempt calls `start` again with the same invocation, which changes
    nothing (it keeps when the turn started). `start` sends
-   `awaitTurn(turn)`, the turn's watch.
+   `awaitTurn(turn)`, the turn's watch. A followed turn says it `publishes`:
+   `start` then publishes, as the turn's first revision, and returns what
+   `publish` returns (the revision, and the messages steered to the turn),
+   so the turn makes no publish of its own to start. A companion that
+   returns nothing from `start` (an older deployment, or the Python SDK's
+   before 1.5.2) gets a `publish` from the turn instead.
 2. **The prompt.** `answerOnce` reads the prompt's answer by its id, one
    indexed read: a retried attempt of an answered turn returns it, and reads
    nothing more. Otherwise it loads the conversation
@@ -150,7 +155,8 @@ sequenceDiagram
    the turn's error.
 
 A **background** agent (`background: true`, a subagent say) publishes its
-turn's end only: no step, nor its start, wakes a follower.
+turn's end only: no step, nor its start, wakes a follower (its `start` does
+not say it publishes).
 
 ## How a turn ends
 
@@ -661,8 +667,9 @@ messages by id does not notice.
 
 The revision increases at:
 
-- a turn's start, and each of its tool calls' start and end (not in the
-  background): its end once its result is stored, so that a follower reads
+- a turn's start (its companion's `start`, or the turn's own publish if
+  `start` returns nothing), and each of its tool calls' start and end (not
+  in the background): its end once its result is stored, so that a follower reads
   it there. pi and DeepSeek store a tool's result after the tool returns (pi
   in its next commit, DeepSeek in its next flush): they publish the end once
   that commit has copied the result into the turn. OpenCode publishes it
@@ -689,7 +696,11 @@ The companion's handler names and shapes are shared with the Python SDK
 cluster's `signals` object may hold the turns of either SDK's agents. An
 agent says it has
 `settle` as it starts a turn (`Started.settles`, which `status` does not
-show), and only such a turn is sent it:
+show), and only such a turn is sent it. A turn says too whether `start`
+publishes it (`Started.publishes`): the companion then publishes and returns
+what `publish` returns; a turn that does not say so (another SDK's) gets
+nothing back, and is not published; and a turn that says so, of a companion
+that returns nothing, publishes its start itself:
 
 - an agent's turn that the other SDK's companion holds is closed in the
   companion; its agent is sent `settle` if it said it settles;

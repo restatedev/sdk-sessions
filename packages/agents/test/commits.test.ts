@@ -4,7 +4,7 @@
 // own, without a Restate server. A turn of `r` model requests makes `r - 1`
 // rounds of `k` tool calls, then answers.
 import { afterAll, describe, expect, it, vi } from 'vitest';
-import { tool } from '@restatedev/agents';
+import { sessionObject, tool } from '@restatedev/agents';
 import { AIMessage, type BaseMessage } from '@langchain/core/messages';
 import { MessagesAnnotation, START, StateGraph } from '@langchain/langgraph';
 import { ToolNode, toolsCondition } from '@langchain/langgraph/prebuilt';
@@ -76,8 +76,17 @@ interface Cost {
   companion: string[];
 }
 
-/** Two turns of `chat` on a key of its own, each of `r` requests with `k` tool calls a round: what each cost. */
-async function costs(chat: PromptHandler, r: number, k: number): Promise<Cost[]> {
+/**
+ * Two turns of `chat` on a key of its own, each of `r` requests with `k` tool
+ * calls a round: what each cost. With `olderCompanion`, the companion's
+ * `start` returns nothing (see support.ts); `object` is the agent's.
+ */
+async function costs(
+  chat: PromptHandler,
+  r: number,
+  k: number,
+  { olderCompanion = false, object }: { olderCompanion?: boolean; object?: { readonly name: string } } = {},
+): Promise<Cost[]> {
   const map = new Map<string, Uint8Array>();
   const following = followingOf(map);
   const handler = handlerOf(chat);
@@ -86,7 +95,8 @@ async function costs(chat: PromptHandler, r: number, k: number): Promise<Cost[]>
     Object.assign(plan, { rounds: r - 1, calls: k, asked: 0 });
     let commits = 0;
     const made = following.made.length;
-    const sql = sqlAttempt({ map, key: 'k', id: `inv${i}`, onSync: async () => void commits++ });
+    const onSync = async () => void commits++;
+    const sql = sqlAttempt({ map, key: 'k', id: `inv${i}`, onSync, olderCompanion, object });
     expect(await sql.end(() => handler(sql.ctx, text))).toBe('Done');
     out.push({ commits, companion: following.made.slice(made) });
   }
@@ -112,5 +122,35 @@ describe("a turn's commits", () => {
       const [first, second] = await costs(chat(), r, k);
       expect(first!.commits - second!.commits).toBe(1);
     }
+  });
+});
+
+describe("a turn's start", () => {
+  afterAll(() => {
+    teller.reply = tellerReply;
+  });
+
+  it.each(AGENTS)(
+    "is published by the companion's `start`, or by the turn when `start` returns nothing: %s",
+    async (_name, chat) => {
+      for (const [r, k] of [
+        [1, 0],
+        [2, 3],
+      ] as const) {
+        const [, turn] = await costs(chat(), r, k);
+        const [, older] = await costs(chat(), r, k, { olderCompanion: true });
+        // The turn's own publish to start is the companion's `start`'s.
+        expect(older!.companion.slice(0, 2)).toEqual(['start', 'publish']);
+        expect(turn!.companion).toEqual(['start', ...older!.companion.slice(2)]);
+      }
+    },
+  );
+
+  it('is not published in the background: the turn says it does not publish, and the turn makes none', async () => {
+    claudePlanned();
+    const chat = claude.chat({ tools: tools() });
+    const object = sessionObject({ name: 'quiet', background: true, handlers: { chat }, views: {} });
+    const [, plain] = await costs(chat, 1, 0, { object });
+    expect(plain!.companion).toEqual(['start', 'close']);
   });
 });

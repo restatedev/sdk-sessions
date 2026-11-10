@@ -434,8 +434,9 @@ export const chatOf = (entry: object) => CHAT.of(entry);
  * attempt that ends first (`attemptCompletedSignal`) aborts it too, with an
  * {@link AttemptEnded}: the work stops, and the next attempt goes on with it.
  *
- * It publishes when it starts and ends ({@link publish}), for the clients
- * that follow the conversation.
+ * It publishes when it starts (its companion's `start` does, or else the
+ * turn) and ends ({@link publish}), for the clients that follow the
+ * conversation.
  *
  * As the `chat` handler of an agent, it also answers each message sent to
  * the agent's `steer` view that no turn took, as a turn of its own (the
@@ -473,13 +474,19 @@ export async function chatTurn<A>(
   const steering = !unfollowed(ctx) && (typeof steers === 'function' ? await steers(ctx) : steers);
   // Before the first publish, which may answer messages steered to the turn already (a retried attempt's).
   if (steering) INBOX.set(ctx, new Inbox());
-  await ctx.rpc(signals, signalsOf(ctx)).start({
+  // A followed turn's start is its first publish: the companion makes it, and returns what `publish` returns.
+  const followed = !unfollowed(ctx);
+  const started = await ctx.rpc(signals, signalsOf(ctx)).start({
     invocationId,
     since: new Date().toISOString(),
     ...(settles ? { settles } : {}),
     ...(steering ? { steers: steering } : {}),
+    ...(followed ? { publishes: true } : {}),
   });
-  await stepped(ctx);
+  if (typeof started === 'object' && started !== null) INBOX.get(ctx)?.saw(started);
+  // A companion that returns nothing from `start` (an older deployment's, or the Python SDK's before 1.5.2) did
+  // not publish it: the turn does.
+  else if (followed) await publish(ctx);
   // The log takes the turn's last change, then the companion closes the
   // turn, which publishes it: one revision. The close is a call the turn
   // waits for, so that it is done before the turn ends (see `awaitTurn`).

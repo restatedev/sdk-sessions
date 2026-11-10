@@ -20,7 +20,8 @@ export class Following {
   /** Each turn closed, by its invocation id. */
   readonly closed: string[] = [];
   /** The message being answered, from its turn's start to its close, whether its agent settles it, and whether it takes steered messages. */
-  answering: { invocationId: string; since: string; settles?: boolean; steers?: boolean } | null = null;
+  answering: { invocationId: string; since: string; settles?: boolean; steers?: boolean; publishes?: boolean } | null =
+    null;
   /** Each turn the companion would have its agent `settle`: closed as gone, by its invocation id. */
   readonly settled: string[] = [];
   /**
@@ -75,6 +76,12 @@ export function sqlAttempt(
     signal?: (wait: { id: string; name: string; input?: unknown }) => unknown;
     /** Run at each publish, before it answers: a follower reading the conversation, say. */
     published?: () => Promise<void>;
+    /**
+     * The companion of an older deployment (or of the Python SDK's before
+     * 1.5.2): its `start` publishes nothing, and returns nothing, whatever
+     * the turn says.
+     */
+    olderCompanion?: boolean;
   },
 ) {
   const following = followingOf(options.map);
@@ -87,13 +94,15 @@ export function sqlAttempt(
     },
   });
   // The `signals` object, as the agents call it.
+  /** As the companion's `publish`: the new revision, and the messages steered to the turn that it has not taken. */
+  const published = async () => {
+    await options.published?.();
+    const revision = ++following.revision;
+    const steering = following.answering?.steers ? following.steering : [];
+    return steering.length > 0 ? { revision, steering: [...steering] } : { revision };
+  };
   const signals: Record<string, (input: never) => unknown> = {
-    publish: async () => {
-      await options.published?.();
-      const revision = ++following.revision;
-      const steering = following.answering?.steers ? following.steering : [];
-      return steering.length > 0 ? { revision, steering: [...steering] } : { revision };
-    },
+    publish: published,
     // A transaction's send: its parameter as it was stored, JSON.
     taken: (parameter: Uint8Array | string[]) => {
       const ids = (
@@ -103,10 +112,19 @@ export function sqlAttempt(
       following.steering = following.steering.filter((m) => !ids.includes(m.id));
       following.revision++;
     },
-    start: (turn: { invocationId: string; since: string; settles?: boolean; steers?: boolean }) => {
-      if (following.answering?.invocationId === turn.invocationId) return;
-      if (following.answering) closed(following.answering.invocationId, true);
-      following.answering = turn;
+    // As the companion's: a turn that says so is published as it starts, and gets what `publish` returns.
+    start: (turn: {
+      invocationId: string;
+      since: string;
+      settles?: boolean;
+      steers?: boolean;
+      publishes?: boolean;
+    }) => {
+      if (following.answering?.invocationId !== turn.invocationId) {
+        if (following.answering) closed(following.answering.invocationId, true);
+        following.answering = turn;
+      }
+      return turn.publishes && !options.olderCompanion ? published() : undefined;
     },
     // As the companion's: a turn's close publishes it.
     close: (turn: string) => closed(turn),
