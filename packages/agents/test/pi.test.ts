@@ -25,6 +25,7 @@ import {
   sqlAttempt,
   steeredAtAStep,
 } from './support.ts';
+import { followedRound, THREE_TOOLS } from './following.ts';
 
 /** How many more requests the provider fails, unavailable, before it answers again. */
 const outage = vi.hoisted(() => ({ left: 0 }));
@@ -53,6 +54,15 @@ vi.mock('@earendil-works/pi-ai/providers/all', () => ({
         return say(Object.values(system?.sections ?? {}).join('\n'));
       }
       if (textOf(last.content) === 'Break it') return callTools([['boom', {}]]);
+      if (textOf(last.content) === THREE_TOOLS)
+        return callTools(
+          [
+            ['t1', {}],
+            ['t2', {}],
+            ['t3', {}],
+          ],
+          'On it.',
+        );
       if (textOf(last.content) === 'Look it up') return callTools([['lookup', {}]]);
       if (textOf(last.content) === 'audit the books') return callTools([['audit', {}]]);
       if (textOf(last.content) === 'Please move 5 from 1 to 2') {
@@ -267,7 +277,7 @@ describe('pi.chat', () => {
     ]);
   });
 
-  it('publishes the conversation as a turn and its tool calls start and end', async () => {
+  it('publishes the conversation as a turn starts, after each commit of its steps, and as it ends', async () => {
     const { answer, parts, published, outputs } = await followedWhileWorking(
       (tools) => pi.chat({ tools }),
       pi.messages(),
@@ -286,10 +296,25 @@ describe('pi.chat', () => {
       ],
       [{ type: 'text', text: answer }],
     ]);
-    // Published at its start, as its tool call starts and ends, and at its end.
+    // Published at its start, once its reply with the call is stored, once the call's result is, and at its end.
     expect(published).toBe(4);
-    // A follower reads the call as it starts, and its output as it ends.
+    // A follower reads the call once it is stored, and its output once that is.
     expect(outputs).toEqual([undefined, answer]);
+  });
+
+  it('publishes a round of tool calls once its reply is stored and once each result is, not as the calls start', async () => {
+    const { answer, published, seen } = await followedRound((tools) => pi.chat({ tools }), pi.messages());
+    expect(answer).toBe('result of t1\nresult of t2\nresult of t3');
+    // pi stores each result in a commit of its own: each is published after it, as is the reply with the calls.
+    expect(seen).toEqual([
+      [],
+      [null, null, null],
+      ['result of t1', null, null],
+      ['result of t1', 'result of t2', null],
+      ['result of t1', 'result of t2', 'result of t3'],
+    ]);
+    // Those publishes, and the turn's close.
+    expect(published).toBe(6);
   });
 
   it('in the background, publishes only the end of a turn', async () => {

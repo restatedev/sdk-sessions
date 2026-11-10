@@ -681,13 +681,13 @@ The revision increases at:
   `start` returns nothing), and each write of its steps that commits: a
   reply with tool calls, the tools' results (not in the background), so
   that a follower reads them there. Claude and LangGraph publish through
-  the conversation (`append`, `appendReply`); a framework that copies its
-  steps into the turn publishes once the copy commits. pi and DeepSeek store a tool's result after the tool returns (pi
-  in its next commit, DeepSeek in its next flush): they publish the end once
-  that commit has copied the result into the turn. OpenCode publishes it
-  once the copy that follows OpenCode's commit holds the result, or, in a
-  turn that takes steered messages, once the result is copied as the tool
-  returned it, before OpenCode stores it;
+  the conversation (`append`, `appendReply`). pi, DeepSeek and OpenCode keep
+  their own history, and publish once after each of their commits that
+  copied a reply with tool calls, or tools' results, into the turn (pi's
+  commit, DeepSeek's flush, the copy that follows OpenCode's commit, or, in
+  a turn that takes steered messages, the copy of a result as the tool
+  returned it, before OpenCode stores it), and not as a tool call starts or
+  ends;
 - a turn's close: its own, its watch's, or the next turn's `start` closing
   it;
 - `settle`, once it closed a dead turn in the conversation;

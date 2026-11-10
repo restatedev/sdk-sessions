@@ -25,10 +25,14 @@ import type { Context } from '@deepseek-ai/cordis';
 const textOf = (message: RequestMessage) =>
   message.content.flatMap((c) => (c.type === 'text' ? [c.text] : [])).join('');
 
-/** A reply of the teller: text, or a tool call. */
+/** A tool call of a reply: its id, its tool's name, and its arguments. */
+type Call = { id: ToolCallId; name: string; args: Record<string, unknown> };
+
+/** A reply of the teller: text, or a tool call, or (`calls`) several. */
 export type Reply =
-  | { text: string; call?: undefined }
-  | { text?: undefined; call: { id: ToolCallId; name: string; args: Record<string, unknown> } };
+  | { text: string; call?: undefined; calls?: undefined }
+  | { text?: undefined; call: Call; calls?: undefined }
+  | { text?: undefined; call?: undefined; calls: Call[] };
 
 /** How the agent asks to finish an interrupted prompt (@restatedev/agents/deepseek's CONTINUE). */
 const CONTINUE = /^Continue: your last turn was interrupted/;
@@ -77,23 +81,20 @@ export class Teller extends LlmAdapter {
   reply: (messages: RequestMessage[]) => Reply | Promise<Reply> = reply;
 
   async *stream({ messages }: GenerateOptions): AsyncIterable<StreamChunk> {
-    const { text, call } = await this.reply(messages);
-    if (call !== undefined) {
-      const args = JSON.stringify(call.args);
-      yield { type: 'block-start', index: 0, blockType: 'tool-call' };
-      yield { type: 'tool-call-delta', index: 0, id: call.id, name: call.name, argumentsDelta: args };
-      yield {
-        type: 'block-end',
-        index: 0,
-        block: { type: 'tool-call', id: call.id, name: call.name, arguments: args },
-      };
-    } else if (text !== undefined) {
+    const { text, call, calls = call ? [call] : [] } = await this.reply(messages);
+    for (const [index, { id, name, args: input }] of calls.entries()) {
+      const args = JSON.stringify(input);
+      yield { type: 'block-start', index, blockType: 'tool-call' };
+      yield { type: 'tool-call-delta', index, id, name, argumentsDelta: args };
+      yield { type: 'block-end', index, block: { type: 'tool-call', id, name, arguments: args } };
+    }
+    if (text !== undefined) {
       yield { type: 'block-start', index: 0, blockType: 'text' };
       yield { type: 'text-delta', index: 0, text };
       yield { type: 'block-end', index: 0, block: { type: 'text', text } };
     }
     yield { type: 'usage', usage: { inputTokens: 0, outputTokens: 0 } };
-    yield { type: 'finish', reason: { kind: call ? 'tool-calls' : 'stop' } };
+    yield { type: 'finish', reason: { kind: calls.length > 0 ? 'tool-calls' : 'stop' } };
   }
 }
 

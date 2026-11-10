@@ -146,8 +146,9 @@ The steps, where they differ from the design below:
     waiting for a copy that follows its commit (that copy's publish would
     list the message too late), and waiting for the copy inside the commit
     deadlocks: OpenCode commits a tool's result under the session's event
-    lock, which the steer's submit needs too. So the end's publish, which
-    lists the messages, comes first, as pi's does, and no publish is added.
+    lock, which the steer's submit needs too. So the publish of that copy,
+    which lists the messages, comes first, as pi's does, and no publish is
+    added.
     Only in a turn that takes steered messages (a `chat` turn, not a
     background agent's); otherwise the copy follows OpenCode's commit, as
     before. An attempt that dies between the hook and OpenCode's commit
@@ -240,7 +241,7 @@ dead turn is the one hole, and the copy into the store is new.
 | ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
 | **A prompt, once** (`answerOnce`, by its id)                                 | OpenCode's message id is `msg_<prompt id>`; an answered prompt's retry reads its answer from the store and never boots OpenCode                       | by id, but booted every attempt               |
 | **Steps stored as they come**, a reply before its tools run                  | OpenCode commits the reply with its tool calls before the tools run; the store gets copies (below)                                                    | the log's transcript, rebuilt at each publish |
-| **A tool call publishes as it starts and ends**; a background agent, its end | the `tool.execute.before` and `execute.after` hooks; the end once the copy that holds the result is stored, as pi does                                | the hooks, before the result was stored       |
+| **Each copy of steps is published**, not a call; a background agent, its end | once a copy holding a reply with tool calls, or results, is committed, as pi does; `tool.execute.before` copies the reply, and publishes nothing      | the hooks, before the result was stored       |
 | **Crashed: the turn goes on**                                                | OpenCode's own resume, for this prompt's claim only; `maxAttempts: Infinity`, so Restate's retry policy decides                                       | yes, for any claim                            |
 | **Tool calls, once**                                                         | OpenCode makes a cut-off call again under a new id: Restate's tools rejoin the earlier call by tool and input, as for DeepSeek                        | `retryOf` on the bank's tool                  |
 | **Killed: closed, never finished** (D8)                                      | **the hole**: [Closing a dead turn](#closing-a-dead-turn)                                                                                             | finished under the next invocation            |
@@ -376,7 +377,9 @@ SQL session, so a copy cannot be in OpenCode's transaction as pi's is.
   store only.
 - **When**: after OpenCode commits a transaction that changed the turn's
   messages (the SQL client sees each commit, as pi's storage facade does),
-  and before each publish, before the turn's answer, and before any close.
+  and before each tool call runs, before the turn's answer, and before any
+  close. A copy that holds a reply with tool calls, or results, is published
+  once it is committed.
   An assistant message is copied once its step ended (OpenCode updates it in
   place as it streams); a tool part's result once completed or failed.
 - **Idempotent**: keyed by OpenCode's message and part ids, so a crash between
@@ -550,5 +553,5 @@ OpenCode (`examples/advanced/foreman`).
 | O2  | **Whose claim it is comes from `ctx.db`**: the last prompt submitted, recorded before its submit               | OpenCode's tables are projections whose layout changes; the order makes the record sound |
 | O3  | **A dead turn is closed by OpenCode's resume budget** (`maxAttempts: 0`), the note saying which calls happened | No public call does it; the spike showed a closer of our own buys little over it         |
 | O4  | **OpenCode first, then the copy, then the store**, through a `settleOwn` hook of `answerOnce` and `settle`     | The only order that stays consistent across a crash between two stores                   |
-| O5  | **The copy is idempotent and catches up** before each publish, answer and close                                | It cannot share OpenCode's transaction                                                   |
+| O5  | **The copy is idempotent and catches up** before each tool call, answer and close                              | It cannot share OpenCode's transaction                                                   |
 | O6  | **v1 without OpenCode's background work** (subagents, background shells, questions)                            | Their recovery is not yet mapped onto turns; Restate's `subagent` delegates instead      |

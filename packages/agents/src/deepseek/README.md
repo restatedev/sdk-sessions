@@ -141,7 +141,12 @@ The harness keeps its own event log, and its model's input is the harness's;
 each flush of the log copies the turn's new messages (the model's replies,
 the tools' results) into the agent's conversation of turns, in the same
 transaction: what `messages` shows
-([docs/conversation.md](../../docs/conversation.md)). The harness's input
+([docs/conversation.md](../../docs/conversation.md)). A flush that copied a
+reply with tool calls, or tools' results, is published once it is stored,
+and nothing else is: a tool call's start publishes nothing. The tools of a
+reply run one after another, and each result is flushed with the next call,
+before its tool runs (the checkpoint policy's barrier): one commit, and one
+publish, per tool call. The harness's input
 stays within the model's context window: as it nears the window (or
 overflows it), the harness condenses the oldest history into a summary, one
 more model request, after trimming tool results that are too long

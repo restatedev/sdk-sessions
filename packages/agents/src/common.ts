@@ -338,21 +338,22 @@ export const stepped = async (ctx: restate.SessionContext) => {
 };
 
 /**
- * A tool call of the turn of `ctx` starts: {@link publish} it, which forgets
- * the calls whose results are stored (calls.ts) before the tool makes its
- * own. In the background, which publishes the turn's end only, it forgets
- * them alone.
+ * A tool call of the turn of `ctx` starts: forget the calls whose results are
+ * stored (calls.ts) before the tool makes its own. It publishes nothing: the
+ * turn publishes once the call is stored (with its reply), and once its
+ * result is ({@link stepped}).
  */
 export async function toolCallStarted(ctx: restate.SessionContext) {
-  if (!unfollowed(ctx)) return publish(ctx);
   const stored = ANSWERING.get(ctx);
   if (stored) await settled(ctx, stored);
 }
 
-/** A tool call of the turn of `ctx` (a `chat` handler's) ended: {@link publish} it, unless the agent runs in the background. */
-export async function toolCallEnded(ctx: restate.SessionContext) {
-  await stepped(ctx);
-}
+/**
+ * A tool call of the turn of `ctx` ended: nothing to do. The turn publishes
+ * once the call's result is stored, not as the call ends; kept for the
+ * integrations that call it.
+ */
+export async function toolCallEnded(_ctx: restate.SessionContext) {}
 
 /** Whether a tool call's result is stored: `stored(callId, failed)`, `failed` the error the call answered with. */
 export type Stored = (callId: string, failed?: string) => boolean;

@@ -78,8 +78,8 @@ import {
   refusal,
   REFUSED,
   RETURNED_UNRECORDED,
+  stepped,
   stopSignalOf,
-  toolCallEnded,
   toolCallStarted,
 } from '../common.ts';
 import { answerOnce, invocationOf, type Items, type Parsed, type Turn } from '../conversation.ts';
@@ -194,15 +194,15 @@ const STEER_ENTRY = 'restate.steer';
  * its replies, its tools' results, and the messages steered to the turn that
  * pi placed at a step (whose companion is told they are taken, in the
  * commit); nothing once `stopped()`, or once the turn is closed. Each entry
- * once: after the last one copied. `resulted` gets the calls whose results
- * it copied.
+ * once: after the last one copied. `steps` is told when it copied a step
+ * that a follower waits for: a reply with tool calls, or a tool's result.
  */
 function copying(
   ctx: restate.SessionContext,
   turn: Turn<Item>,
   requestId: string,
   stopped: () => boolean,
-  resulted: (calls: string[]) => void,
+  steps: () => void,
 ) {
   let from: { conversation: number; last: number } | undefined;
   return async (tx: Transaction) => {
@@ -245,9 +245,13 @@ function copying(
       tx,
       copied.flatMap(({ steer }) => (steer === undefined ? [] : [steer])),
     );
-    resulted(copied.flatMap(({ item: { message } }) => (message.role === 'toolResult' ? [message.toolCallId] : [])));
+    if (copied.some(({ item: { message } }) => isStep(message))) steps();
   };
 }
+
+/** Whether `message` is a step of a turn that its followers are told of: a reply with tool calls, or a tool's result. */
+const isStep = (message: Message) =>
+  message.role === 'toolResult' || (message.role === 'assistant' && message.content.some((c) => c.type === 'toolCall'));
 
 /** An agent's options: `chat`, `prompt` and `withPi` take them. */
 export interface Options<O extends z.ZodObject | undefined = z.ZodObject | undefined> {
@@ -424,8 +428,6 @@ export const withPi = async <T>(
     cancel(error);
     return awaitWithContext(new Promise<never>(() => {}), context);
   };
-  // The tool calls that returned, whose ends are published once pi stored their results (`prompt`).
-  const returned = new Set<string>();
   // The messages steered to the turn of a prompt's run, submitted to pi as a publish lists them (`prompt`).
   let steering: ((of: ConversationId) => Promise<void>) | undefined;
   // Whether a tool of the round asks to end the run (`terminate`, a handoff): pi then ends the round at its final
@@ -438,7 +440,6 @@ export const withPi = async <T>(
         await toolCallStarted(ctx);
         const result = await t.execute(args, api, task);
         if (result.control?.terminate === true || result.control?.handoff !== undefined) ending = true;
-        returned.add(api.callId);
         return result;
       } catch (error) {
         // The tool's error: never taken for the model's provider refusing (a tool may call a model API).
@@ -499,22 +500,23 @@ export const withPi = async <T>(
         // A run an earlier prompt of this invocation left (its turn failed, say). A steered message is its run's.
         await abortLeft((r) => r === id || r === `${id}:again` || r.startsWith('steer:'));
         // Once stopped, the turn's close says how it ended: not pi's abort of its tools.
-        // A tool call's end is published once its result is stored, for followers to read it there.
-        let ended = false;
+        // A commit that copied steps (a reply with tool calls, tools' results) is published once it is done,
+        // for followers to read them there; its answer lists the messages steered to the turn (`steering`).
+        let copiedSteps = false;
         database.onCommit = copying(
           ctx,
           current,
           requestId,
           () => cancelled !== undefined || stopSignalOf(ctx)?.aborted === true,
-          (calls) => {
-            for (const call of calls) if (returned.delete(call)) ended = true;
+          () => {
+            copiedSteps = true;
           },
         );
         database.afterCommit = async () => {
-          if (!ended) return;
-          ended = false;
+          if (!copiedSteps) return;
+          copiedSteps = false;
           // Failing, it fails the attempt, as a tool's error does: never pi's commit, which is done.
-          await toolCallEnded(ctx).catch((error: unknown) => {
+          await stepped(ctx).catch((error: unknown) => {
             failed(error);
             cancel(error);
           });

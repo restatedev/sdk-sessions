@@ -102,6 +102,7 @@ failed beside the mutant's own.
 | `pi-outage-ends-turn`              | ecd0d00    | pi gives up on a provider's outage after 3 retries, and ends the turn                                   | killed, and 1 more  |
 | `deepseek-no-compaction`           | 535ee64    | DeepSeek's input grows until a request overflows the model's window                                     | killed              |
 | `pi-tool-end-before-stored`        | 08a9bd6    | a tool call's end is published before its result is stored (and DeepSeek's)                             | killed              |
+| `tool-start-published`             | (branch)   | a tool call's start is published, showing a follower nothing new (pi, DeepSeek, OpenCode)               | killed              |
 | `pi-prompt-id-retried`             | de77173    | pi's `prompt(text, id)`, as 0.3.0 took it, fails with a TypeError, retried forever                      | killed              |
 | `reminder-stored`                  | 3573fda    | `output`'s reminder is stored with the prompt, and `messages` shows it                                  | killed              |
 | `wrong-again-stored-answered`      | db2ea3d    | a reply still wrong after asking again fails the prompt, but its turn is stored answered                | killed              |
