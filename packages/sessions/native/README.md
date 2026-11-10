@@ -78,7 +78,7 @@ as one pack, and L0 empties. Credentials come from each provider's variables
 Its HTTP requests are reqwest's, on napi's tokio runtime: a call's first poll,
 on the JavaScript thread, enters that runtime's context (`answer` in
 `node.rs`). A namespace's packs go under
-`<path>/<namespace escaped to one segment>` (`Ledger/a` is `Ledger.2Fa`), so
+`<path>/<namespace escaped to one segment>` (`Ledger/a` is `_4cedger_2fa`), so
 one namespace's garbage collection never lists another's packs. Not set,
 every pack stays in the state.
 

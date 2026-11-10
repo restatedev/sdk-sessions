@@ -43,7 +43,7 @@ test('a database past L0 promotes its packs to the object store, and reads them 
   const { store, stored } = memory();
   // Its directory: the namespace, escaped to one segment.
   const namespace = 'Ledger/a%20b';
-  const packs = join(dir, 'packs', 'Ledger.2Fa.2520b');
+  const packs = join(dir, 'packs', '_4cedger_2fa_2520b');
 
   const hash = createHash('sha256');
   const db = await open(namespace, store);
