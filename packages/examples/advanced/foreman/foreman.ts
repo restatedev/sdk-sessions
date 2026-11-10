@@ -5,7 +5,7 @@
  *   you ──chat──▶ boss (Claude Fable 5.2)  plans, briefs, checks, decides
  *                  ├─ worker   (OpenCode, Claude Sonnet 5.5)  the cheap tier, in the workspace
  *                  ├─ senior   (OpenCode, Claude Sonnet 5.5)  one rung up, only with your approval
- *                  └─ reviewer (OpenCode, Claude Sonnet 5.5)  a second opinion on a diff, read-only
+ *                  └─ reviewer (pi, Claude Sonnet 5.5)        a second opinion on a diff, read-only
  *
  * The boss gets one tool per move of the cascade (tools/), and each asks policy.ts first:
  *

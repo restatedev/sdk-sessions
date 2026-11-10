@@ -9,11 +9,12 @@ can do it, and moves up only on evidence.
 you ──chat──▶ boss (Claude Fable 5.2)   plans, briefs, checks, decides
                ├─ worker   (OpenCode, Claude Sonnet 5.5)  the cheap tier: bounded tasks, in the workspace
                ├─ senior   (OpenCode, Claude Sonnet 5.5)  one rung up, only after you approve
-               └─ reviewer (OpenCode, Claude Sonnet 5.5)  a second opinion on a diff, read-only
+               └─ reviewer (pi, Claude Sonnet 5.5)        a second opinion on a diff, read-only
 ```
 
-The boss is a pi agent. The agents it delegates to are OpenCode agents
-(`@restatedev/agents/opencode`), each with OpenCode's own coding tools in the workspace.
+The worker and the senior are OpenCode agents (`@restatedev/agents/opencode`): they work in the
+workspace, with OpenCode's own coding tools. The boss and the reviewer are pi agents
+(`@restatedev/agents/pi`): they use no coding tools, and the reviewer has no workspace at all.
 
 The rules hold in code, not only in the boss's prompt. The boss has no free-form "ask the worker"
 tool: it has one tool per move ([`tools/`](tools/index.ts)), and each asks
@@ -36,9 +37,9 @@ same agent, and tasks with different names run at once.
 
 ## Run it
 
-The agents' coding tools (OpenCode's: read, write, edit, shell, glob, grep) and the boss's checks run on this machine, not
-in a sandbox, in `WORKSPACE`: give it a throwaway clone of a git repository, never one you care
-about. The boss's checks read git, to see what changed.
+The worker's and the senior's coding tools (OpenCode's: read, write, edit, shell, glob, grep) and
+the boss's checks run on this machine, not in a sandbox, in `WORKSPACE`: give it a throwaway clone
+of a git repository, never one you care about. The boss's checks read git, to see what changed.
 
 ```sh
 ANTHROPIC_API_KEY=… WORKSPACE=/tmp/throwaway-clone node advanced/foreman/foreman.ts
