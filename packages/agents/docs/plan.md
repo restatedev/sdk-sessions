@@ -627,9 +627,10 @@ The PR's author asks for a review after each step, or a few. The review:
 
 Not in this PR, on purpose: snapshots (D3); steps retention (the Python
 SDK's `steps-retention.md`); durable approvals
-for the frameworks that have them (OpenCode's permission hook; DeepSeek's
-`approval/request` came after this PR, as its `approval` option:
-[Approvals](frameworks.md#approvals)); steering (which came after this PR, as
+for the frameworks that have them (DeepSeek's `approval/request` and
+OpenCode's permission hook came after this PR, as their `approval` option:
+[Approvals](frameworks.md#approvals), and
+[OpenCode's](frameworks.md#approvals-1)); steering (which came after this PR, as
 the Python SDK's: [Steering a turn](turns.md#steering-a-turn)); changes to
 `@restatedev/sessions`, unless a step needs one (then in a commit of its
 own).

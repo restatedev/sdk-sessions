@@ -22,14 +22,16 @@ const coder = opencode.agent({ name: 'coder', workspace: (ctx) => `/work/${ctx.k
 await serve(coder);
 ```
 
-| Option      | What                                                                                                                                                                                                                                                         |
-| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `model`     | `provider/model-id`, of any provider OpenCode serves; or else `MODEL`, or else `openai/gpt-6-sol` (`OPENAI_API_KEY`). A key's session keeps the model it was created with (see [Not yet](#not-yet))                                                          |
-| `system`    | Added to OpenCode's own system prompt, on each model request                                                                                                                                                                                                 |
-| `tools`     | `tool()`s and Restate's tools of `@restatedev/agents`, or OpenCode tools of your own (`OpenCodeTool`: `execute(input, callId)`)                                                                                                                              |
-| `output`    | A zod object: the answer as data, which the agent replies with as JSON, and `chat` answers with (see [Structured answers](../../README.md#structured-answers))                                                                                               |
-| `workspace` | A directory of the local machine, made if missing, for OpenCode's own tools (read, write, edit, shell, glob, grep...), or a function of the context that gives one (`(ctx) => \`/work/${ctx.key}\``); use a sandbox. Without one, the agent has only `tools` |
-| `plugins`   | OpenCode plugins of your own (`@opencode/plugin`)                                                                                                                                                                                                            |
+| Option      | What                                                                                                                                                                                                                                                                               |
+| ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`     | `provider/model-id`, of any provider OpenCode serves; or else `MODEL`, or else `openai/gpt-6-sol` (`OPENAI_API_KEY`). A key's session keeps the model it was created with (see [Not yet](#not-yet))                                                                                |
+| `system`    | Added to OpenCode's own system prompt, on each model request                                                                                                                                                                                                                       |
+| `tools`     | `tool()`s and Restate's tools of `@restatedev/agents`, or OpenCode tools of your own (`OpenCodeTool`: `execute(input, callId)`)                                                                                                                                                    |
+| `output`    | A zod object: the answer as data, which the agent replies with as JSON, and `chat` answers with (see [Structured answers](../../README.md#structured-answers))                                                                                                                     |
+| `workspace` | A directory of the local machine, made if missing, for OpenCode's own tools (read, write, edit, shell, glob, grep...), or a function of the context that gives one (`(ctx) => \`/work/${ctx.key}\``); use a sandbox. Without one, the agent has only `tools`                       |
+| `plugins`   | OpenCode plugins of your own (`@opencode/plugin`)                                                                                                                                                                                                                                  |
+| `retry`     | How OpenCode asks the model again after a request failed for a reason that passes (an outage, a rate limit), as pi's `retry`: by default without limit, 2 s to a minute apart (`baseDelayMs`, `maxAgentDelayMs`, `maxRetries`, `enabled`; see [Through crashes](#through-crashes)) |
+| `approval`  | With a workspace, `true` has what OpenCode's permission rules ask about wait for a person's approval, the signal `approval`; without it, such an ask is denied ([Permissions](#permissions))                                                                                       |
 
 With a workspace, OpenCode's tools of background work are left out: its
 subagent and question tools are removed, and its shell runs a command in
@@ -65,7 +67,14 @@ submitted to OpenCode is recorded there before it is submitted
 
 - **A message is answered once per invocation** (`answerOnce`): the prompt's
   id is its OpenCode message id (`msg_<id>`), and a retried attempt of an
-  answered prompt returns its answer without booting OpenCode.
+  answered prompt returns its answer without booting OpenCode. So does one
+  whose turn holds its final reply, copied before the attempt died. A
+  retried attempt of the recorded prompt boots OpenCode twice: first
+  without its sweep, to copy what OpenCode stored of the turn; a final
+  reply stored before the attempt died (before its copy, or before
+  OpenCode's turn ended) is then the answer, and the second boot closes
+  OpenCode's claim without the model, rather than resume the turn, which
+  would ask it again; without one, the second boot resumes the turn.
 - **A tool runs only once its call is stored.** OpenCode stores the model's
   reply, with its tool calls, before the tools run.
 - **A crashed attempt's turn goes on.** A boot for the recorded prompt
@@ -88,14 +97,26 @@ submitted to OpenCode is recorded there before it is submitted
   the turn's copy catches up, and the conversation closes the turn
   (`ended`). The next prompt tells the model how the turn before it ended,
   and which of its calls did happen (OpenCode's history says only that they
-  were interrupted). A prompt killed once OpenCode queued it, before its
-  turn began, never runs: what waits in OpenCode's inbox is cancelled.
+  were interrupted). A final reply OpenCode stored before the kill is kept
+  in the turn, then its `Ended` note. A prompt killed once OpenCode queued
+  it, before its turn began, never runs: what waits in OpenCode's inbox is
+  cancelled.
 - **A stopped turn** (`stop`) is interrupted in OpenCode, and closed
   cancelled; the next prompt tells the model.
-- **A refused prompt** (a wrong API key, an unknown model) fails with a
-  terminal error, 424, and closes its turn; any other turn OpenCode ends
-  unanswered fails with a terminal error. A provider's outage is retried by
-  OpenCode's own retries, then ends the turn so (see [Not yet](#not-yet)).
+- **A provider's outage never ends the turn.** OpenCode asks the model
+  again as its `session.retry` hook decides, with pi's backoff (`retry`):
+  2 s after the first failure, twice as long each time, a minute apart at
+  most, but never before the provider's `retry-after` (up to 15 minutes, as
+  OpenCode takes it, which `maxAgentDelayMs` does not shorten). Unlike pi,
+  OpenCode retries a step 10 times at most, and not after its 4th timeout:
+  an outage it would retry for the last time, or no longer retries, fails
+  the attempt instead (not terminal), as a tool's error does, and the next
+  attempt resumes the turn, its retries afresh. With a finite `maxRetries`,
+  a failure past that many retries of a step ends the turn instead, as
+  does one OpenCode no longer retries; `enabled: false` retries nothing.
+- **A refused prompt** (a wrong API key, an unknown model) is never asked
+  again: it fails at once with a terminal error, 424, and closes its turn;
+  any other turn OpenCode ends unanswered fails with a terminal error.
 
 OpenCode keeps its own history, and compacts it itself: `window`, `budget`
 and summaries do not apply. What OpenCode stores of a turn (the model's
@@ -112,18 +133,49 @@ late after a crash, never the model.
 tool call of a round returns, as a steered prompt (`delivery: 'steer'`,
 once, by its id), which OpenCode places at the round's next step, after its
 results; the copy stores it in the turn, in its place. One sent while the
-model writes its final answer is answered as a turn of its own.
+model writes its final answer is answered as a turn of its own. One
+OpenCode placed as the turn was stopped is the stopped turn's: the turn
+holds it, and it is not answered again as a turn of its own.
 
 The files of a `workspace` are not in the database: they last as long as the
 disk does.
 
+## Permissions
+
+With a workspace, OpenCode's permission rules allow its tools everything
+but a few asks (by default, a read of a `*.env` file). OpenCode alone would
+keep an ask in memory, waiting for a reply nothing gives, and its turn
+would never end. Here each ask is settled through OpenCode's
+`permission.evaluate` hook:
+
+- **Without `approval`**, it is denied, as OpenCode denies an ask nobody is
+  present for: the model gets the denial as the tool's error. So is an ask
+  of no tool call, with `approval` too.
+- **With `approval: true`**, the tool call waits for the signal `approval`
+  (`opencode.APPROVAL`) to the agent, as a `signal()` tool waits
+  ([Signals](../../README.md#signals)). `pending` shows the wait with the
+  call's tool and arguments, and the permission asked (`action`,
+  `resources`). `true`, `{"approved": true}`, or a text such as `approved`,
+  `yes` or `ok` allows the call; anything else denies it, and the model is
+  told why (`The user denied tool "shell": <the text, or the reason>`).
+
+```ts
+opencode.agent({ name: 'coder', workspace: (ctx) => `/work/${ctx.key}`, approval: true });
+```
+
+The wait outlasts a crash, or a suspension: the resumed turn gives the call
+OpenCode's "interrupted" result, the model makes it again under a new id,
+and the call, with the same tool and arguments, joins the wait. The person
+is asked once, and the tool runs once, after the decision. A turn stopped
+while the call waits ends cancelled, and the tool never runs.
+
+The wait is the tool call's: a call that asks more than once (a directory,
+then the file) has each ask answered by the first's answer. OpenCode's hook
+does not tell an ask from a probe (an edit's hint on a miss), so a probe
+that would ask waits too.
+
 ## Not yet
 
-- **OpenCode's `retry` hook**: a provider's outage is retried by OpenCode's
-  own retries, and past them ends the turn, rather than failing the attempt
-  for Restate to retry.
-- **Permissions asked through Restate**: a person's approval of a tool call,
-  as a signal.
 - **A change of `model`** for a key that has a session already: the session
   keeps the model it was created with.
 
@@ -162,8 +214,9 @@ on Node 24: on older Node the suites are skipped):
 
 - [`test/opencode.test.ts`](../../test/opencode.test.ts):
   each point above, with crashes that stop an attempt in a tool call, or
-  at any of its state requests, and kills; a stop, a refusal, asking again
-  for `output`, the system prompt, `messages`, `clear`, and steering.
+  at any of its state requests, and kills, at a turn's end too; a stop, a
+  refusal, an outage, asking again for `output`, the system prompt,
+  `messages`, `clear`, steering, and permission asks, denied or approved.
 - [`test/opencode-spike.test.ts`](../../test/opencode-spike.test.ts): `db.ts`
   alone, a killed turn closed at boot without the model (by OpenCode's
   budget, or by a closer of our own), and a crashed one resumed.

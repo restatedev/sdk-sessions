@@ -122,9 +122,11 @@ is closed, never finished, without asking the model (OpenCode's resume
 budget), and the next prompt tells the model how it ended and which of its
 calls did happen. With a `workspace`, the agent has OpenCode's own coding
 tools, but for its subagent and question tools, and its shell runs no
-background jobs. Not there yet: OpenCode's `retry` hook (its own retries
-apply), permissions asked through Restate, and a change of `model` for a
-key that has a session already ([its README](src/opencode/README.md)).
+background jobs; what OpenCode's rules ask about (a read of a `.env` file)
+is denied, or, with `approval: true`, waits for a person's approval. A
+provider's outage is asked again as pi does (its `retry` option), and
+never ends the turn. Not there yet: a change of `model` for a key that has
+a session already ([its README](src/opencode/README.md)).
 
 Every agent takes these too, beside its framework's options:
 
@@ -481,7 +483,9 @@ curl localhost:8080/support/alice/signal --json '{"name": "approval", "value": "
 
 A DeepSeek agent's tool calls that need a person's approval (its `approval`
 option) wait the same way, for the signal `approval`: see
-[its README](src/deepseek/README.md#approvals).
+[its README](src/deepseek/README.md#approvals). So do an OpenCode agent's
+with `approval: true`, those its permission rules ask about: see
+[its README](src/opencode/README.md#permissions).
 
 A wait ends with its agent's invocation: a cancelled or killed one leaves `pending`.
 The waits are kept by the `signals` object, keyed `<agent>:<key>`, which

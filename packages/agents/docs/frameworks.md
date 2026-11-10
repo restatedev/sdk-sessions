@@ -699,7 +699,14 @@ spike, the steps) is in [OpenCode's return](opencode.md).
   ended and none of its calls still streams its input (a reply is stored
   before its tools run); a result once its call completed or failed.
 - **Once**: a prompt's OpenCode message id is `msg_<prompt id>`; OpenCode
-  boots lazily, as a turn runs, so an answered prompt's retry boots nothing.
+  boots lazily, as a turn runs, so an answered prompt's retry boots nothing,
+  nor does one whose turn holds its final reply (it answers with it). A
+  retry of the recorded prompt first boots a reader (`restart: 'none'`, no
+  sweep) and copies what OpenCode stored: if that brings the final reply
+  (stored before the attempt died, before its copy or before OpenCode's
+  turn ended), it is the answer, and the boot that follows closes
+  OpenCode's claim without the model rather than resume the turn, which
+  would ask it again. So every retry of the recorded prompt boots twice.
 - **Whose claim it is** comes from `ctx.db`: the last prompt submitted to
   OpenCode, recorded before its submit (`restate_agents_opencode`, one row).
   A boot for that prompt resumes its turn, with no limit
@@ -714,13 +721,26 @@ spike, the steps) is in [OpenCode's return](opencode.md).
   crash between the two stores. The budget leaves OpenCode's history saying
   only that the running calls were interrupted, so the next prompt's text
   starts with the closing note and the calls that did happen
-  (`(Ended: … These calls did happen: …)`).
+  (`(Ended: … These calls did happen: …)`). A final reply OpenCode stored
+  before the kill is kept in the turn, before the `Ended` note.
 - **Stopped**: the copy, then `session.interrupt`, and nothing copied after
-  (the store's result of a cut-off call is the cancel note); a steered
-  message OpenCode placed as the turn stopped is the turn's. The next prompt
-  starts with the note.
+  (the store's result of a cut-off call is the cancel note) but the steered
+  messages OpenCode placed as the turn stopped, which are the turn's (copied
+  once the interrupt returns). The next prompt starts with the note.
 - **Refused, failed**: a turn OpenCode ends unanswered is a terminal error;
-  a refusal (by its message, OpenCode's error type, or a 401 or 403) a 424.
+  a refusal (by its message, OpenCode's error type, or a 401 or 403) a 424,
+  never retried.
+- **A provider's outage** never ends the turn: OpenCode's `session.retry`
+  hook (`retryPlugin`) decides each retry, with pi's backoff and `retry`
+  option (2 s, twice as long each time, a minute apart at most, without
+  limit), never before the provider's `retry-after` (up to OpenCode's
+  15 minutes, which `maxAgentDelayMs` does not shorten). OpenCode's own
+  schedule retries a step 10 times at most, and stops at its 4th timeout in
+  a step: an outage it would retry for the last time, or no longer retries,
+  fails the attempt instead (not terminal; the hook proposes a wait that
+  never ends while the attempt closes), and the next attempt resumes the
+  turn, retrying afresh. With a finite `maxRetries`, a failure past it, or
+  one OpenCode no longer retries, ends the turn.
 - **Asking again** (`output`'s check): a second message,
   `msg_<prompt id>_again`, in the same turn.
 - **Tools**: a tool's error fails the attempt and closes its fence; the
@@ -732,13 +752,51 @@ spike, the steps) is in [OpenCode's return](opencode.md).
 - **A stalled turn** (neither running nor ended for 5 s) fails the attempt:
   the retry's boot resumes it.
 
+### Approvals
+
+**OpenCode.** With a workspace, its build agent's permission rules allow
+every action but a few, which ask (a `read` of `*.env`). OpenCode awaits
+the `permission.evaluate` hook before it asks, whose event has the action,
+the resources and the source (a tool call's id). An ask OpenCode makes
+waits in its memory for a client's reply (`permission.list` shows it):
+embedded with nobody to reply, the turn never ends (the test "OpenCode
+alone asks in memory"). OpenCode denies an ask nobody is present for (its
+`Unattended` rules).
+
+**Now.** `permissionPlugin` settles every ask in the hook; what the rules
+allow or deny stays so. Without `approval`, an ask is denied, as OpenCode
+denies one nobody is present for: the model gets the denial (`Permission
+<action> needs approval, and nobody is present to give it`) as the tool's
+error. With `approval: true`, an ask of a tool call waits for the signal
+`approval`, `waitFor(ctx, callId, 'approval', { tool, args, action,
+resources }, { approval: true, rejoin: true })`, the tool and arguments from
+the call's `execute.before` hook. Its value decides (`true`,
+`{ approved: true }`, or a text such as `approved` or `yes` allows;
+anything else denies, and its text or `reason` reaches the model: `The user
+denied tool "<tool>": <reason>`). An error of the wait fails the attempt,
+and its ask never settles. An ask of no tool call is denied.
+
+- **The wait rejoins.** OpenCode stores the call, running, before the tool
+  asks; a crash or a suspension while it waits has the resumed turn give it
+  OpenCode's "interrupted" result, and the model makes it again under a new
+  id: with the same tool and arguments it joins the wait, so the person is
+  asked once.
+- **An approval is not the call** (`approval: true`): a stopped turn does
+  not report its call as done because it was approved.
+- **Limits**: the wait is the tool call's, so a call that asks more than
+  once (a directory, then the file) has each ask answered by the first's
+  answer; and the hook cannot tell an ask from a probe
+  (`permission.allows`, which an edit's hint on a miss makes), so a probe
+  that would ask waits too.
+- **Tests** (`test/opencode.test.ts`, "the OpenCode agent's permission
+  asks"): OpenCode alone (the ask stays in memory, the turn never ends),
+  denied by default, approved (the tool runs after the wait, not before),
+  denied by a person (never runs; the model is told why), a crash while it
+  waits (one wait; the tool runs once), and a turn stopped while it waits
+  (cancelled; the tool never runs).
+
 ### Left
 
-- **OpenCode's `retry` hook**: its own retries apply, so a provider's
-  outage longer than they last ends the turn, rather than failing the
-  attempt for Restate to retry.
-- **Permissions through Restate**: `permission.evaluate` waiting for an
-  approval, as a signal.
 - **A change of `model`** for a key whose session exists: the session is
   created with the model, and keeps it.
 - **Background work**: OpenCode's child sessions and background shell jobs,
@@ -752,6 +810,11 @@ spike, the steps) is in [OpenCode's return](opencode.md).
   and at any state request, more resumes than OpenCode's own limit, a
   killed turn closed by the next message and by `settle` (with the calls
   that did happen), a prompt killed in OpenCode's inbox, a stop, a refusal,
-  publishes, the views, `clear`, asking again, the system prompt, and
-  steering; `test/opencode-spike.test.ts`, `db.ts` alone; the e2e crash
-  test's `OpenCodeAgent`, kills included.
+  publishes, the views, `clear`, asking again, the system prompt,
+  steering (a message placed as the turn stops included), a provider's
+  outage (retried; past OpenCode's retries or at its 4th timeout, the
+  attempt fails and the next answers; `retry-after`; a refusal at once; a
+  stop while it waits), permission asks ([Approvals](#approvals-1)), and an
+  attempt killed at a turn's end (the stored final reply answers, once);
+  `test/opencode-spike.test.ts`, `db.ts` alone; the e2e crash test's
+  `OpenCodeAgent`, kills included.

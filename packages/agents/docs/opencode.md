@@ -7,9 +7,9 @@ the alternatives weighed, and the steps. The model is in
 OpenCode left, in [The frameworks](frameworks.md#opencode) (D6 of
 [the plan](plan.md#decisions)).
 
-**Status: steps 0 to 3 implemented** ([`src/opencode/`](../src/opencode),
-[`test/opencode.test.ts`](../test/opencode.test.ts), on Node 24); steps 4 to 6
-are left ([As built](#as-built)). Research of 2026-11-09: OpenCode's published packages
+**Status: steps 0 to 6 implemented** ([`src/opencode/`](../src/opencode),
+[`test/opencode.test.ts`](../test/opencode.test.ts), on Node 24); what is
+left, and where the code differs, is in [As built](#as-built). Research of 2026-11-09: OpenCode's published packages
 (`@opencode/core`, `sdk`, `server`, `plugin`, `schema`, `util`) at 2.0.32 and
 2.2.6, the latest release (2026-11-06), read in their sources, nothing run;
 and OpenCode's docs, OpenAPI spec, changelog and issues. Step 0, the
@@ -97,7 +97,7 @@ needs: the test skips on an older Node).
 
 ## As built
 
-Steps 1 to 3, where they differ from the design below:
+The steps, where they differ from the design below:
 
 - **The hook is on `Items`**, not an option of `answerOnce` and a second
   hook beside the view: `Items.settleOwn(ctx, turn, status)`, which
@@ -157,16 +157,43 @@ Steps 1 to 3, where they differ from the design below:
   under the next invocation (the crash test found it). What waits in the
   inbox when another prompt's turn is closed is cancelled
   (`session.inbox.cancel`).
-- **Step 5 is done**: `OpenCodeAgent` is in `packages/e2e/crash.ts`, kills
-  included, and `packaging.ts` checks `./opencode`. Of step 6, the foreman's
-  worker, senior and reviewer are OpenCode agents.
+- **Steps 5 and 6 are done**: `OpenCodeAgent` is in `packages/e2e/crash.ts`,
+  kills included, and `packaging.ts` checks `./opencode`; the README's
+  section and tables, [The frameworks](frameworks.md#opencode),
+  `examples/basic/opencode.ts`, and the foreman's worker, senior and
+  reviewer as OpenCode agents.
 - **A message OpenCode placed as its turn was stopped is the turn's.** A
   steer submitted before a stop may be placed by OpenCode as the turn is
   interrupted: after the interrupt, the placed steers alone are copied, so the
   turn holds the message and it is not answered again as a turn of its own.
-- **Left**: OpenCode's `retry` hook (its own retries apply), permissions
-  through Restate, a change of `model` on an existing session, the README's
-  section and tables, `frameworks.md`, `examples/basic/opencode.ts`.
+- **A provider's outage** (step 4): the `session.retry` hook
+  (`retryPlugin`) decides each retry, with pi's backoff and `retry` option
+  (2 s, doubling, a minute at most), never before the provider's
+  `retry-after` (up to OpenCode's 15 minutes, not shortened by
+  `maxAgentDelayMs`). Where it differs: OpenCode's schedule retries a step
+  10 times at most and stops at its 4th timeout, which the hook cannot
+  extend; so an outage OpenCode would retry for the last time, or no longer
+  retries, fails the attempt (not terminal), and the next attempt resumes
+  the turn, retrying afresh. A refusal is a 424 at once; a finite
+  `maxRetries` ends the turn.
+- **Permissions** (step 4): `permissionPlugin`, on `permission.evaluate`.
+  With a workspace OpenCode's rules allow everything but a few asks (a read
+  of `*.env`); an ask is denied by default, as OpenCode denies one nobody is
+  present for, and the model gets it as the tool's error. With
+  `approval: true` it waits for the signal `approval`
+  (`waitFor(…, { approval: true, rejoin: true })`), through crashes. Its
+  limits: the hook cannot tell a probe from an ask, and a call that asks
+  twice has both answered by the first answer
+  ([The frameworks](frameworks.md#approvals-1)).
+- **A retried attempt whose turn holds its final reply** answers with it,
+  and boots nothing. A retry of the submitted prompt first boots OpenCode
+  without its sweep and copies; if that brings the final reply (OpenCode
+  stored it, and the attempt died before its copy, or before OpenCode's
+  turn ended), OpenCode's claim is closed without the model rather than
+  resumed. So every retry of the submitted prompt boots OpenCode twice. A
+  killed turn keeps a final reply it stored, then the `Ended` note.
+- **Left**: a change of `model` on an existing session; OpenCode's subagent
+  and question tools and background shell stay removed (O6).
 
 ## What OpenCode does, in brief
 
@@ -351,10 +378,12 @@ asks and questions waited on in-memory promises that nothing answered.
 - **v1 removes** the subagent (`task`) and question tools, and background
   shell jobs, through the tools plugin (`editor.remove`). Restate's own
   `subagent` tool is the way to delegate: its calls are made once.
-- **Permissions**: OpenCode's config allows what the workspace may do; or,
-  opt-in, `permission.evaluate` waits for an approval through Restate
-  (`waitFor(ctx, callId, signal, input, { approval: true })`), so an ask
-  survives crashes and is answered by a signal, as every other approval.
+- **Permissions**: OpenCode's rules allow what the workspace may do, but
+  for a few asks, which `permission.evaluate` settles: denied by default, as
+  OpenCode denies an ask nobody is present for; or, opt-in (`approval`), a
+  wait for an approval through Restate (`waitFor(ctx, callId, 'approval',
+  input, { approval: true, rejoin: true })`), so an ask survives crashes and
+  is answered by a signal, as every other approval (as built: above).
 - Child sessions and background jobs come later, once their recovery is mapped
   onto turns (a child session is a claim of its own, which the restart
   releases with its parent's).
@@ -453,6 +482,8 @@ removed and permissions.
 **Done when** each line of [the table](#what-opencode-must-do-for-a-turn)
 has its test.
 
+**Done** ([As built](#as-built)): the `retry` hook and permissions last.
+
 ### Step 5: crashes, end to end
 
 `OpenCodeAgent` back in `packages/e2e/crash.ts`, kills included;
@@ -460,6 +491,8 @@ has its test.
 
 **Done when** `pnpm --filter e2e crash` passes: every message moves money
 exactly once.
+
+**Done.**
 
 ### Step 6: docs and examples
 
@@ -469,6 +502,8 @@ README's frameworks table and its OpenCode section; D6 marked done;
 OpenCode (`examples/advanced/foreman`).
 
 **Done when** the docs say what the code does, and the examples run.
+
+**Done.**
 
 ## Risks
 
