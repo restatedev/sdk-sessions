@@ -214,6 +214,7 @@ export const items: Items<Item> = {
     const host = await openOpenCode(database(ctx.db, DATABASE), fence, { restart: 'close' });
     try {
       await host.swept;
+      await dropInbox(host);
       await copyInto(ctx, host, turn);
     } finally {
       await host.close();
@@ -274,6 +275,24 @@ const outputOf = (part: Content) => {
 /** The prompts waiting in the session's inbox, until their turn starts, oldest first. */
 const inbox = (host: Host): Promise<{ id: string; payload: { text: string } }[]> =>
   host.call(host.client.session.inbox.list({ sessionID: SESSION }));
+
+/**
+ * Cancel what waits in the session's inbox. A prompt killed after OpenCode
+ * queued it and before its turn's claim leaves no claim for the sweep to
+ * close, only its input: the next prompt's drain would run it, under the
+ * next invocation.
+ */
+async function dropInbox(host: Host) {
+  const exists = await host.call(host.client.session.get({ sessionID: SESSION })).then(
+    () => true,
+    () => false,
+  );
+  // No session yet (the key's first prompt): nothing waits.
+  if (!exists) return;
+  for (const item of await inbox(host)) {
+    await host.call(host.client.session.inbox.cancel({ sessionID: SESSION, inboxID: item.id as never }));
+  }
+}
 
 /** The session's messages, a page at a time, newest first. */
 async function* newestFirst(host: Host): AsyncGenerator<Message[]> {
@@ -790,6 +809,8 @@ export const withOpenCode = async <T>(
         committed: copied,
       });
       await opened.swept;
+      // Another prompt's input still waiting is a dead invocation's too: it never runs.
+      if (!mine) await dropInbox(opened);
       return opened;
     })());
   const host = () => boot();

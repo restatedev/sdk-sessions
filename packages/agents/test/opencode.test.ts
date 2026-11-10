@@ -185,6 +185,41 @@ describe.skipIf(!NODE_24)('the OpenCode agent', () => {
     expect(continued()).toBe(false);
   }, 60_000);
 
+  it('never runs a prompt killed once OpenCode queued it, before its turn began', async () => {
+    const ran: string[] = [];
+    const transfer = tool({
+      name: 'transfer',
+      description: 'Move money.',
+      input: z.object({ from: z.number(), to: z.number(), amount: z.number() }),
+      run: ({ from, to, amount }, { ctx }) => {
+        ran.push(`${ctx.request.id}: ${amount}`);
+        return `moved ${amount} from account ${from} to account ${to}`;
+      },
+    });
+    const chat = handlerOf(opencode.chat({ tools: [transfer] }));
+    const map = new Map<string, Uint8Array>();
+    const fence = { closed: false };
+    const first = sqlAttempt({ map, fence, key: 'queued', id: 'inv1' });
+    // Killed as OpenCode took the prompt: nothing more is stored, the turn's claim neither.
+    boots.prompted = () => {
+      fence.closed = true;
+      first.abort();
+    };
+    await first.end(() => chat(first.ctx, 'Please move 1 from 0 to 1')).catch(() => {});
+    boots.prompted = undefined;
+    const asked = fake.script.requests.length;
+    const second = sqlAttempt({ map, key: 'queued', id: 'inv2' });
+    expect(await second.end(() => chat(second.ctx, 'Please move 2 from 0 to 1'))).toBe(
+      'Done: moved 2 from account 0 to account 1',
+    );
+    // The dead prompt's transfer is never made, by any invocation; the model is asked for the next prompt alone.
+    expect(ran).toEqual(['inv2: 2']);
+    for (const request of fake.script.requests.slice(asked)) {
+      const said = request.prompt.filter((m) => m.role === 'user').map((m) => fake.textOf(m));
+      expect(said).toEqual([`(${ENDED})\n\nPlease move 2 from 0 to 1`]);
+    }
+  }, 60_000);
+
   it("closes a killed turn on its companion's `settle`: never finished", async () => {
     const c = conversation(prompt, 'settled');
     await c.crash('inv1', 'Please move 1 from 0 to 1');
