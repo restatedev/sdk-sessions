@@ -407,8 +407,11 @@ async function copyInto(
       if (after.slice(after.indexOf(m) + 1).some((n) => n.type === 'assistant')) continue;
       break;
     }
+    // A step with tool calls whose stream never ended (a crash once a call ran, as OpenCode runs a call as it
+    // streams) is completed, without a `finish`, as the resumed turn's next step starts: copied, its calls kept.
     const ready =
-      m.finish !== undefined || (m.time?.streamed !== undefined && tools.every((t) => t.state?.status !== 'streaming'));
+      m.time?.completed !== undefined ||
+      (m.time?.streamed !== undefined && tools.every((t) => t.state?.status !== 'streaming'));
     if (!ready) break;
     if (!have.has(m.id)) {
       const text = textOf(m.content);

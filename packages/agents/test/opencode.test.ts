@@ -1490,6 +1490,47 @@ describe.skipIf(!NODE_24)('the OpenCode agent, killed at the end of a turn', () 
     expect(texts).toEqual([ASKED, 'On it.', DONE]);
   }, 60_000);
 
+  it('copies a step whose call ran before its stream ended, when the attempt died there: resumed, each call with its result', async () => {
+    const c = conversation(prompt, 'ran-unstreamed');
+    const { promise: dead, resolve: died } = Promise.withResolvers<void>();
+    let gone = false;
+    // OpenCode runs a call as its stream goes on: the attempt dies once the call is stored running, before
+    // OpenCode stores the stream's end. From then on, none of its writes is stored.
+    boots.transaction = async (run, writes) => {
+      if (gone) throw new Error('the attempt is gone');
+      const result = await run();
+      const running = writes.some(
+        (p) => p[0] === 'assistant' && /"running"/.test(String(p[3])) && !/"streamed"/.test(String(p[3])),
+      );
+      if (running) {
+        gone = true;
+        died();
+      }
+      return result;
+    };
+    void c.attempt('inv1', ASKED).catch(() => {});
+    await dead;
+    boots.transaction = undefined;
+    expect(await c.attempt('inv1', ASKED)).toBe(DONE);
+    expect(continued()).toBe(true);
+    const { messages } = await c.read(opencode.messages(), {});
+    const tools = messages.flatMap((m) =>
+      m.parts.flatMap((p) => (p.type === 'tool' ? [p as { id: string; output?: string; error?: boolean }] : [])),
+    );
+    // The cut-off step, with its call (interrupted), the call made again with its result, then the answer once.
+    expect(messages.map((m) => m.parts.flatMap((p) => (p.type === 'text' ? [p.text] : [p.type])))).toEqual([
+      [ASKED],
+      ['On it.', 'tool'],
+      ['tool'],
+      [DONE],
+    ]);
+    expect(tools).toHaveLength(2);
+    for (const t of tools) expect(t.output).toBeDefined();
+    expect(tools[0]).toMatchObject({ error: true, output: expect.stringMatching(/interrupted/) });
+    expect(tools[1]).toMatchObject({ output: 'moved 5 from account 1 to account 2' });
+    expect(c.ledger.transfers.size).toBe(1);
+  }, 60_000);
+
   for (const at of ['stored', 'copied', 'idle'] as const) {
     it(`answers with the final reply OpenCode stored, once, when the attempt dies at its end (${at})`, async () => {
       const { answer, texts, requests, transfers, c } = await diedAtTheEnd(at, 'retry');
