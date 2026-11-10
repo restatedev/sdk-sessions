@@ -43,8 +43,8 @@
 // loop, from the conversation to the answer, storing each step as it goes).
 import * as restate from '@restatedev/sessions';
 import type { Database, DatabaseReader, DatabaseWriter, Transaction } from '@restatedev/sessions';
-import { definitionOf, Schema } from '@restatedev/sessions/internal';
-import { forPrompt, outcomes } from './calls.ts';
+import { definitionOf, ensureSchemas, Schema } from '@restatedev/sessions/internal';
+import { forPrompt, outcomes, SCHEMA as CALLS } from './calls.ts';
 import {
   answering,
   AttemptEnded,
@@ -1374,14 +1374,22 @@ export const invocationOf = (promptId: string) => promptId.split(':', 1)[0]!;
  * answer is checked: a message it returns asks the model again with it,
  * once, as a step of the turn ({@link Turn.askAgain}), and the turn's answer
  * is the reply to that. With `reminder`, the model is told it after the
- * prompt ({@link Turn.reminder}), which is stored as it was asked.
+ * prompt ({@link Turn.reminder}), which is stored as it was asked. With
+ * `schemas`, the framework's own tables are applied with the conversation's.
  */
 export async function answerOnce<I>(
   ctx: restate.SessionContext,
   text: string,
   items: Items<I>,
   run: Run<I>,
-  options: { window?: Window; budget?: number; check?: Check; reminder?: string; ownHistory?: boolean } = {},
+  options: {
+    window?: Window;
+    budget?: number;
+    check?: Check;
+    reminder?: string;
+    ownHistory?: boolean;
+    schemas?: readonly Schema[];
+  } = {},
 ): Promise<string> {
   const settings = settingsOf(ctx);
   // One framework per agent (D7): its conversation holds its `messages` view's items, which another can't read.
@@ -1397,7 +1405,10 @@ export async function answerOnce<I>(
   const window = own ? 0 : checkWindow(options.window ?? settings.window);
   const budget = own ? 0 : (options.budget ?? settings.budget);
   const promptId = nextPromptId(ctx);
-  await SCHEMA.ensure(ctx.db);
+  // With the tool calls' (calls.ts), which the turn reads as it ends whether
+  // or not a tool ran, and the framework's own (`schemas`): a key's first
+  // turn applies them in one commit, rather than one each.
+  await ensureSchemas(ctx.db, [SCHEMA, CALLS, ...(options.schemas ?? [])]);
   const stored = await answerIn(ctx.db, promptId);
   // Answered (or closed) already: a retry answers, or fails, as the turn ended.
   if (stored !== undefined) return storedAnswer(stored.answer, stored.status);

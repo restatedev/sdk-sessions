@@ -54,8 +54,11 @@ interface Calls {
   calls: Call[];
 }
 
-/** The table of the {@link Calls}: one row, of the invocation whose calls they are. */
-const SCHEMA = new Schema('restate-agents.calls', [
+/**
+ * The table of the {@link Calls}: one row, of the invocation whose calls they are. `answerOnce` applies it with
+ * the conversation's, in one commit, as a key's first turn starts.
+ */
+export const SCHEMA = new Schema('restate-agents.calls', [
   `CREATE TABLE restate_agent_calls (
     row INTEGER PRIMARY KEY CHECK (row = 0),
     invocation TEXT NOT NULL,

@@ -554,6 +554,9 @@ invocation (the next invocation's first call replaces it):
   which it discards, so a key never written reads as empty tables. The names
   here are `restate_agents.turns` (new, the Python SDK's), `restate-agents.calls`
   (as today, the Python SDK's too) and `restate-agents.langgraph` (as today).
+  `answerOnce` applies the conversation's and the call records' (and a graph
+  of your own, its checkpoints') with `ensureSchemas(ctx.db, [...])`, in one
+  transaction: a key's first turn makes one commit for them, not one each.
 - **Steps.** A step that has run is never changed; a change is a step of its
   own. This port is the exception (D1 in [the plan](plan.md#decisions)): it
   starts new databases, with no migration from v0.3.0's tables.

@@ -49,7 +49,7 @@ import {
 import type { DatabaseWriter, Database, SqlValue } from '@restatedev/sessions';
 import { Schema } from '@restatedev/sessions/internal';
 
-const SCHEMA = new Schema('restate-agents.langgraph', [
+export const SCHEMA = new Schema('restate-agents.langgraph', [
   `CREATE TABLE restate_langgraph_checkpoints (
     thread_id TEXT NOT NULL,
     checkpoint_ns TEXT NOT NULL,

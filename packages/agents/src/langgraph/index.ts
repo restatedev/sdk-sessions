@@ -66,7 +66,7 @@ import { type Definition, sessionObject } from '../object.ts';
 import { takeSteers } from '../steering.ts';
 import { isTool, jsonSchemaOf, type Tool as AnyTool } from '../tools.ts';
 
-import { SqlCheckpointSaver } from './checkpointer.ts';
+import { SCHEMA as CHECKPOINTS, SqlCheckpointSaver } from './checkpointer.ts';
 import { handlerContext } from './context.ts';
 import { terminalOf } from './errors.ts';
 import { type AnyGraph, check as checkGraph, graphRun } from './graph.ts';
@@ -403,7 +403,12 @@ export const prompt = <O extends z.ZodObject | undefined = undefined>(
   if (graph !== undefined) {
     // The graph keeps its own history: the conversation loads the previous turn whole, for what closed it.
     return withChecked(text, options, (t, _options, check) =>
-      answerOnce(ctx, t, items, graphRun(ctx, graph, context), { check, window: 1, budget: 0 }),
+      answerOnce(ctx, t, items, graphRun(ctx, graph, context), {
+        check,
+        window: 1,
+        budget: 0,
+        schemas: [CHECKPOINTS],
+      }),
     ) as Promise<Answer<O>>;
   }
   return withChecked(text, options, async (t, { model, system, tools: given = [], recursionLimit }, check, reminder) =>

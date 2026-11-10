@@ -2,7 +2,7 @@
 // steps, applied once per key by the handlers that open its database.
 import { randomUUID } from 'node:crypto';
 import * as restate from '@restatedev/sessions';
-import { open, Schema } from '@restatedev/sessions/internal';
+import { ensureSchemas, open, Schema } from '@restatedev/sessions/internal';
 import { describe, expect, it } from 'vitest';
 import { memoryStore, sqlAttempt } from './support.ts';
 
@@ -120,6 +120,22 @@ describe("a library's schema", () => {
     const attempt = sqlAttempt({ map });
     await attempt.end(() => Promise.all([LIBRARY.ensure(attempt.db), LIBRARY.ensure(attempt.db)]));
     expect(await stepsOf(map, 'library')).toBe('1');
+  });
+
+  it('is applied with others in one commit, by ensureSchemas: those the database lacks', async () => {
+    const OTHER = new Schema('other', ['CREATE TABLE other_items (item TEXT)']);
+    const map = new Map<string, Uint8Array>();
+    let commits = 0;
+    const onSync = async () => void commits++;
+    const first = sqlAttempt({ map, onSync });
+    await first.end(() => ensureSchemas(first.db, [LIBRARY, OTHER]));
+    expect(commits).toBe(1);
+    expect([await stepsOf(map, 'library'), await stepsOf(map, 'other')]).toEqual(['1', '1']);
+    // Applied already: nothing to commit, in a later attempt either.
+    commits = 0;
+    const later = sqlAttempt({ map, onSync, id: 'later' });
+    await later.end(() => ensureSchemas(later.db, [LIBRARY, OTHER]));
+    expect(commits).toBe(0);
   });
 
   it('is a shared handler’s own: empty, and stored nowhere', async () => {

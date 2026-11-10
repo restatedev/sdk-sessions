@@ -19,7 +19,8 @@
 // which stores nothing, then reads: a key never written reads as
 // empty tables. This repository's libraries (@restatedev/agents) keep their tables
 // in a schema of their own name, which `schema.ensure(ctx.db)` applies where
-// they use them, in any object: internal, from @restatedev/sessions/internal.
+// they use them, in any object (`ensureSchemas(ctx.db, [...])` for several at
+// once, in one commit): internal, from @restatedev/sessions/internal.
 import type { Connection, DatabaseReader, DatabaseWriter, ConnectionTransaction } from './database.ts';
 import { Link } from './link.ts';
 
@@ -57,9 +58,18 @@ export class Schema {
    * handler's are its own, vanishing with its session.
    */
   ensure(db: DatabaseReader | Connection): Promise<void> {
-    const ensure = ensureOf(db);
-    return ensure ? ensure([this]) : apply(db as Connection, [this]);
+    return ensureSchemas(db, [this]);
   }
+}
+
+/**
+ * Apply the steps of `schemas` that `db` lacks, as {@link Schema.ensure}
+ * does each, in one transaction: a database that lacks several (a key's
+ * first handler, say) gets them in one commit rather than one each.
+ */
+export function ensureSchemas(db: DatabaseReader | Connection, schemas: readonly Schema[]): Promise<void> {
+  const ensure = ensureOf(db);
+  return ensure ? ensure(schemas) : apply(db as Connection, schemas);
 }
 
 /** How a database applies schemas: a handler's (`ctx.db`, its reader), or one of `asDatabase`. */

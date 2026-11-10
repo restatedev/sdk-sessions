@@ -31,6 +31,8 @@ export class Following {
   steering: { id: string; text: string }[] = [];
   /** The ids of each `taken` the turns sent, in order. */
   readonly taken: string[][] = [];
+  /** Each call and send the turns made to the companion, by its handler's name, in order. */
+  readonly made: string[] = [];
 }
 
 /** The following of each object's state. */
@@ -128,6 +130,7 @@ export function sqlAttempt(
     }
     const method = signals[c.method];
     if (!method) throw new Error(`no signals.${c.method} in this test`);
+    following.made.push(c.method);
     return method(c.parameter as never);
   };
   const sdk = {
