@@ -14,10 +14,11 @@ import type {
 } from '@ai-sdk/provider';
 import { Model, Provider, type Plugin } from '@opencode/plugin';
 
-/** A reply of the model: text, and maybe a tool call. */
+/** A reply of the model: text, and maybe a tool call; or, with `error`, its text and then the stream fails with it. */
 export interface Reply {
   text?: string;
   call?: { id: string; name: string; input: Record<string, unknown> };
+  error?: unknown;
 }
 
 /** A request to the model: its prompt, and the names of the tools it offers. */
@@ -42,10 +43,11 @@ export const textOf = (message: LanguageModelV3Message): string =>
 
 const none = undefined;
 /** `reply` as a model's stream. */
-function stream({ text, call }: Reply): LanguageModelV3StreamPart[] {
+function stream({ text, call, error }: Reply): LanguageModelV3StreamPart[] {
   const parts: LanguageModelV3StreamPart[] = [{ type: 'stream-start', warnings: [] }];
   if (text !== undefined) {
     parts.push({ type: 'text-start', id: 'text' }, { type: 'text-delta', id: 'text', delta: text });
+    if (error !== undefined) return [...parts, { type: 'error', error }];
     parts.push({ type: 'text-end', id: 'text' });
   }
   if (call) {

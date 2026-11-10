@@ -1063,32 +1063,37 @@ describe.skipIf(!NODE_24)('the OpenCode agent, killed at the end of a turn', () 
   const ASKED = 'Please move 5 from 1 to 2';
   const DONE = 'Done: moved 5 from account 1 to account 2';
 
-  /** Whether `writes` (one of OpenCode's transactions) stores the final reply's step as its stream ended. */
-  const streamsDone = (writes: unknown[][]) =>
-    writes.some((p) => p[0] === 'assistant' && String(p[3]).includes('"streamed"') && String(p[3]).includes(DONE));
+  /** The data of the final reply's step that `writes` (one of OpenCode's transactions) stores, if it does. */
+  const doneIn = (writes: unknown[][]) =>
+    writes.map((p) => (p[0] === 'assistant' ? String(p[3]) : '')).find((data) => data.includes(DONE));
+  /** Whether `writes` stores the final reply's step as its stream ended (before OpenCode stores how the step ended). */
+  const streamsDone = (writes: unknown[][]) => doneIn(writes)?.includes('"streamed"') === true;
+  /** Whether `writes` stores the final reply's step as ended. */
+  const endsDone = (writes: unknown[][]) => doneIn(writes)?.includes('"completed"') === true;
 
   /**
    * The bank's turn, whose attempt dies (killed: nothing more is stored) at
-   * its end, with OpenCode's final reply stored: `stored`, as OpenCode
-   * commits the step, before the copy; `copied`, once the turn has the reply
-   * copied, before OpenCode ends its turn (its claim held); `idle`, once
-   * OpenCode ended its turn too, before the turn's answer is stored. Then the
-   * next attempt (`retry`), or, the invocation gone, the next message
-   * (`killed`, 'Hello'). Its answer, the conversation's texts, the requests
-   * to the model since the death, and the transfers.
+   * its end: `streamed`, as OpenCode commits the final reply's stream end,
+   * before it stores how the step ended; `stored`, as it commits the step's
+   * end, before the copy; `copied`, once the turn has the reply copied,
+   * before OpenCode ends its turn (its claim held); `idle`, once OpenCode
+   * ended its turn too, before the turn's answer is stored. Then the next
+   * attempt (`retry`), or, the invocation gone, the next message (`killed`,
+   * 'Hello'). Its answer, the conversation's texts, the requests to the
+   * model since the death, and the transfers.
    */
-  async function diedAtTheEnd(at: 'stored' | 'copied' | 'idle', next: 'retry' | 'killed') {
+  async function diedAtTheEnd(at: 'streamed' | 'stored' | 'copied' | 'idle', next: 'retry' | 'killed') {
     const key = `end-${at}-${next}`;
     const c = conversation(prompt, key);
     const map = c.state as Map<string, Uint8Array>;
     const { promise: dead, resolve: died } = Promise.withResolvers<void>();
-    let streamed = false;
+    let ended = false;
     /** Once the turn holds the final reply: read beside the attempt. */
     const copied = async () => {
       while (!(await textsOf(map, key)).includes(DONE)) await new Promise((resolve) => setTimeout(resolve, 10));
     };
     boots.transaction = async (run, writes) => {
-      if (streamed && at !== 'stored') {
+      if (ended && (at === 'copied' || at === 'idle')) {
         // OpenCode's next transaction waits for the copy (which reads OpenCode outside of it).
         await copied();
         if (at === 'copied') {
@@ -1098,8 +1103,12 @@ describe.skipIf(!NODE_24)('the OpenCode agent, killed at the end of a turn', () 
         }
       }
       const result = await run();
-      if (streamsDone(writes)) streamed = true;
-      if ((at === 'stored' && streamsDone(writes)) || (at === 'idle' && idles(writes))) {
+      if (endsDone(writes)) ended = true;
+      const dies =
+        (at === 'streamed' && streamsDone(writes)) ||
+        (at === 'stored' && endsDone(writes)) ||
+        (at === 'idle' && idles(writes));
+      if (dies) {
         boots.transaction = undefined;
         died();
       }
@@ -1138,6 +1147,76 @@ describe.skipIf(!NODE_24)('the OpenCode agent, killed at the end of a turn', () 
     expect(continued()).toBe(true);
     expect(c.ledger.transfers.size).toBe(1);
     expect(await textsOf(c.state as Map<string, Uint8Array>, 'end-outage')).toEqual([ASKED, 'On it.', DONE]);
+  }, 60_000);
+
+  it('resumes a turn killed once its final reply streamed, before OpenCode stored how its step ended', async () => {
+    const { answer, texts, requests, transfers } = await diedAtTheEnd('streamed', 'retry');
+    expect(answer).toBe(DONE);
+    // The step might yet have failed: the turn holds no final reply, and OpenCode's turn is resumed.
+    expect(requests.map((r) => fake.textOf(r.prompt.at(-1)!))).toEqual([expect.stringMatching(fake.CONTINUE)]);
+    // The step left without its end is no reply: the view has the resumed turn's, once.
+    expect(texts).toEqual([ASKED, 'On it.', DONE]);
+    expect(transfers).toBe(1);
+  }, 60_000);
+
+  it('closes a turn killed once its final reply streamed by the next message: never finished', async () => {
+    const { answer, texts, requests, transfers } = await diedAtTheEnd('streamed', 'killed');
+    expect(answer).toMatch(/^Ask me/);
+    expect(texts).toEqual([ASKED, 'On it.', ENDED, 'Hello', answer]);
+    expect(requests.map((r) => fake.textOf(r.prompt.findLast((m) => m.role === 'user')!))).toEqual([
+      `(${ENDED})\n\nHello`,
+    ]);
+    expect(transfers).toBe(1);
+  }, 60_000);
+
+  /** OpenCode's message after a step whose stream failed with output: it goes on in a step of its own. */
+  const INCOMPLETE = /^The previous response was interrupted/;
+  /** The bank's teller, whose final reply's stream fails once, after `Done: mov`; asked to go on, it answers. */
+  const failingMidStream = () => {
+    let failed = false;
+    fake.script.reply = (request) => {
+      const last = request.prompt.at(-1)!;
+      if (last.role === 'tool' && !failed) {
+        failed = true;
+        return { text: 'Done: mov', error: failure(503) };
+      }
+      if (last.role === 'user' && (INCOMPLETE.test(fake.textOf(last)) || fake.CONTINUE.test(fake.textOf(last))))
+        return { text: DONE };
+      return fake.teller(request);
+    };
+  };
+
+  it('never stores a step whose stream failed after its text as a reply: the step asked again answers', async () => {
+    failingMidStream();
+    const c = conversation(quickChat(), 'mid-stream');
+    expect(await c.attempt('inv1', ASKED)).toBe(DONE);
+    // OpenCode kept the failed step, and asked again after it.
+    expect(fake.textOf(fake.script.requests.at(-1)!.prompt.at(-1)!)).toMatch(INCOMPLETE);
+    expect(await textsOf(c.state as Map<string, Uint8Array>, 'mid-stream')).toEqual([ASKED, 'On it.', DONE]);
+    expect(c.ledger.transfers.size).toBe(1);
+  }, 60_000);
+
+  it('resumes a turn killed once a step whose stream failed after its text was stored: never its answer', async () => {
+    failingMidStream();
+    const c = conversation(quickChat(), 'mid-stream-killed');
+    const { promise: dead, resolve: died } = Promise.withResolvers<void>();
+    boots.transaction = async (run, writes) => {
+      const result = await run();
+      // OpenCode stored the step as failed: the attempt dies before OpenCode asks again.
+      const failedStep = writes.some((p) => p[0] === 'assistant' && /"error"/.test(String(p[3])));
+      if (failedStep) {
+        boots.transaction = undefined;
+        died();
+      }
+      return result;
+    };
+    void c.attempt('inv1', ASKED).catch(() => {});
+    await dead;
+    expect(await c.attempt('inv1', ASKED)).toBe(DONE);
+    // Not answered with the failed step's text: OpenCode's turn was resumed.
+    expect(continued()).toBe(true);
+    expect(await textsOf(c.state as Map<string, Uint8Array>, 'mid-stream-killed')).toEqual([ASKED, 'On it.', DONE]);
+    expect(c.ledger.transfers.size).toBe(1);
   }, 60_000);
 
   for (const at of ['stored', 'copied', 'idle'] as const) {

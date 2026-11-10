@@ -266,6 +266,8 @@ interface Message {
   content?: Content[];
   error?: { message?: string; type?: string; status?: number };
   time?: { completed?: unknown; streamed?: unknown };
+  /** How the step ended (`stop`, `tool-calls`, `error`...), once OpenCode stored it. */
+  finish?: string;
   metadata?: Record<string, unknown>;
 }
 
@@ -356,7 +358,8 @@ interface Returned {
 /**
  * Copy into `turn` what OpenCode has of it that the turn lacks: each step's
  * assistant message once its stream ended (its text, its tool calls, before
- * they run), each tool call's result once it ended, and each message
+ * they run; one without calls once its step ended, and not if it failed),
+ * each tool call's result once it ended, and each message
  * steered to the turn that OpenCode placed at a step (stored as steered, the
  * companion told it is taken in the transaction). Each once: by OpenCode's
  * ids, a steered message by its steer id too. Not the prompt, nor what asks
@@ -393,16 +396,24 @@ async function copyInto(
     }
     if (m.type !== 'assistant' || steersOnly) continue;
     const tools = (m.content ?? []).filter((c) => c.type === 'tool' && c.id !== undefined);
-    // A step's message is updated in place as it streams: copied once its stream ended, its calls' input whole.
-    const streamed =
-      m.time?.completed !== undefined ||
-      (m.time?.streamed !== undefined && tools.every((t) => t.state?.status !== 'streaming'));
-    if (!streamed) break;
+    // A step's message is updated in place as it streams. With tool calls, it is copied once its stream
+    // ended, before they run, their input whole. Without, once OpenCode stored how the step ended (its
+    // `finish`, after its stream's end): a step that failed (its provider refused, or failed mid-stream)
+    // is no reply, as OpenCode asks again in a step of its own, or its error ends the turn. A step left
+    // without its end (a crash between the two, then a resume) is never one either: OpenCode marks it
+    // completed, without a `finish`, as the resumed turn's next step starts.
+    if (tools.length === 0 && m.finish === undefined) {
+      if (after.slice(after.indexOf(m) + 1).some((n) => n.type === 'assistant')) continue;
+      break;
+    }
+    const ready =
+      m.finish !== undefined || (m.time?.streamed !== undefined && tools.every((t) => t.state?.status !== 'streaming'));
+    if (!ready) break;
     if (!have.has(m.id)) {
       const text = textOf(m.content);
       const calls = tools.map((t) => ({ id: t.id!, name: t.name ?? '', input: t.state?.input ?? {} }));
-      // A step that failed (its provider refused, say) says nothing: its error ends the turn.
-      if (!text.trim() && calls.length === 0) continue;
+      // A failed step's tool calls are kept, for their results.
+      if (calls.length === 0 && (m.error !== undefined || m.finish === 'error' || !text.trim())) continue;
       copied.push({ item: { type: 'assistant', text, calls, from: m.id }, reply: true });
       have.add(m.id);
     }
