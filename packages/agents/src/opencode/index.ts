@@ -29,7 +29,10 @@
 // (`restate_agents_opencode`). A boot for that prompt (a retried attempt)
 // resumes its turn, as OpenCode does; a boot for any other closes it without
 // asking the model (OpenCode's resume budget, `maxAttempts: 0`), and the sweep
-// is awaited before anything is submitted. A turn another invocation left
+// is awaited before anything is submitted. A retried attempt whose turn holds
+// its final reply (copied, or caught up from OpenCode before the boot that
+// would resume) answers with it: OpenCode's turn is closed, not resumed, which
+// would ask the model again. A turn another invocation left
 // (killed) is closed in OpenCode first, then the copy catches up, then the
 // conversation closes it (`settleOwn` of the items). The next prompt tells the
 // model how the turn before it ended, and which of its calls did happen.
@@ -1002,16 +1005,31 @@ export const withOpenCode = async <T>(
     },
   };
 
+  // This attempt found a turn's final reply stored: a claim left is of a turn the model finished.
+  let finished = false;
   let booted: Promise<Host> | undefined;
-  /** Boot OpenCode, once: for the prompt `promptId` if a prompt boots it. */
-  const boot = (promptId?: string) =>
+  /** Boot OpenCode, once: for the prompt `promptId` of turn `current` if a prompt boots it. */
+  const boot = (promptId?: string, current?: Turn<Item>) =>
     (booted ??= (async () => {
       const submitted = await submittedOf(ctx);
       // A claim, if any, is the recorded prompt's: this one's goes on, another's is closed.
       const mine =
         submitted !== undefined &&
         (promptId === undefined ? invocationOf(submitted) === ctx.request.id : submitted === promptId);
-      const restart: Restart = mine ? 'resume' : 'close';
+      if (mine && !finished && current) {
+        // What OpenCode stored of the turn is copied first: a final reply it stored (and the attempt died
+        // before its copy, or before OpenCode's turn ended) is the answer, and its turn is not resumed,
+        // which would ask the model again.
+        const reader = await openOpenCode(database(ctx.db, DATABASE), fence, { restart: 'none' });
+        try {
+          await reader.swept;
+          await copyInto(ctx, reader, current);
+        } finally {
+          await reader.close();
+        }
+        finished = current.finalReply() !== undefined;
+      }
+      const restart: Restart = mine && !finished ? 'resume' : 'close';
       const opened = await openOpenCode(database(ctx.db, DATABASE), fence, {
         plugins: [
           ...plugins,
@@ -1066,7 +1084,15 @@ export const withOpenCode = async <T>(
         const id = current.id;
         const again = current.latestAsk() !== current.prompt;
         const messageId = again ? againIdOf(id) : messageIdOf(id);
-        const opened = await boot(id);
+        // A stored final reply is the answer: the model is not asked for it again (nor OpenCode's turn resumed).
+        const stored = current.finalReply();
+        if (stored !== undefined) {
+          finished = true;
+          return stored;
+        }
+        const opened = await boot(id, current);
+        const caught = current.finalReply();
+        if (caught !== undefined) return caught;
         // Before the turn closes here (stopped, refused, failed): OpenCode's turn first, then the copy.
         live.set(current, async (status) => {
           if (status === 'cancelled') await stopTurn();

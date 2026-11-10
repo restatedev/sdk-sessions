@@ -40,8 +40,16 @@ import {
 
 const NODE_24 = Number(process.versions.node.split('.')[0]) >= 24;
 
-/** How often OpenCode was booted; `prompted`, if a test sets it, is told of each prompt OpenCode took, as it returns. */
-const boots = vi.hoisted(() => ({ n: 0, prompted: undefined as ((input: { id?: unknown }) => void) | undefined }));
+/**
+ * How often OpenCode was booted; `prompted`, if a test sets it, is told of each prompt OpenCode took, as it
+ * returns; `transaction`, if a test sets it, runs each of OpenCode's transactions (`run`), and is given the
+ * parameters of each statement of it that writes, as it runs.
+ */
+const boots = vi.hoisted(() => ({
+  n: 0,
+  prompted: undefined as ((input: { id?: unknown }) => void) | undefined,
+  transaction: undefined as ((run: () => Promise<unknown>, writes: unknown[][]) => Promise<unknown>) | undefined,
+}));
 
 // Every boot of OpenCode has the teller's provider.
 vi.mock('@restatedev/agents/opencode/db', async (original) => {
@@ -50,7 +58,36 @@ vi.mock('@restatedev/agents/opencode/db', async (original) => {
   const { Effect } = await import('effect');
   const openOpenCode: typeof db.openOpenCode = async (database, fence, options) => {
     boots.n++;
-    const host = await db.openOpenCode(database, fence, {
+    // OpenCode's database, whose transactions `boots.transaction` runs.
+    const transaction: typeof database.transaction = (body) => {
+      const writes: unknown[][] = [];
+      const execute = (sql: string, params: unknown[] = []) => {
+        if (/^\s*(insert|update|delete|replace)\b/i.test(sql)) writes.push(params);
+      };
+      const run = () =>
+        database.transaction((tx) => {
+          const watched = new Proxy(tx, {
+            get: (t, key) => {
+              const value: unknown = Reflect.get(t, key);
+              if (typeof value !== 'function') return value;
+              return (sql: string, params?: never) => {
+                if (key === 'query' || key === 'values' || key === 'execute' || key === 'get') execute(sql, params);
+                return (value as (s: string, p?: unknown) => unknown).call(t, sql, params);
+              };
+            },
+          });
+          return body(watched);
+        });
+      return (boots.transaction ? boots.transaction(run, writes) : run()) as ReturnType<typeof body>;
+    };
+    const watched = new Proxy(database, {
+      get: (t, key) => {
+        const value: unknown = Reflect.get(t, key);
+        if (key === 'transaction') return transaction;
+        return typeof value === 'function' ? (value as () => unknown).bind(t) : value;
+      },
+    });
+    const host = await db.openOpenCode(watched, fence, {
       ...options,
       plugins: [scriptedPlugin, ...(options.plugins ?? [])],
     });
@@ -85,6 +122,7 @@ beforeEach(() => {
   fake.script.requests.length = 0;
   fake.script.reply = fake.teller;
   boots.prompted = undefined;
+  boots.transaction = undefined;
 });
 
 /** The texts of the user's messages of the model's latest request, in order. */
@@ -1016,4 +1054,117 @@ describe.skipIf(!NODE_24)("the OpenCode agent's permission asks", () => {
       [{ type: 'text', text: CANCELLED }],
     ]);
   }, 60_000);
+});
+
+/** Whether `writes` (one of OpenCode's transactions) stores its idle marker: its turn ended, its claim released. */
+const idles = (writes: unknown[][]) => writes.some((p) => p[2] === 'idle');
+
+describe.skipIf(!NODE_24)('the OpenCode agent, killed at the end of a turn', () => {
+  const ASKED = 'Please move 5 from 1 to 2';
+  const DONE = 'Done: moved 5 from account 1 to account 2';
+
+  /** Whether `writes` (one of OpenCode's transactions) stores the final reply's step as its stream ended. */
+  const streamsDone = (writes: unknown[][]) =>
+    writes.some((p) => p[0] === 'assistant' && String(p[3]).includes('"streamed"') && String(p[3]).includes(DONE));
+
+  /**
+   * The bank's turn, whose attempt dies (killed: nothing more is stored) at
+   * its end, with OpenCode's final reply stored: `stored`, as OpenCode
+   * commits the step, before the copy; `copied`, once the turn has the reply
+   * copied, before OpenCode ends its turn (its claim held); `idle`, once
+   * OpenCode ended its turn too, before the turn's answer is stored. Then the
+   * next attempt (`retry`), or, the invocation gone, the next message
+   * (`killed`, 'Hello'). Its answer, the conversation's texts, the requests
+   * to the model since the death, and the transfers.
+   */
+  async function diedAtTheEnd(at: 'stored' | 'copied' | 'idle', next: 'retry' | 'killed') {
+    const key = `end-${at}-${next}`;
+    const c = conversation(prompt, key);
+    const map = c.state as Map<string, Uint8Array>;
+    const { promise: dead, resolve: died } = Promise.withResolvers<void>();
+    let streamed = false;
+    /** Once the turn holds the final reply: read beside the attempt. */
+    const copied = async () => {
+      while (!(await textsOf(map, key)).includes(DONE)) await new Promise((resolve) => setTimeout(resolve, 10));
+    };
+    boots.transaction = async (run, writes) => {
+      if (streamed && at !== 'stored') {
+        // OpenCode's next transaction waits for the copy (which reads OpenCode outside of it).
+        await copied();
+        if (at === 'copied') {
+          boots.transaction = undefined;
+          died();
+          throw new Error('killed');
+        }
+      }
+      const result = await run();
+      if (streamsDone(writes)) streamed = true;
+      if ((at === 'stored' && streamsDone(writes)) || (at === 'idle' && idles(writes))) {
+        boots.transaction = undefined;
+        died();
+      }
+      return result;
+    };
+    // The attempt is abandoned (fenced) as it dies: the next attempt closes its fence.
+    void c.attempt('inv1', ASKED).catch(() => {});
+    await dead;
+    const asked = fake.script.requests.length;
+    const answer = await (next === 'retry' ? c.attempt('inv1', ASKED) : c.attempt('inv2', 'Hello'));
+    return {
+      answer,
+      texts: await textsOf(map, key),
+      requests: fake.script.requests.slice(asked),
+      transfers: c.ledger.transfers.size,
+      c,
+    };
+  }
+
+  it('resumes a turn whose final step failed past the retries OpenCode makes: no final reply is stored', async () => {
+    // The transfer's step is answered; the final step's requests fail, past OpenCode's ten.
+    let left = 12;
+    fake.script.reply = (request) => {
+      if (request.prompt.at(-1)!.role === 'tool' && left-- > 0) throw failure(503);
+      return fake.teller(request);
+    };
+    const c = conversation(quickChat(), 'end-outage');
+    const failed = await c.attempt('inv1', ASKED).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(failed).toBeInstanceOf(Error);
+    expect(failed).not.toBeInstanceOf(restate.TerminalError);
+    // The retry resumes OpenCode's turn, which asks the model for the final step again.
+    expect(await c.attempt('inv1', ASKED)).toBe(DONE);
+    expect(continued()).toBe(true);
+    expect(c.ledger.transfers.size).toBe(1);
+    expect(await textsOf(c.state as Map<string, Uint8Array>, 'end-outage')).toEqual([ASKED, 'On it.', DONE]);
+  }, 60_000);
+
+  for (const at of ['stored', 'copied', 'idle'] as const) {
+    it(`answers with the final reply OpenCode stored, once, when the attempt dies at its end (${at})`, async () => {
+      const { answer, texts, requests, transfers, c } = await diedAtTheEnd(at, 'retry');
+      expect(answer).toBe(DONE);
+      // The model is not asked again: the turn has its final reply, once.
+      expect(requests).toEqual([]);
+      expect(texts).toEqual([ASKED, 'On it.', DONE]);
+      expect(transfers).toBe(1);
+      // The next message's model has the reply once, and the turn as answered: no note, no "Continue".
+      expect(await c.attempt('inv2', 'Hello')).toMatch(/^Ask me/);
+      const said = fake.script.requests.at(-1)!.prompt.map((m) => fake.textOf(m));
+      expect(said.filter((t) => t === DONE)).toHaveLength(1);
+      expect(said.at(-1)).toBe('Hello');
+      expect(continued()).toBe(false);
+    }, 60_000);
+
+    it(`closes a turn killed at its end (${at}) by the next message: the reply kept, once, then the note`, async () => {
+      const { answer, texts, requests, transfers } = await diedAtTheEnd(at, 'killed');
+      expect(answer).toMatch(/^Ask me/);
+      expect(texts).toEqual([ASKED, 'On it.', DONE, ENDED, 'Hello', answer]);
+      // The model is asked for the next message alone.
+      expect(requests.map((r) => fake.textOf(r.prompt.findLast((m) => m.role === 'user')!))).toEqual([
+        `(${ENDED})\n\nHello`,
+      ]);
+      expect(transfers).toBe(1);
+    }, 60_000);
+  }
 });
