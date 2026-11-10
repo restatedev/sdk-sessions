@@ -358,7 +358,8 @@ interface Returned {
 /**
  * Copy into `turn` what OpenCode has of it that the turn lacks: each step's
  * assistant message once its stream ended (its text, its tool calls, before
- * they run; one without calls once its step ended, and not if it failed),
+ * they run; one without calls once its step ended, and not if it failed
+ * or the output limit cut it off),
  * each tool call's result once it ended, and each message
  * steered to the turn that OpenCode placed at a step (stored as steered, the
  * companion told it is taken in the transaction). Each once: by OpenCode's
@@ -412,8 +413,11 @@ async function copyInto(
     if (!have.has(m.id)) {
       const text = textOf(m.content);
       const calls = tools.map((t) => ({ id: t.id!, name: t.name ?? '', input: t.state?.input ?? {} }));
-      // A failed step's tool calls are kept, for their results.
-      if (calls.length === 0 && (m.error !== undefined || m.finish === 'error' || !text.trim())) continue;
+      // A failed step's tool calls are kept, for their results. Without calls, a step that failed (its
+      // `error`), or that the model's output limit cut off (`length`: OpenCode asks the model to go on in a
+      // step of its own), is no reply; one that ended otherwise (`stop`, or `error` as a provider names it)
+      // ends OpenCode's turn with its text.
+      if (calls.length === 0 && (m.error !== undefined || m.finish === 'length' || !text.trim())) continue;
       copied.push({ item: { type: 'assistant', text, calls, from: m.id }, reply: true });
       have.add(m.id);
     }
@@ -928,11 +932,14 @@ export const withOpenCode = async <T>(
   const returned = new Set<string>();
   // The copies, one after another.
   let copying: Promise<unknown> = Promise.resolve();
-  /** Copy what OpenCode has of the turn, and `own`, a call's result as its tool returned it (see {@link copyInto}). */
-  const copy = (own?: Returned) => {
+  /**
+   * Copy what OpenCode has of the turn, and `own`, a call's result as its tool returned it (see {@link copyInto}):
+   * once the turn is stopped, only with `steersOnly`, its messages steered to the turn.
+   */
+  const copy = (own?: Returned, steersOnly = false) => {
     const next = copying.then(async () => {
-      if (!turn || stopping || fence.closed) return undefined;
-      const resulted = await copyInto(ctx, await host(), turn, own);
+      if (!turn || (stopping && !steersOnly) || fence.closed) return undefined;
+      const resulted = await copyInto(ctx, await host(), turn, own, steersOnly);
       if (resulted.some((id) => returned.delete(id))) await toolCallEnded(ctx);
       return undefined;
     });
@@ -1071,7 +1078,10 @@ export const withOpenCode = async <T>(
   /**
    * Stop OpenCode's turn, once: what it has of the turn is copied, then
    * nothing more is (the turn's close says how it ended), and its turn is
-   * interrupted: it ends, and releases its claim.
+   * interrupted: it ends, and releases its claim. The copies' errors are
+   * the turn's close's no more than its interrupt's in an attempt that is
+   * over (its fence closed: OpenCode refuses it, and its close ends the turn):
+   * the turn closes cancelled.
    */
   const stopTurn = () =>
     (interrupting ??= (async () => {
@@ -1079,10 +1089,13 @@ export const withOpenCode = async <T>(
       await copy().catch(() => {});
       stopping = true;
       const opened = await booted;
-      await opened.call(opened.client.session.interrupt({ sessionID: SESSION }));
+      await opened.call(opened.client.session.interrupt({ sessionID: SESSION })).catch((error: unknown) => {
+        if (!fence.closed) throw error;
+      });
       // A message steered to the turn that OpenCode placed as it was stopped is the turn's: OpenCode's
-      // history has it, so the turn takes it, and it is not answered again as a turn of its own.
-      if (turn) await copyInto(ctx, opened, turn, undefined, true);
+      // history has it, so the turn takes it, and it is not answered again as a turn of its own (unless
+      // the copy fails: then its own turn answers it).
+      await copy(undefined, true).catch(() => {});
     })());
 
   const prompt = (text: string, check?: Check, reminder?: string) =>

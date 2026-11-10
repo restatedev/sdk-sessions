@@ -14,11 +14,15 @@ import type {
 } from '@ai-sdk/provider';
 import { Model, Provider, type Plugin } from '@opencode/plugin';
 
-/** A reply of the model: text, and maybe a tool call; or, with `error`, its text and then the stream fails with it. */
+/**
+ * A reply of the model: text, and maybe a tool call; or, with `error`, its text and then the stream fails with it.
+ * `finish` is how its stream says it ended (`stop`, or `tool-calls` with a call, unless it says otherwise).
+ */
 export interface Reply {
   text?: string;
   call?: { id: string; name: string; input: Record<string, unknown> };
   error?: unknown;
+  finish?: 'stop' | 'length' | 'content-filter' | 'error' | 'other';
 }
 
 /** A request to the model: its prompt, and the names of the tools it offers. */
@@ -43,7 +47,7 @@ export const textOf = (message: LanguageModelV3Message): string =>
 
 const none = undefined;
 /** `reply` as a model's stream. */
-function stream({ text, call, error }: Reply): LanguageModelV3StreamPart[] {
+function stream({ text, call, error, finish }: Reply): LanguageModelV3StreamPart[] {
   const parts: LanguageModelV3StreamPart[] = [{ type: 'stream-start', warnings: [] }];
   if (text !== undefined) {
     parts.push({ type: 'text-start', id: 'text' }, { type: 'text-delta', id: 'text', delta: text });
@@ -53,7 +57,7 @@ function stream({ text, call, error }: Reply): LanguageModelV3StreamPart[] {
   if (call) {
     parts.push({ type: 'tool-call', toolCallId: call.id, toolName: call.name, input: JSON.stringify(call.input) });
   }
-  const reason = call ? 'tool-calls' : 'stop';
+  const reason = finish ?? (call ? 'tool-calls' : 'stop');
   parts.push({
     type: 'finish',
     finishReason: { unified: reason, raw: reason },

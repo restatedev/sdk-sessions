@@ -751,6 +751,68 @@ describe.skipIf(!NODE_24)('the OpenCode agent, steered', () => {
     const said = fake.script.requests.at(-1)!.prompt.map((m) => fake.textOf(m));
     expect(said.filter((t) => t === STEERED)).toHaveLength(1);
   }, 60_000);
+
+  it("closes a stopped turn cancelled although a tool's error ended the attempt as OpenCode was interrupted", async () => {
+    const map = new Map<string, Uint8Array>();
+    const following = followingOf(map);
+    const first = sqlAttempt({ map, key: 'failed-at-stop', id: 'inv1' });
+    const transfer = tool({
+      name: 'transfer',
+      description: 'Move money.',
+      input: z.object({ from: z.number(), to: z.number(), amount: z.number() }),
+      run: () => {
+        following.steering = [{ id: 'steer-1', text: STEERED }];
+        return 'moved 5 from account 1 to account 2';
+      },
+    });
+    // As in the test before, but the audit, which runs as the interrupt waits, fails: its error closes
+    // the attempt's fence, before the interrupt reaches OpenCode. An OpenCode tool, whose error is its
+    // own (a Restate tool's error after the cancellation is the cancellation).
+    const { promise: failing, resolve: failed } = Promise.withResolvers<void>();
+    const audit: OpenCode.OpenCodeTool = {
+      name: 'audit',
+      description: 'Check the books.',
+      input: z.object({}),
+      execute: () => {
+        setTimeout(failed, 20);
+        return Promise.reject(new Error('the books are locked'));
+      },
+    };
+    const chat = handlerOf(opencode.chat({ tools: [transfer, audit] }));
+    fake.script.reply = steeredModel;
+    const { promise: interrupting, resolve: interrupted } = Promise.withResolvers<void>();
+    let holding = false;
+    boots.prompted = (input) => {
+      if (!String(input.id).startsWith('msg_steer_')) return;
+      holding = true;
+      first.cancel();
+    };
+    boots.transaction = async (run) => {
+      if (holding) await interrupting;
+      return run();
+    };
+    boots.interrupting = async () => {
+      boots.interrupting = undefined;
+      holding = false;
+      interrupted();
+      await failing;
+    };
+    const ended = await first
+      .end(() => chat(first.ctx, 'Please move 5 from 1 to 2'))
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+    boots.prompted = undefined;
+    boots.transaction = undefined;
+    // OpenCode refuses the interrupt, and anything more of the over attempt: the turn closes cancelled all
+    // the same, without the message OpenCode placed before the fence closed (the attempt stores nothing more).
+    expect(ended).toBeInstanceOf(restate.CancelledError);
+    expect(following.taken).toEqual([]);
+    const texts = await textsOf(map, 'failed-at-stop');
+    expect(texts).not.toContain(STEERED);
+    expect(texts.at(-1)).toBe(CANCELLED);
+  }, 60_000);
 });
 
 /** The provider's error of a request, with HTTP `statusCode` (and `headers`). */
@@ -1299,6 +1361,133 @@ describe.skipIf(!NODE_24)('the OpenCode agent, killed at the end of a turn', () 
     expect(continued()).toBe(true);
     expect(await textsOf(c.state as Map<string, Uint8Array>, 'mid-stream-killed')).toEqual([ASKED, 'On it.', DONE]);
     expect(c.ledger.transfers.size).toBe(1);
+  }, 60_000);
+
+  /** OpenCode's message after a step without tool calls cut off at the model's output limit: it goes on. */
+  const OUTPUT_LIMIT = /^Your last response hit the output token limit/;
+  /** The bank's teller, whose final reply is cut off once at its output limit, after `Done: mov`; told so, it answers. */
+  const cutOff = () => {
+    let cut = false;
+    fake.script.reply = (request) => {
+      const last = request.prompt.at(-1)!;
+      if (last.role === 'tool' && !cut) {
+        cut = true;
+        return { text: 'Done: mov', finish: 'length' };
+      }
+      if (last.role === 'user' && (OUTPUT_LIMIT.test(fake.textOf(last)) || fake.CONTINUE.test(fake.textOf(last))))
+        return { text: DONE };
+      return fake.teller(request);
+    };
+  };
+
+  it('never stores a step cut off at the output limit as a reply: OpenCode asks the model to go on', async () => {
+    cutOff();
+    const c = conversation(quickChat(), 'cut-off');
+    expect(await c.attempt('inv1', ASKED)).toBe(DONE);
+    expect(fake.textOf(fake.script.requests.at(-1)!.prompt.at(-1)!)).toMatch(OUTPUT_LIMIT);
+    expect(await textsOf(c.state as Map<string, Uint8Array>, 'cut-off')).toEqual([ASKED, 'On it.', DONE]);
+    expect(c.ledger.transfers.size).toBe(1);
+  }, 60_000);
+
+  it('resumes a turn killed once a step cut off at the output limit was stored: never its answer', async () => {
+    cutOff();
+    const c = conversation(quickChat(), 'cut-off-killed');
+    const { promise: dead, resolve: died } = Promise.withResolvers<void>();
+    boots.transaction = async (run, writes) => {
+      const result = await run();
+      // OpenCode stored how the cut-off step ended: the attempt dies before OpenCode asks the model to go on.
+      const ended = writes.some((p) => p[0] === 'assistant' && /"finish":"length"/.test(String(p[3])));
+      if (ended) {
+        boots.transaction = undefined;
+        died();
+      }
+      return result;
+    };
+    void c.attempt('inv1', ASKED).catch(() => {});
+    await dead;
+    const asked = fake.script.requests.length;
+    expect(await c.attempt('inv1', ASKED)).toBe(DONE);
+    // Not answered with the cut-off text: OpenCode's turn was resumed, and the model asked again.
+    expect(fake.script.requests.length).toBeGreaterThan(asked);
+    expect(await textsOf(c.state as Map<string, Uint8Array>, 'cut-off-killed')).toEqual([ASKED, 'On it.', DONE]);
+    expect(c.ledger.transfers.size).toBe(1);
+  }, 60_000);
+
+  /**
+   * The bank's teller, whose final reply's stream ends once with `finish`, with its text (or `Done: mov` for
+   * `other`); told to go on, it answers.
+   */
+  const endingWith = (finish: 'error' | 'other') => {
+    let ended = false;
+    fake.script.reply = (request) => {
+      const last = request.prompt.at(-1)!;
+      if (last.role === 'tool' && !ended) {
+        ended = true;
+        return { text: finish === 'other' ? 'Done: mov' : DONE, finish };
+      }
+      if (last.role === 'user' && (INCOMPLETE.test(fake.textOf(last)) || fake.CONTINUE.test(fake.textOf(last))))
+        return { text: DONE };
+      return fake.teller(request);
+    };
+  };
+
+  /** `endingWith(finish)`'s turn, whose attempt dies once OpenCode stored how the final step ended; then the retry. */
+  async function diedAtTheFinish(finish: 'error' | 'other') {
+    endingWith(finish);
+    const key = `finish-${finish}-killed`;
+    // Stored as `error` either way: as the provider named it, or (`other`) as OpenCode stores a failed step.
+    const stored = '"finish":"error"';
+    const c = conversation(quickChat(), key);
+    const { promise: dead, resolve: died } = Promise.withResolvers<void>();
+    boots.transaction = async (run, writes) => {
+      const result = await run();
+      if (writes.some((p) => p[0] === 'assistant' && String(p[3]).includes(stored))) {
+        boots.transaction = undefined;
+        died();
+      }
+      return result;
+    };
+    void c.attempt('inv1', ASKED).catch(() => {});
+    await dead;
+    const asked = fake.script.requests.length;
+    const answer = await c.attempt('inv1', ASKED);
+    const texts = await textsOf(c.state as Map<string, Uint8Array>, key);
+    return { answer, requests: fake.script.requests.slice(asked), texts };
+  }
+
+  // A step that ended with `error` (as a provider names how it ended, no error of the request's) ends
+  // OpenCode's turn with its text: the turn's answer, live and after a crash alike.
+  it('answers with a final reply whose step ended with `error`, as OpenCode does', async () => {
+    endingWith('error');
+    const c = conversation(quickChat(), 'finish-error');
+    expect(await c.attempt('inv1', ASKED)).toBe(DONE);
+    expect(fake.textOf(fake.script.requests.at(-1)!.prompt.at(-1)!)).toBe('moved 5 from account 1 to account 2');
+    expect(await textsOf(c.state as Map<string, Uint8Array>, 'finish-error')).toEqual([ASKED, 'On it.', DONE]);
+  }, 60_000);
+
+  it('answers with a final reply whose step ended with `error` when the attempt dies once it was stored', async () => {
+    const { answer, requests, texts } = await diedAtTheFinish('error');
+    expect(answer).toBe(DONE);
+    // The model is not asked again: the turn has its final reply, once.
+    expect(requests).toEqual([]);
+    expect(texts).toEqual([ASKED, 'On it.', DONE]);
+  }, 60_000);
+
+  // A step that ended with no reason OpenCode knows (`other`: OpenCode's `unknown`) failed, as a stream cut off does:
+  // OpenCode asks the model to go on, live and after a crash alike.
+  it('never stores a step that ended with no known reason as a reply: OpenCode asks the model to go on', async () => {
+    endingWith('other');
+    const c = conversation(quickChat(), 'finish-other');
+    expect(await c.attempt('inv1', ASKED)).toBe(DONE);
+    expect(fake.textOf(fake.script.requests.at(-1)!.prompt.at(-1)!)).toMatch(INCOMPLETE);
+    expect(await textsOf(c.state as Map<string, Uint8Array>, 'finish-other')).toEqual([ASKED, 'On it.', DONE]);
+  }, 60_000);
+
+  it('resumes a turn killed once a step that ended with no known reason was stored: never its answer', async () => {
+    const { answer, requests, texts } = await diedAtTheFinish('other');
+    expect(answer).toBe(DONE);
+    expect(requests).not.toEqual([]);
+    expect(texts).toEqual([ASKED, 'On it.', DONE]);
   }, 60_000);
 
   for (const at of ['stored', 'copied', 'idle'] as const) {
