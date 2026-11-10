@@ -102,7 +102,8 @@ submitted to OpenCode is recorded there before it is submitted
   it, before its turn began, never runs: what waits in OpenCode's inbox is
   cancelled.
 - **A stopped turn** (`stop`) is interrupted in OpenCode, and closed
-  cancelled; the next prompt tells the model.
+  cancelled, also when a tool's error ended the attempt as it stopped;
+  the next prompt tells the model.
 - **A provider's outage never ends the turn.** OpenCode asks the model
   again as its `session.retry` hook decides, with pi's backoff (`retry`):
   2 s after the first failure, twice as long each time, a minute apart at
@@ -126,8 +127,13 @@ message and part ids, so a copy a crash missed is caught up, before each
 publish, the answer, and any close of the turn. That is what `messages`
 shows ([docs/conversation.md](../../docs/conversation.md)); OpenCode's own
 "Continue" after a restart, its idle markers and its compactions are not
-copied. The two databases share no transaction: a follower may see a step
-late after a crash, never the model.
+copied. A reply with tool calls is copied as its stream ends, before the
+calls run; one without, once OpenCode stored how its step ended, and never
+if the step failed or the model's output limit cut it off (OpenCode asks
+the model again, or to go on). A step a crash left without its end is
+never a reply either: a retry of such a turn resumes it, and the model is
+asked again. The two databases share no transaction: a follower may see a
+step late after a crash, never the model.
 
 **A message steered to the turn** (`steer`) is submitted to OpenCode as a
 tool call of a round returns, as a steered prompt (`delivery: 'steer'`,

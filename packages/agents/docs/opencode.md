@@ -105,9 +105,22 @@ The steps, where they differ from the design below:
   and `settle` before its own, since both already have the view's items; and
   `Items.erase(ctx)`, which `clear` calls for OpenCode's database. A
   framework without them behaves as before.
-- **An assistant message is copied once it is streamed** and none of its
-  calls still streams its input, not once its step ended: while its tools
-  run it has no completed time, and a reply is stored before its tools run.
+- **An assistant message with tool calls is copied once it is streamed**
+  and none of its calls still streams its input, not once its step ended:
+  while its tools run it has no completed time, and a reply is stored
+  before its tools run. **One without calls is copied once OpenCode stored
+  how its step ended** (its `finish`), and only if that ends OpenCode's
+  turn with its text: not if the step failed (its `error`: a refusal, a
+  stream that failed after its text, a finish of no known reason), which
+  OpenCode asks again in a step of its own or ends the turn with, and not
+  if the model's output limit cut it off (`length`), after which OpenCode
+  asks the model to go on (twice at most, then the turn fails). A step a
+  provider says ended with `error`, with no error of the request, ends
+  OpenCode's turn: it is the reply. A step a crash left without its end
+  (between its stream's end and its `finish`) is never a reply: OpenCode
+  marks it completed, with no `finish`, as the resumed turn's next step
+  starts. So a retry finds no final reply in such a turn, resumes it, and
+  the model is asked again, as the live turn would have done.
 - **A stop copies first, then interrupts**, and copies nothing after: the
   store's result of a cut-off call is the cancel note, not OpenCode's
   "Tool execution interrupted".
@@ -166,6 +179,11 @@ The steps, where they differ from the design below:
   steer submitted before a stop may be placed by OpenCode as the turn is
   interrupted: after the interrupt, the placed steers alone are copied, so the
   turn holds the message and it is not answered again as a turn of its own.
+  That copy is one of the copies (one after another, none once the fence
+  closed), and neither its error nor the interrupt's in an attempt whose
+  fence closed (a tool's error, which OpenCode then refuses) keeps the turn
+  from closing cancelled; a message that copy missed is answered as a turn
+  of its own.
 - **A provider's outage** (step 4): the `session.retry` hook
   (`retryPlugin`) decides each retry, with pi's backoff and `retry` option
   (2 s, doubling, a minute at most), never before the provider's

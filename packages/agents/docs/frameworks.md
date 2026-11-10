@@ -695,9 +695,14 @@ spike, the steps) is in [OpenCode's return](opencode.md).
   messages, idle markers and compactions are not copied.
 - **Copy**: after each of OpenCode's commits, in a `ctx.db` transaction of
   its own, idempotent by `from`, and caught up before each publish, the
-  answer and any close. An assistant message is copied once its stream
-  ended and none of its calls still streams its input (a reply is stored
-  before its tools run); a result once its call completed or failed.
+  answer and any close. An assistant message with tool calls is copied once
+  its stream ended and none of its calls still streams its input (a reply
+  is stored before its tools run); one without, once OpenCode stored how
+  its step ended (`finish`), and never if the step failed (`error`) or the
+  model's output limit cut it off (`length`: OpenCode asks the model to go
+  on); a result once its call completed or failed. A step a crash left
+  without its end is never a reply either, so such a retry resumes the
+  turn and the model is asked again.
 - **Once**: a prompt's OpenCode message id is `msg_<prompt id>`; OpenCode
   boots lazily, as a turn runs, so an answered prompt's retry boots nothing,
   nor does one whose turn holds its final reply (it answers with it). A
@@ -726,7 +731,10 @@ spike, the steps) is in [OpenCode's return](opencode.md).
 - **Stopped**: the copy, then `session.interrupt`, and nothing copied after
   (the store's result of a cut-off call is the cancel note) but the steered
   messages OpenCode placed as the turn stopped, which are the turn's (copied
-  once the interrupt returns). The next prompt starts with the note.
+  once the interrupt returns, in the copies' order, not once the fence
+  closed). The turn closes cancelled whatever that copy does, and whatever
+  the interrupt does in an attempt whose fence closed. The next prompt
+  starts with the note.
 - **Refused, failed**: a turn OpenCode ends unanswered is a terminal error;
   a refusal (by its message, OpenCode's error type, or a 401 or 403) a 424,
   never retried.
