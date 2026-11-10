@@ -39,6 +39,12 @@
 // attempt resumes the turn, in which OpenCode gives the cut-off call an
 // "interrupted" result and the model makes it again under a new id.
 //
+// A provider's outage never ends the turn: OpenCode asks the model again,
+// as its `session.retry` hook decides (`retryPlugin`: pi's backoff), and
+// the failure it would retry for the last time fails the attempt instead, as
+// a tool's error does: the next attempt resumes the turn. A refusal is never
+// asked again, and ends the turn (424).
+//
 // A message steered to the turn (the agent's `steer` view, ../steering.ts)
 // is submitted to OpenCode as a tool call of a round returns, before the
 // round's next step: with `delivery: 'steer'`, which joins the turn at that
@@ -52,8 +58,7 @@
 // companion it is taken.
 //
 // v1 leaves out OpenCode's background work: its subagent and question tools,
-// and background shell jobs. TODO: OpenCode's `session.retry` hook, and
-// permissions asked through Restate.
+// and background shell jobs. TODO: permissions asked through Restate.
 import * as restate from '@restatedev/sessions';
 import { database, reset } from '@restatedev/sessions/internal';
 import { mkdir } from 'node:fs/promises';
@@ -542,15 +547,17 @@ async function noteOf(ctx: restate.SessionContext, before: { n: number; answer?:
 /** OpenCode's error types of a request its provider refused for good. */
 const REFUSALS = /^provider\.(no-route|auth|unauthorized|not-found)|auth/i;
 
+/** Whether OpenCode's error (`reason`, its `type` and HTTP `status`) is its provider's refusal, for good. */
+const refusedFor = (reason: string, type?: string, status?: number) =>
+  refusal(new Error(reason)) !== undefined ||
+  (type !== undefined && REFUSALS.test(type)) ||
+  status === 401 ||
+  status === 403;
+
 /** The error of prompt `id`, which ended unanswered (`failed`): {@link REFUSED} if its provider refused it. */
 function unanswered(id: string, failed: Extract<Outcome, { state: 'failed' }>, model: ModelRef) {
   const message = `prompt ${id} unanswered: ${failed.reason}`;
-  const refused =
-    refusal(new Error(failed.reason)) ||
-    (failed.type !== undefined && REFUSALS.test(failed.type)) ||
-    failed.status === 401 ||
-    failed.status === 403;
-  if (!refused) return new restate.TerminalError(message);
+  if (!refusedFor(failed.reason, failed.type, failed.status)) return new restate.TerminalError(message);
   const of = `the model ${model.providerID}/${model.id}: ${CHECK_MODEL}`;
   return new restate.TerminalError(`${message} (${of})`, { errorCode: REFUSED });
 }
@@ -587,6 +594,21 @@ export interface Options<O extends z.ZodObject | undefined = z.ZodObject | undef
   /** OpenCode plugins, such as the one of the model. */
   plugins?: Plugin.Plugin[];
   /**
+   * How OpenCode asks the model again after a request failed for a reason
+   * that passes (an overloaded or unreachable provider, a rate limit), as pi
+   * does: by default without limit, 2 s after the first failure, then twice
+   * as long each time, a minute apart at most (`baseDelayMs`,
+   * `maxAgentDelayMs`). A request refused for good (a wrong API key, an
+   * unknown model, a request a retry would make again) is never asked again,
+   * and ends the turn (424). Unlike pi, OpenCode asks again 10 times at most
+   * in a step of the turn: without `maxRetries`, the failure its 10th retry
+   * would follow fails the attempt instead, and Restate's retry of it
+   * resumes the turn, waits from 2 s again. With `maxRetries`, a failure
+   * after that many retries of a step ends the turn, and more than 10 is 10.
+   * `enabled: false` asks no request again.
+   */
+  retry?: Partial<RetryPolicy>;
+  /**
    * The answer as data: a zod object, whose JSON the agent replies with
    * (checked), and `chat` and `prompt` answer with (see output.ts).
    */
@@ -603,6 +625,55 @@ const systemPlugin = (system: string): Plugin.Plugin => ({
     return () => hook.dispose();
   },
 });
+
+/** How a failed model request is asked again ({@link Options.retry}): pi's policy, as OpenCode can take it. */
+export interface RetryPolicy {
+  enabled: boolean;
+  maxRetries: number;
+  baseDelayMs: number;
+  maxAgentDelayMs?: number;
+}
+
+/** The retries OpenCode makes of a step at most, in one attempt (its `ModelRetry` schedule's `recurs(10)`). */
+const OPENCODE_RETRIES = 10;
+
+/**
+ * An OpenCode plugin that decides, by its `session.retry` hook, how a failed
+ * model request is asked again: OpenCode calls it for each failure it would
+ * retry (`attempt` is 2 at the first), its decision proposed. A refusal is
+ * never retried; an outage after `baseDelayMs` doubled each time, at most
+ * `maxAgentDelayMs`. One that OpenCode would retry for the last time (with
+ * no `maxRetries`) is `outage` instead, which fails the attempt: the next
+ * resumes the turn, which OpenCode retries afresh.
+ */
+function retryPlugin(
+  { enabled = true, maxRetries = Infinity, baseDelayMs = 2_000, maxAgentDelayMs = 60_000 }: Partial<RetryPolicy>,
+  outage: (error: Error) => void,
+): Plugin.Plugin {
+  return {
+    id: 'restate-agents.retry',
+    async setup(ctx) {
+      const hook = await ctx.session.hook('retry', (event) => {
+        const { message, type, status } = event.error;
+        const retries = event.attempt - 1;
+        if (!enabled || !event.decision.retry || refusedFor(message, type, status) || retries > maxRetries) {
+          event.decision = { retry: false };
+        } else if (maxRetries === Infinity && retries >= OPENCODE_RETRIES) {
+          outage(
+            new Error(
+              `the model's provider failed ${retries} times in a row (${message}): the next attempt resumes the turn`,
+            ),
+          );
+          // The attempt is over: OpenCode waits until it is closed.
+          event.decision = { retry: true, delay: 2 ** 31 - 1 };
+        } else {
+          event.decision = { retry: true, delay: Math.min(baseDelayMs * 2 ** (retries - 1), maxAgentDelayMs) };
+        }
+      });
+      return () => hook.dispose();
+    },
+  };
+}
 
 /** OpenCode's tools of background work, which v1 leaves out: their recovery is not mapped onto turns. */
 const BACKGROUND = new Set(['subagent', 'question']);
@@ -665,7 +736,7 @@ function toolsPlugin(
  */
 export const withOpenCode = async <T>(
   ctx: restate.SessionContext,
-  { plugins = [], model: named, system, tools = [], workspace: where }: Options,
+  { plugins = [], model: named, system, tools = [], workspace: where, retry }: Options,
   work: (opencode: OpenCodeSession) => Promise<T>,
 ): Promise<T> => {
   const model = typeof named === 'object' ? named : modelRef(modelOf(named));
@@ -812,6 +883,8 @@ export const withOpenCode = async <T>(
             workspace !== undefined,
           ),
           ...(system ? [systemPlugin(system)] : []),
+          // An outage OpenCode would stop retrying fails the attempt, as a tool's error does (never a refusal).
+          retryPlugin(retry ?? {}, (error) => void fail(error)),
         ],
         config: { default_agent: 'build' },
         local: workspace !== undefined,

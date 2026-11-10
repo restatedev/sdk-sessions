@@ -628,3 +628,117 @@ describe.skipIf(!NODE_24)('the OpenCode agent, steered', () => {
     expect(said.filter((t) => t === STEERED)).toHaveLength(taken.length);
   }, 60_000);
 });
+
+/** The provider's error of a request, with HTTP `statusCode`. */
+const failure = (statusCode: number) =>
+  new APICallError({
+    message: statusCode === 401 ? 'Incorrect API key provided' : 'Service Unavailable',
+    url: 'https://scripted.invalid/v1',
+    requestBodyValues: {},
+    statusCode,
+    isRetryable: statusCode >= 500,
+  });
+
+/** The teller, behind a provider that fails the next `n` requests with `statusCode`. */
+const failing = (n: number, statusCode = 503) => {
+  let left = n;
+  fake.script.reply = (request) => {
+    if (left-- > 0) throw failure(statusCode);
+    return fake.teller(request);
+  };
+};
+
+/** The bank's chat, asking again within a millisecond. */
+const quickChat = () => opencode.chat({ tools: bank('OpenCodeAgent'), retry: { baseDelayMs: 1, maxAgentDelayMs: 1 } });
+
+/** The parts of each message of conversation `c`. */
+const partsOf = async (c: ReturnType<typeof conversation>) =>
+  (await c.read(opencode.messages(), {})).messages.map((m) => m.parts);
+
+// A provider's outage is asked again, as pi does; a refusal ends the turn at once.
+describe.skipIf(!NODE_24)("the OpenCode agent through a provider's outage", () => {
+  const transferred = [
+    [{ type: 'text', text: 'Please move 5 from 1 to 2' }],
+    [
+      { type: 'text', text: 'On it.' },
+      {
+        type: 'tool',
+        id: expect.any(String),
+        name: 'transfer',
+        input: { from: 1, to: 2, amount: 5 },
+        output: 'moved 5 from account 1 to account 2',
+      },
+    ],
+    [{ type: 'text', text: 'Done: moved 5 from account 1 to account 2' }],
+  ];
+
+  it('answers through an outage: the model is asked again, and nothing is copied twice', async () => {
+    failing(3);
+    const c = conversation(quickChat(), 'outage');
+    expect(await c.attempt('inv1', 'Please move 5 from 1 to 2')).toBe('Done: moved 5 from account 1 to account 2');
+    // Three failed requests, then the step's and the next one's.
+    expect(fake.script.requests).toHaveLength(5);
+    expect(c.ledger.transfers.size).toBe(1);
+    expect(await partsOf(c)).toEqual(transferred);
+  }, 60_000);
+
+  it('fails the attempt past the retries OpenCode makes, and the next attempt answers the turn', async () => {
+    failing(12);
+    const c = conversation(quickChat(), 'long-outage');
+    const failed = await c.attempt('inv1', 'Please move 5 from 1 to 2').then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    // Not terminal: Restate retries the attempt, and the turn stays open.
+    expect(failed).toBeInstanceOf(Error);
+    expect(failed).not.toBeInstanceOf(restate.TerminalError);
+    expect(fake.script.requests).toHaveLength(10);
+    expect(await c.attempt('inv1', 'Please move 5 from 1 to 2')).toBe('Done: moved 5 from account 1 to account 2');
+    expect(fake.script.requests).toHaveLength(14);
+    expect(c.ledger.transfers.size).toBe(1);
+    expect(await partsOf(c)).toEqual(transferred);
+  }, 60_000);
+
+  it('fails a refused request with 424 at once, never asking again', async () => {
+    failing(1, 401);
+    const c = conversation(quickChat(), 'refused-once');
+    const failed = await c.attempt('inv1', 'Hello').then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(failed).toBeInstanceOf(restate.TerminalError);
+    expect((failed as restate.TerminalError).code).toBe(REFUSED);
+    expect(fake.script.requests).toHaveLength(1);
+  }, 60_000);
+
+  it('ends a turn stopped while it waits to ask again, cancelled, at once', async () => {
+    failing(Infinity);
+    const map = new Map<string, Uint8Array>();
+    const slow = handlerOf(opencode.chat({ tools: bank('OpenCodeAgent'), retry: { baseDelayMs: 60_000 } }));
+    const first = sqlAttempt({ map, key: 'stopped-retrying', id: 'inv1' });
+    const answering = first.end(() => slow(first.ctx, 'Please move 5 from 1 to 2'));
+    // The first request failed: OpenCode waits a minute to ask again.
+    while (fake.script.requests.length === 0) await new Promise((resolve) => setTimeout(resolve, 20));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const stopped = Date.now();
+    first.cancel();
+    const failed = await answering.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(failed).toBeInstanceOf(restate.CancelledError);
+    expect(Date.now() - stopped).toBeLessThan(10_000);
+    expect(fake.script.requests).toHaveLength(1);
+    fake.script.reply = fake.teller;
+    const second = sqlAttempt({ map, key: 'stopped-retrying', id: 'inv2' });
+    expect(await second.end(() => slow(second.ctx, 'Hello'))).toMatch(/^Ask me/);
+    const read = sqlAttempt({ map, key: 'stopped-retrying', id: 'read', shared: true });
+    const page = await read.end(() => opencode.messages()(read.view, {}));
+    expect(page.messages.map((m) => m.parts)).toEqual([
+      [{ type: 'text', text: 'Please move 5 from 1 to 2' }],
+      [{ type: 'text', text: CANCELLED }],
+      [{ type: 'text', text: 'Hello' }],
+      [{ type: 'text', text: 'Ask me to "move 5 from 1 to 2", or to "audit" the books.' }],
+    ]);
+  }, 60_000);
+});
