@@ -141,10 +141,19 @@ const SCHEMA = new Schema('restate_agents.turns', [
   changed since a cursor. A turn's answer takes one too (`answered_seq`),
   for the summary view; its message's id is `answered_at`, the turn's last
   message of the assistant, the id the full view shows it under.
-- **Appends only.** Rows are appended, in one transaction per step (one
-  statement commits on its own). A reply at the end can be dropped (to ask
-  the model again), which is one range delete; its `seq` is kept in the
-  start row, so cursors never go back.
+- **Appends only.** Rows are appended, in one transaction per step. A
+  reply at the end can be dropped (to ask the model again), which is one
+  range delete; its `seq` is kept in the start row, so cursors never go
+  back.
+- **A write and what the conversation keeps of it go together.** Each
+  write of the ledger (`Ledger.write`) takes the next position and `seq`
+  as it runs, and the conversation then takes its entries (the calls it
+  makes open, the results it holds, an answer). A commit is stored once it
+  is handed to Restate: a wait for Restate's acknowledgment that fails
+  after (a cancellation the SDK gives it) still has its bookkeeping made,
+  then fails; only a commit the engine refused (it rolled back) changes
+  nothing. A close waits for a write under way, so that it closes the
+  calls the write made, and never gives a stored result again.
 - **Each item is the framework's own** (a message, an event), stored and
   loaded by the framework (`Items.dump`, `Items.load`). The core reads it
   only through `Items.read`: what was said, the tool calls, the results.

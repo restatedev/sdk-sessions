@@ -2,9 +2,11 @@
 // Restate: two state sets, a run, a round trip) and its calls to the
 // companion, for Claude, the built-in LangGraph loop and a graph of your
 // own, without a Restate server. A turn of `r` model requests makes `r - 1`
-// rounds of `k` tool calls, then answers.
+// rounds of `k` tool calls, then answers. And a commit cancelled as it waits
+// for Restate: it is stored, and the conversation knows it.
 import { afterAll, describe, expect, it, vi } from 'vitest';
-import { sessionObject, tool } from '@restatedev/agents';
+import * as restate from '@restatedev/sessions';
+import { CANCELLED, sessionObject, tool } from '@restatedev/agents';
 import { AIMessage, type BaseMessage } from '@langchain/core/messages';
 import { MessagesAnnotation, START, StateGraph } from '@langchain/langgraph';
 import { ToolNode, toolsCondition } from '@langchain/langgraph/prebuilt';
@@ -152,5 +154,120 @@ describe("a turn's start", () => {
     const object = sessionObject({ name: 'quiet', background: true, handlers: { chat }, views: {} });
     const [, plain] = await costs(chat, 1, 0, { object });
     expect(plain!.companion).toEqual(['start', 'close']);
+  });
+});
+
+/**
+ * A turn of Claude (one round of one tool call, `t1`, then `Done`) whose
+ * attempt is cancelled as the first commit that `at` picks (by its
+ * statements and their parameters) waits for Restate: the commit is
+ * stored, and the wait rejects with a CancelledError, as the SDK's does.
+ * What the turn failed with, and what the database then holds.
+ */
+async function cancelledAt(at: (statements: [string, unknown[]][]) => boolean) {
+  claudePlanned();
+  Object.assign(plan, { rounds: 1, calls: 1, asked: 0 });
+  const map = new Map<string, Uint8Array>();
+  let pending: [string, unknown[]][] = [];
+  let cancelled = false;
+  const onSync = async () => {
+    const committing = pending;
+    pending = [];
+    if (!cancelled && at(committing)) {
+      cancelled = true;
+      throw new restate.CancelledError();
+    }
+  };
+  const sql = sqlAttempt({ map, key: 'k', id: 'inv1', onSync });
+  // The statements of each commit, as the turn makes them.
+  const { db } = sql;
+  const execute = db.execute.bind(db);
+  const transaction = db.transaction.bind(db);
+  db.execute = async (statement, params) => {
+    pending = [[statement, params ?? []]];
+    return execute(statement, params);
+  };
+  db.transaction = (async (body: (tx: restate.Transaction) => Promise<unknown>) =>
+    transaction(async (tx) => {
+      const statements: [string, unknown[]][] = [];
+      const run = tx.execute.bind(tx);
+      tx.execute = async (statement, params) => {
+        statements.push([statement, params ?? []]);
+        return run(statement, params);
+      };
+      const result = await body(tx);
+      pending = statements;
+      return result;
+    })) as typeof db.transaction;
+  const failed = await sql
+    .end(() => handlerOf(claude.chat({ tools: tools().slice(0, 1) }))(sql.ctx, 'go'))
+    .then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+  const read = sqlAttempt({ map, key: 'k', id: 'read' });
+  const stored = await read.end(async () => ({
+    turns: await read.db.values('SELECT status, answer FROM restate_agent_turns'),
+    items: (await read.db.values('SELECT item FROM restate_agent_items ORDER BY n')).map(
+      ([item]) => JSON.parse(String(item)) as MessageParam,
+    ),
+  }));
+  return { failed, ...stored };
+}
+
+/** What each item says: a tool call, a result, or text. */
+const shown = (items: MessageParam[]) =>
+  items.map(({ content }) =>
+    typeof content === 'string'
+      ? content
+      : content
+          .map((b) =>
+            b.type === 'tool_use'
+              ? `call ${b.id}`
+              : b.type === 'tool_result'
+                ? `result ${b.tool_use_id}: ${typeof b.content === 'string' ? b.content : JSON.stringify(b.content)}`
+                : b.type === 'text'
+                  ? b.text
+                  : b.type,
+          )
+          .join(' + '),
+  );
+
+/** Whether a commit stores a step whose item has `text` (a tool call's id, say). */
+const storing = (text: string) => (statements: [string, unknown[]][]) =>
+  statements.some(
+    ([sql, params]) => sql.startsWith('INSERT INTO restate_agent_items') && String(params[3]).includes(text),
+  );
+
+/** Whether a commit stores a turn's answer. */
+const answering = (statements: [string, unknown[]][]) =>
+  statements.some(([sql]) => sql.startsWith('UPDATE restate_agent_turns'));
+
+describe('a commit cancelled as it waits for Restate', () => {
+  afterAll(() => {
+    teller.reply = tellerReply;
+  });
+
+  it("is the turn's: a cancelled reply with tool calls leaves its calls open, which the close gives a result", async () => {
+    const { failed, turns, items } = await cancelledAt(storing('tool_use'));
+    expect(failed).toBeInstanceOf(restate.CancelledError);
+    expect(turns).toEqual([['cancelled', CANCELLED]]);
+    const [, id] = /call (call_\d+)/.exec(shown(items).join(' '))!;
+    expect(shown(items)).toEqual([`On it. + call ${id}`, `result ${id}: ${CANCELLED}`, CANCELLED]);
+  });
+
+  it("is the turn's: a cancelled result is the call's, which the close gives no other", async () => {
+    const { failed, turns, items } = await cancelledAt(storing('tool_result'));
+    expect(failed).toBeInstanceOf(restate.CancelledError);
+    expect(turns).toEqual([['cancelled', CANCELLED]]);
+    const [, id] = /call (call_\d+)/.exec(shown(items).join(' '))!;
+    expect(shown(items)).toEqual([`On it. + call ${id}`, `result ${id}: result of t1`, CANCELLED]);
+  });
+
+  it("is the turn's: a cancelled answer is the turn's, which nothing closes after", async () => {
+    const { failed, turns, items } = await cancelledAt(answering);
+    expect(failed).toBeInstanceOf(restate.CancelledError);
+    expect(turns).toEqual([['answered', 'Done']]);
+    expect(shown(items).at(-1)).toBe('Done');
   });
 });

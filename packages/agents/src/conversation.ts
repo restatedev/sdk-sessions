@@ -413,12 +413,58 @@ class Ledger<I> {
     if (this.closed) throw new Error('the run was stopped: it stores nothing more');
   }
 
+  /**
+   * Run `body`, a write of the conversation, in one transaction; then
+   * `done`, its bookkeeping (the entries it added, an answer's assignment);
+   * hold the lock. `body` takes the next position and `seq` as it runs, and
+   * sets them past its rows (a framework's copy into the turn, `copyIn`,
+   * waits for it, and takes those after).
+   *
+   * A write and its bookkeeping happen together, or not at all. A commit is
+   * stored once it is handed to Restate, before it waits for Restate's
+   * acknowledgment: a wait that fails then (one the SDK cancels, say) leaves
+   * the rows stored, so `done` runs, and the error is thrown after it.
+   * Without it, the ledger would lack what the database holds: a close would
+   * give a stored result again, miss a stored call, or close an answered
+   * turn. Only a `body` that fails, or a commit the engine refused (SQL: it
+   * rolled back), writes nothing, and changes nothing.
+   */
+  async write(body: (tx: Transaction) => Promise<void>, done: () => void = () => {}): Promise<void> {
+    let handed: [next: number, seq: number] | undefined;
+    let before: [next: number, seq: number] = [this.next, this.seq];
+    try {
+      await this.db.transaction(async (tx) => {
+        before = [this.next, this.seq];
+        await body(tx);
+        handed = [this.next, this.seq];
+      });
+    } catch (error) {
+      if (handed === undefined) throw error;
+      if (rolledBack(error)) {
+        // The positions it took are given again, unless a copy took those after them meanwhile.
+        if (this.next === handed[0] && this.seq === handed[1]) [this.next, this.seq] = before;
+        throw error;
+      }
+      done();
+      throw error;
+    }
+    done();
+  }
+
   /** The agent and the framework's state that the latest answered turn left. */
   carried(): [agent: string | undefined, carried: string | undefined] {
     const latest = this.transcript.findLast((turn) => turn.answer !== undefined);
     return latest ? [latest.agent, latest.carried] : [undefined, undefined];
   }
 }
+
+/**
+ * Whether a commit that failed was rolled back: the engine refused its SQL
+ * (an `SqlError`, which the handler gets as a terminal error). Any other
+ * failure of a commit is of its wait for Restate, once its rows were stored.
+ */
+const rolledBack = (error: unknown) =>
+  error instanceof restate.TerminalError && (error.cause as { name?: unknown } | undefined)?.name === 'SqlError';
 
 /** The index of the first of `entries` (by position) at `n` or after. */
 const bisect = <I>(entries: readonly Entry<I>[], n: number) => {
@@ -650,23 +696,27 @@ export class Turn<I> {
       if (fresh.length === 0) return [];
       let added: Entry<I>[] = [];
       // The positions and seqs taken as the write runs, as `#insert` takes them.
-      await ledger.db.transaction(async (tx) => {
-        const n = ledger.next;
-        added = fresh.map((m, i) => ({ n: n + i, item: steeredItem(ledger.items, m.text, m.id), steer: m.id }));
-        for (const [i, e] of added.entries()) {
-          await tx.execute(INSERT_STEP, [e.n, this.n, ledger.seq + i + 1, ledger.items.dump(e.item), null, null]);
-          await tx.execute(INSERT_STEERED, [e.n, this.n, e.steer!]);
-        }
-        taken(
-          tx,
-          fresh.map((m) => m.id),
-        );
-        ledger.seq += added.length;
-        ledger.next = n + added.length;
-      });
-      this.#add(added);
-      // The transcript's entry of the turn has them too, as the next turn loads it: for its size, say.
-      (this.prompt.steers ??= []).push(...added);
+      await ledger.write(
+        async (tx) => {
+          const n = ledger.next;
+          added = fresh.map((m, i) => ({ n: n + i, item: steeredItem(ledger.items, m.text, m.id), steer: m.id }));
+          for (const [i, e] of added.entries()) {
+            await tx.execute(INSERT_STEP, [e.n, this.n, ledger.seq + i + 1, ledger.items.dump(e.item), null, null]);
+            await tx.execute(INSERT_STEERED, [e.n, this.n, e.steer!]);
+          }
+          taken(
+            tx,
+            fresh.map((m) => m.id),
+          );
+          ledger.seq += added.length;
+          ledger.next = n + added.length;
+        },
+        () => {
+          this.#add(added);
+          // The transcript's entry of the turn has them too, as the next turn loads it: for its size, say.
+          (this.prompt.steers ??= []).push(...added);
+        },
+      );
       return added.map((e) => e.item);
     });
   }
@@ -697,24 +747,28 @@ export class Turn<I> {
     await ledger.lock.run(async () => {
       this.#checkWritable();
       const start = { ...ledger.start, seq: ledger.seq };
-      await ledger.db.transaction(async (tx) => {
-        await tx.execute(`DELETE FROM ${STEPS} WHERE n >= ?`, [reply]);
-        await tx.execute(`DELETE FROM ${STEERED} WHERE n >= ?`, [reply]);
-        await restart(tx, start);
-      });
-      ledger.start = start;
-      ledger.next = Math.min(ledger.next, reply);
-      if (this.prompt.steers) this.prompt.steers = this.prompt.steers.filter((e) => e.n < reply);
-      const cut = bisect(this.#entries, reply);
-      const kept = this.#entries.slice(0, cut);
-      // The dropped calls are not made: their ids may be made again, by the reply that replaces them.
-      for (const entry of this.#entries.slice(cut))
-        for (const call of entry.parsed?.calls ?? []) ledger.ids.delete(call.id);
-      for (const entry of kept) for (const call of entry.parsed?.calls ?? []) ledger.ids.add(call.id);
-      this.#entries = kept;
-      this.#results = new Map();
-      this.#open = [];
-      for (const entry of kept) this.#index(entry, false);
+      await ledger.write(
+        async (tx) => {
+          await tx.execute(`DELETE FROM ${STEPS} WHERE n >= ?`, [reply]);
+          await tx.execute(`DELETE FROM ${STEERED} WHERE n >= ?`, [reply]);
+          await restart(tx, start);
+        },
+        () => {
+          ledger.start = start;
+          ledger.next = Math.min(ledger.next, reply);
+          if (this.prompt.steers) this.prompt.steers = this.prompt.steers.filter((e) => e.n < reply);
+          const cut = bisect(this.#entries, reply);
+          const kept = this.#entries.slice(0, cut);
+          // The dropped calls are not made: their ids may be made again, by the reply that replaces them.
+          for (const entry of this.#entries.slice(cut))
+            for (const call of entry.parsed?.calls ?? []) ledger.ids.delete(call.id);
+          for (const entry of kept) for (const call of entry.parsed?.calls ?? []) ledger.ids.add(call.id);
+          this.#entries = kept;
+          this.#results = new Map();
+          this.#open = [];
+          for (const entry of kept) this.#index(entry, false);
+        },
+      );
     });
   }
 
@@ -737,12 +791,14 @@ export class Turn<I> {
       const carried = 'carried' in this.#carried ? this.#carried.carried : ledger.carried()[1];
       let seq = ledger.seq + 1;
       // Its seq taken as the write runs, as `#insert` takes its own.
-      await ledger.db.transaction(async (tx) => {
-        seq = ledger.seq + 1;
-        await tx.execute(ANSWER, [status, answer, agent ?? null, carried ?? null, at ?? null, seq, this.n]);
-        ledger.seq = seq;
-      });
-      Object.assign(this.prompt, { status, answer, agent, carried, answeredAt: at, answeredSeq: seq });
+      await ledger.write(
+        async (tx) => {
+          seq = ledger.seq + 1;
+          await tx.execute(ANSWER, [status, answer, agent ?? null, carried ?? null, at ?? null, seq, this.n]);
+          ledger.seq = seq;
+        },
+        () => Object.assign(this.prompt, { status, answer, agent, carried, answeredAt: at, answeredSeq: seq }),
+      );
     });
   }
 
@@ -808,16 +864,20 @@ export class Turn<I> {
       const answeredSeq = seq + added.length + 1;
       const agent = this.#agent();
       const carried = 'carried' in this.#carried ? this.#carried.carried : ledger.carried()[1];
-      await ledger.db.transaction(async (tx) => {
-        for (const [i, e] of added.entries()) {
-          await tx.execute(INSERT_STEP, [e.n, this.n, seq + i + 1, items.dump(e.item), null, null]);
-        }
-        await tx.execute(ANSWER, [status, note, agent ?? null, carried ?? null, at, answeredSeq, this.n]);
-      });
-      ledger.next = n + added.length;
-      ledger.seq = answeredSeq;
-      this.#add(added);
-      Object.assign(this.prompt, { status, answer: note, agent, carried, answeredAt: at, answeredSeq });
+      await ledger.write(
+        async (tx) => {
+          for (const [i, e] of added.entries()) {
+            await tx.execute(INSERT_STEP, [e.n, this.n, seq + i + 1, items.dump(e.item), null, null]);
+          }
+          await tx.execute(ANSWER, [status, note, agent ?? null, carried ?? null, at, answeredSeq, this.n]);
+          ledger.next = n + added.length;
+          ledger.seq = answeredSeq;
+        },
+        () => {
+          this.#add(added);
+          Object.assign(this.prompt, { status, answer: note, agent, carried, answeredAt: at, answeredSeq });
+        },
+      );
     });
   }
 
@@ -897,23 +957,25 @@ export class Turn<I> {
       // into the turn (`copyIn`, in a transaction of its own, which this one
       // may wait for) takes those after them, so that they go in the order
       // the rows commit in, as a follower's cursor needs.
-      await ledger.db.transaction(async (tx) => {
-        n = ledger.next;
-        added = made(n);
-        for (const [i, e] of added.entries()) {
-          await tx.execute(INSERT_STEP, [
-            e.n,
-            this.n,
-            ledger.seq + i + 1,
-            ledger.items.dump(e.item),
-            e.reply ?? null,
-            e.agent ?? null,
-          ]);
-        }
-        ledger.seq += added.length;
-        ledger.next = n + added.length;
-      });
-      this.#add(added);
+      await ledger.write(
+        async (tx) => {
+          n = ledger.next;
+          added = made(n);
+          for (const [i, e] of added.entries()) {
+            await tx.execute(INSERT_STEP, [
+              e.n,
+              this.n,
+              ledger.seq + i + 1,
+              ledger.items.dump(e.item),
+              e.reply ?? null,
+              e.agent ?? null,
+            ]);
+          }
+          ledger.seq += added.length;
+          ledger.next = n + added.length;
+        },
+        () => this.#add(added),
+      );
       return n;
     });
   }
@@ -1319,20 +1381,27 @@ export class Conversation<I> {
       if (running) throw new Error(`turn ${running.id} has no answer yet: turns never overlap`);
       const n = ledger.next;
       const entry: Entry<I> = { n, item: this.items.prompt(text), prompt: promptId, askedAt: Date.now() };
-      await this.db.execute(`INSERT INTO ${TURNS} (n, seq, prompt, item, asked_at) VALUES (?, ?, ?, ?, ?)`, [
-        n,
-        ledger.seq + 1,
-        promptId,
-        this.items.dump(entry.item),
-        entry.askedAt!,
-      ]);
-      ledger.seq += 1;
-      ledger.next = n + 1;
-      ledger.transcript.push(entry);
-      const turn = new Turn(ledger, entry);
-      this.#turns.push(turn);
-      ledger.latest = turn;
-      return turn;
+      let turn: Turn<I> | undefined;
+      await ledger.write(
+        async (tx) => {
+          await tx.execute(`INSERT INTO ${TURNS} (n, seq, prompt, item, asked_at) VALUES (?, ?, ?, ?, ?)`, [
+            n,
+            ledger.seq + 1,
+            promptId,
+            this.items.dump(entry.item),
+            entry.askedAt!,
+          ]);
+          ledger.seq += 1;
+          ledger.next = n + 1;
+        },
+        () => {
+          ledger.transcript.push(entry);
+          turn = new Turn(ledger, entry);
+          this.#turns.push(turn);
+          ledger.latest = turn;
+        },
+      );
+      return turn!;
     });
   }
 
