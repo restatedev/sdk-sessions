@@ -119,7 +119,7 @@ const AGENTS: [string, () => PromptHandler][] = [
  */
 const COMMITS: Record<string, [plain: number, round: number]> = {
   Claude: [2, 4],
-  'the built-in LangGraph loop': [2, 6],
+  'the built-in LangGraph loop': [2, 4],
 };
 
 describe("a turn's commits", () => {
@@ -145,6 +145,17 @@ describe("a turn's commits", () => {
       expect(first!.commits - second!.commits).toBe(1);
     }
   });
+});
+
+describe("a LangGraph turn's tool results", () => {
+  it.each(AGENTS.filter(([name]) => name.includes('LangGraph')))(
+    'are one write per step, however many tools ran: %s',
+    async (_name, chat) => {
+      const [, one] = await costs(chat(), 2, 1);
+      const [, three] = await costs(chat(), 2, 3);
+      expect(three!.commits).toBe(one!.commits);
+    },
+  );
 });
 
 describe("a turn's start", () => {

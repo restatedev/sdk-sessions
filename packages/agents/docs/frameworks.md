@@ -320,8 +320,9 @@ The Anthropic SDK's tool runner (`@anthropic-ai/sdk` 0.133.0).
     a result (an error if `status === 'error'`).
   - `summary`: the default.
 - **Graph**: the model node appends its reply (`turn.appendReply`) before it
-  returns; the tools node appends each `ToolMessage` as it lands (in
-  `failing`, `index.ts:69-95`), then publishes; START goes to the tools node
+  returns; the tools node appends the round's `ToolMessage`s in one write
+  once its tools ran (`toolsNode`; a crash before runs the round again, as
+  the Python SDK commits a step's results together), then publishes; START goes to the tools node
   if the turn has open calls; a stored final reply returns at once. The input
   is `{ messages: conversation.history() }`.
 - **Errors**: a `recursionLimit` of about 10 000, and LangGraph's own
@@ -342,7 +343,8 @@ The Anthropic SDK's tool runner (`@anthropic-ai/sdk` 0.133.0).
   back (Python's reads them at each `put`).
 - **A graph of your own** (`agent({ graph })`, `graph.ts`, as the Python
   SDK's `_graph.py`): framework-owned history, its checkpoints in the key's
-  database; the messages after the run's input copied by id, the prompt's id
+  database; the messages after the run's input copied by id (a step's tool
+  messages in one write, as Python's `_copied`), the prompt's id
   `prompt:<turn>`, a window of 1, a closed turn's closing record as the
   run's input; `interrupt()` as Restate signals. Unlike Python's, the run's
   prompt is stamped on its checkpoints by the saver (`metadata`), since the

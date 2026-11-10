@@ -155,7 +155,8 @@ async function answerOf(app: App, turn: Turn<BaseMessage>, state: Record<string,
  * `prompt`), as the state holds the earlier turns too; if the graph trimmed
  * the prompt away, those whose ids are not `known`. `known` is the ids the
  * conversation has, which this adds to; the messages the conversation gave
- * the graph are not copied back. Then publish.
+ * the graph are not copied back. Tool messages that follow one another (a
+ * step's results) are copied in one write. Then publish.
  */
 async function copied(
   ctx: restate.SessionContext,
@@ -174,11 +175,24 @@ async function copied(
         !known.has(m.id) &&
         !CARRIED.some((prefix) => m.id!.startsWith(prefix)),
     );
+  let results: BaseMessage[] = [];
+  // The results of a step in one write: one commit, however many tools ran.
+  const stored = async () => {
+    if (results.length === 0) return;
+    await turn.append(...results);
+    for (const result of results) known.add(result.id!);
+    results = [];
+  };
   for (const message of fresh) {
-    if (AIMessage.isInstance(message)) await turn.appendReply([message]);
-    else await turn.append(message);
+    if (!AIMessage.isInstance(message)) {
+      results.push(message);
+      continue;
+    }
+    await stored();
+    await turn.appendReply([message]);
     known.add(message.id!);
   }
+  await stored();
   if (fresh.length > 0) await stepped(ctx);
 }
 

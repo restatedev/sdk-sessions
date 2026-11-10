@@ -19,10 +19,11 @@
 // of the conversation (`history()`: the earlier turns as their prompts and
 // answers, the latest whole):
 // - The model node stores its reply before it returns, and the tools node
-//   each tool's result as it lands. So a crash during the tools resumes
-//   those without a result, with the same tool call ids, which a tool passes
-//   on to stay idempotent; and a stored final reply is the answer, without
-//   asking the model again.
+//   the round's results in one write, once its tools have run. So a crash
+//   during the tools runs the round's calls again (those that had finished
+//   too), with the same tool call ids, which a tool passes on to stay
+//   idempotent, without asking the model again. The final reply is stored
+//   with the turn's answer.
 // - A tool's error fails the attempt, which Restate retries (the ToolNode
 //   would hand it to the model as the tool's result); a call of a tool the
 //   agent lacks, or with arguments that do not fit, is the model's to fix.
@@ -154,11 +155,13 @@ const failing = (
  * The tools node: each tool call of the turn without a result run by a
  * ToolNode, which answers the model with what is wrong when a call names a
  * tool the agent does not have, or arguments that do not fit (the model's to
- * fix: failing the attempt, every retry would meet the same call again). Each
- * result is stored as it lands. Any other error of a tool fails the attempt,
- * at once (the ToolNode would hand it to the model too). The round is
- * published as it starts and ends, for the clients that follow the
- * conversation.
+ * fix: failing the attempt, every retry would meet the same call again). The
+ * round's results are stored in one write, once its tools have run: one
+ * commit per round, however many tools ran (a crash before it runs the
+ * round's calls again, as tools are idempotent by their call ids). Any other
+ * error of a tool fails the attempt, at once (the ToolNode would hand it to
+ * the model too). The round is published as it starts and ends, for the
+ * clients that follow the conversation.
  */
 function toolsNode(ctx: restate.SessionContext, turn: Turn<BaseMessage>, tools: StructuredToolInterface[]) {
   return async (_state: typeof MessagesAnnotation.State, config: RunnableConfig) => {
@@ -180,12 +183,12 @@ function toolsNode(ctx: restate.SessionContext, turn: Turn<BaseMessage>, tools: 
         messages: BaseMessage[];
       };
       // A tool's error fails the attempt: the ToolNode's answer to the model of it is not the call's result.
-      if (broken) return [];
-      await turn.append(...ran.messages);
-      return ran.messages;
+      return broken ? [] : ran.messages;
     };
     const calls = turn.openCalls().map((c) => ({ id: c.id, name: c.name, args: c.input as Record<string, unknown> }));
     const ran = await Promise.race([Promise.all(calls.map(one)), failure]);
+    // The round's results in one write, in the order of their calls.
+    await turn.append(...ran.flat());
     await toolCallEnded(ctx);
     return { messages: ran.flat() };
   };

@@ -50,7 +50,8 @@ const desk = langgraph.agent({ name: 'desk', graph, context: { region: 'eu' } })
   a retried attempt resumes the run it cut off, and a step stored is not run
   again. Between turns the thread keeps its latest checkpoint (`prune`).
 - **The `messages` view shows the run as it goes**: after each step, the AI
-  and tool messages it added are copied into the conversation, by their ids.
+  and tool messages it added are copied into the conversation, by their ids
+  (a step's tool messages in one write).
   The conversation is a log: a message the graph removes or edits later
   stays as it was copied.
 - **`interrupt()` waits for a signal** named `interrupt`, which the agent's
@@ -115,9 +116,10 @@ model sees of it (the earlier turns as their prompt and answer, within
 retried attempt runs it again from the start, from what is stored.
 
 - **The model node stores its reply with tool calls before it returns, and
-  the tools node each result as it lands.** So a crash during the tools runs
-  those without a result again, with the same tool call ids, without asking
-  the model again. The final reply, which no tool waits for, is stored with
+  the tools node the round's results in one write, once its tools ran.** So
+  a crash during the tools runs the round's calls again, those that had
+  finished too, with the same tool call ids, without asking the model
+  again. The final reply, which no tool waits for, is stored with
   the turn's answer, in one commit: a crash before it asks the model again.
 - **A tool is idempotent by its tool call id** (`callId` of `tool()`'s
   `run`), which it passes on, such as in an idempotency key.
