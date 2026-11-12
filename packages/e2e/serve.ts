@@ -1,8 +1,7 @@
 // Examples in one endpoint: every one, or the groups named on the command
 // line (ledger, shop, bank, agent, langgraph, claude, deepseek, opencode), such as
-// `node serve.ts ledger shop`; with the agents' `signals` object.
+// `node serve.ts ledger shop`; each agent with its companion (`withFaults` serves it).
 import * as restate from '@restatedev/restate-sdk';
-import { signals } from '@restatedev/agents';
 import { withFaults } from '@restatedev/sessions/test/faults';
 
 type Services = restate.ServeOptions['services'];
@@ -33,4 +32,4 @@ const services = (
     }),
   )
 ).flat();
-await restate.serve({ services: withFaults([...services, signals]), port: Number(process.env.PORT ?? 9080) });
+await restate.serve({ services: withFaults(services), port: Number(process.env.PORT ?? 9080) });

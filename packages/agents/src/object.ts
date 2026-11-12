@@ -22,18 +22,17 @@ import {
 } from './common.ts';
 import { compact, type Items, nextStart, restart, SCHEMA, settle, steerStored } from './conversation.ts';
 import {
+  companionAt,
   type Notifications,
   type Resolved,
   type Signal,
-  signals,
-  signalsOf,
   type Steer,
   type Steered,
   type Steering,
   withCompanion,
   type Waiting,
   type Watch,
-} from './signals.ts';
+} from './companion.ts';
 
 /**
  * The options of every object here, beside a session object's: retries for
@@ -61,12 +60,13 @@ export interface Stopped {
 }
 
 /**
- * A call of the companion's of `ctx`; with `step`, a change, keyed by the
- * request and `step`: a restarted view joins the same call. A read has no
- * key: asked again, it answers again, and Restate keeps nothing of it.
+ * A call of the companion of the object of `ctx` (its own, at its key); with
+ * `step`, a change, keyed by the request and `step`: a restarted view joins
+ * the same call. A read has no key: asked again, it answers again, and
+ * Restate keeps nothing of it.
  */
 const companion = (ctx: restate.ViewContext, step?: string) =>
-  ctx.rpc(signals, signalsOf(ctx), step === undefined ? {} : { idempotencyKey: `${ctx.request.id}:${step}` });
+  ctx.rpc(companionAt(ctx), ctx.key, step === undefined ? {} : { idempotencyKey: `${ctx.request.id}:${step}` });
 
 /**
  * Cancel the invocation of the message being answered, if any, and say
@@ -96,8 +96,10 @@ const WAITS = { inactivityTimeout: { minutes: 5 } } satisfies restate.HandlerOpt
  * it answers, and `notifications` and `watch`, the revision of its
  * conversation, and a wait for a newer one (an agent's
  * has `clear` and `sync` too: {@link FOLLOWED}). Each asks the object's
- * `signals` companion, which knows what the object does: they run while the
- * object's handler works.
+ * companion (its own `<name>.agentprebuild.restate`, at the same key), which
+ * knows what the object does: they run while the object's handler works.
+ * They are the only way a client reaches the companion, whose handlers
+ * Restate's ingress refuses.
  */
 const BUILT_IN = {
   signal: async (ctx: restate.ViewContext, signal: Signal): Promise<Resolved> =>
@@ -135,7 +137,7 @@ const BUILT_IN = {
 const followed = (steerable: boolean) => ({
   /**
    * Forget the conversation: stop the message being answered (as `stop`),
-   * then empty the key's database, and what its `signals` hold (waits and
+   * then empty the key's database, and what its companion holds (waits and
    * kept signals). The conversation's ids and cursors go on (see
    * conversation.ts), so a follower reads on, and drops the messages before `first`.
    * A message sent before it is answered first, then forgotten too; one sent
@@ -211,8 +213,8 @@ const FOLLOWED = followed(false);
 /**
  * The agents' handlers that only their own views call (Restate's ingress
  * refuses them), and their types leave out: `erase`, `clear`'s work, once
- * the handlers before it are done. It empties the key's database and its
- * signals', and the conversation's ids and cursors go on where they got to
+ * the handlers before it are done. It empties the key's database and what its
+ * companion holds, and the conversation's ids and cursors go on where they got to
  * (conversation.ts).
  */
 const internal = (items: Items<unknown> | undefined) => ({
@@ -228,7 +230,7 @@ const internal = (items: Items<unknown> | undefined) => ({
         await reset(tx);
         await restart(tx, start);
       });
-      await ctx.rpc(signals, signalsOf(ctx), { idempotencyKey: `${ctx.request.id}:reset` }).reset();
+      await ctx.rpc(companionAt(ctx), ctx.key, { idempotencyKey: `${ctx.request.id}:reset` }).reset();
     },
   },
   /**
@@ -297,8 +299,8 @@ export interface Definition<P extends string> {
   description?: string;
   schema?: readonly restate.Step[];
   /**
-   * Whether it works unwatched, such as a subagent: its turn calls its
-   * `signals` only at its end, not at each step, so a client that follows it
+   * Whether it works unwatched, such as a subagent: its turn publishes to its
+   * companion only at its end, not at each step, so a client that follows it
    * sees each turn once it ended. `messages` has every turn as before.
    */
   background?: boolean;

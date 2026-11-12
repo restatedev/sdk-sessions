@@ -3,7 +3,9 @@
 // model, which looks the order up, waits for approval, then refunds.
 //
 // Checks: the agent waits for the signal (`pending` lists the wait, with
-// what the model waits for; `status` and `messages` answer meanwhile) until
+// what the model waits for; `status` and `messages` answer meanwhile), held
+// by its own companion (`support.agentprebuild.restate`, keyed `alice`, which
+// the ingress refuses; no `signals` is served) until
 // it is resolved by its id, then answers
 // with every tool's result; a signal no one waits for is dropped, unless it
 // is kept; a cancelled wait leaves `pending`; `stop` stops a message being
@@ -25,8 +27,8 @@ import { createModels } from '@earendil-works/pi-ai/models';
 import {
   CANCELLED,
   call,
+  served,
   signal,
-  signals,
   webhook,
   workflow,
   type Messages,
@@ -129,7 +131,7 @@ const server = spawn(SERVER, ['--base-dir', dir], {
   stdio: 'ignore',
 });
 try {
-  await restate.serve({ services: [orders, refund, support, auditor, triage, hooks, signals], port: PORT });
+  await restate.serve({ services: served([orders, refund, support, auditor, triage, hooks]), port: PORT });
   for (
     let i = 0;
     !(await fetch(`${ADMIN}/health`).then(
@@ -178,6 +180,29 @@ try {
   const status = (await post('support/alice/status')) as Status;
   assert.ok(status.answering?.invocationId.startsWith('inv_'), JSON.stringify(status));
   assert.deepEqual(status.waiting, [wait]);
+  // Each agent's own companion, served with it and keyed as it, holds the wait: no `signals` is served, and the
+  // ingress refuses the companion's handlers (clients ask the agent's views).
+  const services = ((await (await fetch(`${ADMIN}/services`)).json()) as { services: { name: string }[] }).services;
+  const names = services.map((s) => s.name);
+  assert.ok(
+    names.includes('support.agentprebuild.restate') && names.includes('auditor.agentprebuild.restate'),
+    names.join(', '),
+  );
+  assert.ok(!names.includes('signals'), names.join(', '));
+  const companionKeys = await fetch(`${ADMIN}/query`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify({
+      query: "SELECT DISTINCT service_key FROM state WHERE service_name = 'support.agentprebuild.restate'",
+    }),
+  });
+  assert.deepEqual(((await companionKeys.json()) as { rows: { service_key: string }[] }).rows, [
+    { service_key: 'alice' },
+  ]);
+  for (const handler of ['status', 'pending', 'resolve', 'publish']) {
+    const direct = await fetch(`${INGRESS}/support.agentprebuild.restate/alice/${handler}`, { method: 'POST' });
+    assert.ok(!direct.ok, `the ingress took the companion's ${handler}: ${direct.status}`);
+  }
   const sofar = (await post('support/alice/messages')) as Messages;
   assert.deepEqual(lines(sofar.messages), [
     ['user', 'Refund order 103, please'],

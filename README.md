@@ -102,6 +102,12 @@ curl localhost:8080/support/alice/chat -d 'Order 103 arrived broken, can I get m
 curl localhost:8080/support/alice/signal --json '{"name": "approval", "value": "approved"}'
 ```
 
+`serve` serves each agent with its own companion, a virtual object named
+`<agent>.agentprebuild.restate` (here `support.agentprebuild.restate`) and
+keyed as the agent (`alice`), which keeps its waits and what it is doing;
+you never name it, and clients reach it through the agent's views
+(`status`, `pending`, `signal`).
+
 The same agent runs on any of the supported frameworks. See
 [`@restatedev/agents`](packages/agents/README.md) and
 [the examples](packages/examples/README.md).

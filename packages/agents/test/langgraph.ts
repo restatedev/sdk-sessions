@@ -3,7 +3,7 @@
 //
 // Environment: PORT (default 9080), OPENAI_API_KEY, MODEL, and ABORT_PER_MILLE (see
 // ../faults.ts).
-import { sessionObject, signals } from '@restatedev/agents';
+import { sessionObject } from '@restatedev/agents';
 import * as langgraph from '@restatedev/agents/langgraph';
 import { serveIfMain } from '@restatedev/sessions/test/faults';
 import { ledger } from '@restatedev/sessions/test/ledger';
@@ -18,4 +18,4 @@ export const agent = sessionObject({
   views: { messages: langgraph.messages() },
 });
 
-serveIfMain(import.meta, [agent, ledger, signals]);
+serveIfMain(import.meta, [agent, ledger]);

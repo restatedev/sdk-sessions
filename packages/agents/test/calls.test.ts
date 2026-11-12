@@ -46,7 +46,7 @@ describe('call records', () => {
     const lookup = call(lookups, 'lookup', { description: 'Look it up', input: z.object({ about: z.string() }) });
     await lookup.run({ about: 'x' }, { ctx, callId: 'c1' });
     expect(made.map((m) => [m.service, m.method, m.idempotencyKey])).toEqual([
-      ['signals', 'wait', 'inv1:c1'],
+      ['waiter.agentprebuild.restate', 'wait', 'inv1:c1'],
       ['lookups', 'lookup', 'inv1:c1'],
     ]);
     expect((await records(state)).map((c) => [c.tool, c.ids, c.approval])).toEqual([
@@ -81,7 +81,7 @@ describe('waitFor', () => {
     expect(await waitFor(first.ctx, 'call-1', 'approval', { refund: 5 })).toBe('approved');
     expect(first.made).toEqual([
       {
-        service: 'signals',
+        service: 'waiter.agentprebuild.restate',
         method: 'wait',
         parameter: { id: 'inv1:call-1', name: 'approval', input: { refund: 5 } },
         idempotencyKey: 'inv1:call-1',

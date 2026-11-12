@@ -10,7 +10,7 @@ import * as restate from '@restatedev/sessions';
 import { z } from 'zod';
 import { stopSignalOf, type Configure, configured, ToolError } from './common.ts';
 import { callOf } from './calls.ts';
-import { signals, signalsOf } from './signals.ts';
+import { companionAt } from './companion.ts';
 
 const TOOL = Symbol.for('restate-agents.tool');
 
@@ -359,7 +359,7 @@ const wait = (
     input,
     toolCall,
     async ({ ctx, idempotencyKey: id }) =>
-      ctx.rpc(signals, signalsOf(ctx), { idempotencyKey: id }).wait({ id, name, ...(shown ? { input } : {}) }),
+      ctx.rpc(companionAt(ctx), ctx.key, { idempotencyKey: id }).wait({ id, name, ...(shown ? { input } : {}) }),
     { rejoin, approval },
   );
 

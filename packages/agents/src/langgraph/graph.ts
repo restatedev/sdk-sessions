@@ -62,7 +62,7 @@ import { Command, InvalidUpdateError, type Pregel, type StateSnapshot, StateGrap
 import { flushHeld } from '../calls.ts';
 import { fromTool, stopSignalOf } from '../common.ts';
 import type { Conversation, Run, Turn } from '../conversation.ts';
-import { signals, signalsOf } from '../signals.ts';
+import { companionAt } from '../companion.ts';
 import { SqlCheckpointSaver } from './checkpointer.ts';
 import { running } from './context.ts';
 import { terminalOf } from './errors.ts';
@@ -295,7 +295,7 @@ async function resumed(ctx: restate.SessionContext, saver: SqlCheckpointSaver, s
       // As JSON, which the companion stores: the state may hold class instances.
       const input = value === undefined ? undefined : (JSON.parse(JSON.stringify(value)) as unknown);
       return ctx
-        .rpc(signals, signalsOf(ctx), { idempotencyKey: waitId })
+        .rpc(companionAt(ctx), ctx.key, { idempotencyKey: waitId })
         .wait({ id: waitId, name: INTERRUPT, ...(input === undefined ? {} : { input }) });
     }),
   );

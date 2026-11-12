@@ -3,7 +3,7 @@
 //
 // Environment: PORT (default 9080), MODEL with its provider's API key, and
 // ABORT_PER_MILLE (see ../faults.ts). OpenCode needs Node 24.
-import { sessionObject, signals } from '@restatedev/agents';
+import { sessionObject } from '@restatedev/agents';
 import * as opencode from '@restatedev/agents/opencode';
 import { serveIfMain } from '@restatedev/sessions/test/faults';
 import { ledger } from '@restatedev/sessions/test/ledger';
@@ -18,4 +18,4 @@ export const agent = sessionObject({
   views: { messages: opencode.messages() },
 });
 
-serveIfMain(import.meta, [agent, ledger, signals]);
+serveIfMain(import.meta, [agent, ledger]);

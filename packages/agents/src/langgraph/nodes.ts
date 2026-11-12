@@ -26,7 +26,7 @@
 import type * as restate from '@restatedev/sessions';
 import type { LangGraphRunnableConfig } from '@langchain/langgraph';
 import { flushHeld } from '../calls.ts';
-import { signals, signalsOf } from '../signals.ts';
+import { companionAt } from '../companion.ts';
 import { handlerContext } from './context.ts';
 
 /** A LangGraph node: it takes the state and the run's config, and returns the state's update. */
@@ -117,7 +117,7 @@ export const waitForSignal =
       const id = `${step.ctx.request.id}:${step.idempotencyKey}`;
       const shown = input === undefined ? {} : { input: plain(input(state)) };
       const value = await step.ctx
-        .rpc(signals, signalsOf(step.ctx), { idempotencyKey: id })
+        .rpc(companionAt(step.ctx), step.ctx.key, { idempotencyKey: id })
         .wait({ id, name, ...shown });
       return update(output, value);
     };

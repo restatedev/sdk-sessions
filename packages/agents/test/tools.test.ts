@@ -131,7 +131,7 @@ describe('workflow', () => {
 });
 
 describe('signal', () => {
-  it("waits on the agent's signals object, once per tool call, for what the model says", async () => {
+  it("waits on the agent's own companion, at its key, once per tool call, for what the model says", async () => {
     const t = signal('approval', { description: 'Wait for a manager', input: z.object({ order: z.string() }) });
     expect(t.name).toBe('wait_for_approval');
     expect(fields(t)).toEqual(['order']);
@@ -139,8 +139,8 @@ describe('signal', () => {
     expect(result).toBe('approved');
     expect(made).toMatchObject([
       {
-        service: 'signals',
-        key: 'assistant:alice',
+        service: 'assistant.agentprebuild.restate',
+        key: 'alice',
         method: 'wait',
         parameter: { id: 'inv1:call_1', name: 'approval', input: { order: '103' } },
         idempotencyKey: 'inv1:call_1',
@@ -339,9 +339,9 @@ describe('object', () => {
     expect(cancels).toEqual([turn]);
     expect(calls).toEqual([
       {
-        service: 'signals',
+        service: 'desk.agentprebuild.restate',
         method: 'status',
-        key: 'desk:alice',
+        key: 'alice',
         parameter: undefined,
         idempotencyKey: 'inv_stop:stop',
       },

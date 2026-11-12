@@ -43,9 +43,11 @@ OpenCode's resume budget ([OpenCode's return](opencode.md),
   the next message, gives each open call a result and ends the turn as
   `ended`. Today every framework finishes such a turn under the next
   invocation instead, which can make a dead turn's Restate calls twice.
-- **The companion** (the `signals` object) is the control plane: the turn
-  being answered, the tools' waits, and a revision clients follow. Nothing in
-  it is needed to complete a turn.
+- **The companion** (the agent's own object `<agent>.agentprebuild.restate`,
+  keyed as the agent) is the control plane: the turn being answered, the
+  tools' waits, and a revision clients follow. Each agent brings its own,
+  served with it; clients reach it only through the agent's views. Nothing
+  in it is needed to complete a turn.
 - **A message may steer the turn being answered** (the `steer` view): the
   turn takes it at its next step, after a reply's tool results, or else it
   is answered as a turn of its own, in the order it was sent; once either
@@ -62,10 +64,11 @@ flowchart LR
     T[("Key's database: turns, items, call records")]
     V["views: messages, sync"] -- read --> T
     X["private: settle, compact, erase, steered"] --> T
+    V2["views: status, pending, signal, steer, stop, watch"]
   end
-  H -- "start, close, publish" --> S[("Companion signals, key assistant:alice: turn, waits, revision")]
+  H -- "start, close, publish" --> S[("Companion assistant.agentprebuild.restate, key alice: turn, waits, revision")]
   F -- "wait, for a tool" --> S
-  C -- "signal resolves a wait" --> S
+  V2 -- "ask; signal resolves a wait" --> S
   S -- "settle a dead turn" --> X
 ```
 

@@ -382,6 +382,18 @@ const names = (services: { name: string }[], only?: string) => served(services, 
 const agentNamed = (name: string) =>
   sessionObject({ name, handlers: { chat: chatHandler(async () => 'ok') }, views: {} });
 
+/** What a companion answers each call of its agent, plainly. */
+const answer = (call: Made) =>
+  call.method === 'status'
+    ? { answering: null, waiting: [] }
+    : call.method === 'steer'
+      ? { id: 'inv_view', turn: null }
+      : call.method === 'resolve'
+        ? { resolved: null }
+        : call.method === 'pending'
+          ? []
+          : { revision: 1 };
+
 describe('the companion of each agent', () => {
   const one = agentNamed('one');
   const two = agentNamed('two');
@@ -417,16 +429,6 @@ describe('the companion of each agent', () => {
     const runOf = (agent: typeof one, name: string) => {
       const map = new Map<string, Uint8Array>();
       const made: Made[] = [];
-      const answer = (call: Made) =>
-        call.method === 'status'
-          ? { answering: null, waiting: [] }
-          : call.method === 'steer'
-            ? { id: 'inv_view', turn: null }
-            : call.method === 'resolve'
-              ? { resolved: null }
-              : call.method === 'pending'
-                ? []
-                : { revision: 1 };
       const run = (handler: string, input?: unknown, id = 'inv') =>
         invoke(
           agent,

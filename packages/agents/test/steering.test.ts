@@ -3,7 +3,7 @@
 // keeps seeing it. The turn runs in a `chat` handler (`chatHandler`, with
 // `steers`), whose companion is the tests' (support.ts): its `publish`
 // answers the messages a test steers to the turn. The companion itself is
-// tested in signals.test.ts, and each framework in its own tests.
+// tested in companion.test.ts, and each framework in its own tests.
 import * as restate from '@restatedev/sessions';
 import { invoke, Schema } from '@restatedev/sessions/internal';
 import { fakeContext, type Made } from '@restatedev/sessions/test/support';
@@ -459,8 +459,8 @@ describe("an agent's steer view and steered handler", () => {
     const { run, calls } = steerable();
     expect(await run('steer', 'use Celsius', 'inv_view')).toEqual({ id: 'inv_view', turn: 'inv_turn' });
     expect(calls.find((c) => c.method === 'steer')).toMatchObject({
-      service: 'signals',
-      key: 'steerable:alice',
+      service: 'steerable.agentprebuild.restate',
+      key: 'alice',
       parameter: { id: 'inv_view', text: 'use Celsius' },
       idempotencyKey: 'inv_view:steer',
     });

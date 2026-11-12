@@ -16,18 +16,22 @@ export {
 } from './common.ts';
 export { sessionObject, type Status, type Stopped } from './object.ts';
 export {
+  COMPANION_SUFFIX,
   companionOf,
   deliver,
-  signals,
   type Companion,
   type Resolved,
   type Signal,
   type Steered,
   type Steering,
   type Waiting,
-} from './signals.ts';
+} from './companion.ts';
 export { call, send, signal, subagent, tool, workflow, type Tool, type ToolCall, type ToolContext } from './tools.ts';
 export { webhook, webhookMessage, type WebhookAuth, type WebhookEvent, type WebhookOptions } from './webhook.ts';
 
-/** @restatedev/sessions' `serve`: the services on PORT, with what they need beside them (an agent's `signals`). */
-export { serve } from '@restatedev/sessions';
+/**
+ * @restatedev/sessions' `serve`: the services on PORT, with what they need
+ * beside them (each agent's companion); and `served`, those services, for
+ * an endpoint of your own (`restate.endpoint()`).
+ */
+export { serve, served } from '@restatedev/sessions';

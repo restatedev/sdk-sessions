@@ -80,18 +80,13 @@ interface Cost {
 
 /**
  * Two turns of `chat` on a key of its own, each of `r` requests with `k` tool
- * calls a round: what each cost. With `olderCompanion`, the companion's
- * `start` returns nothing (see support.ts); `object` is the agent's.
+ * calls a round: what each cost. `object` is the agent's.
  */
 async function costs(
   chat: PromptHandler,
   r: number,
   k: number,
-  {
-    olderCompanion = false,
-    object,
-    published,
-  }: { olderCompanion?: boolean; object?: { readonly name: string }; published?: () => Promise<void> } = {},
+  { object, published }: { object?: { readonly name: string }; published?: () => Promise<void> } = {},
 ): Promise<Cost[]> {
   const map = new Map<string, Uint8Array>();
   const following = followingOf(map);
@@ -102,7 +97,7 @@ async function costs(
     let commits = 0;
     const made = following.made.length;
     const onSync = async () => void commits++;
-    const sql = sqlAttempt({ map, key: 'k', id: `inv${i}`, onSync, olderCompanion, object, published });
+    const sql = sqlAttempt({ map, key: 'k', id: `inv${i}`, onSync, object, published });
     expect(await sql.end(() => handler(sql.ctx, text))).toBe('Done');
     out.push({ commits, companion: following.made.slice(made) });
   }
@@ -212,18 +207,10 @@ describe("a turn's start", () => {
   });
 
   it.each(AGENTS)(
-    "is published by the companion's `start`, or by the turn when `start` returns nothing: %s",
+    "is published by the companion's `start`: the turn makes no publish of its own to start: %s",
     async (_name, chat) => {
-      for (const [r, k] of [
-        [1, 0],
-        [2, 3],
-      ] as const) {
-        const [, turn] = await costs(chat(), r, k);
-        const [, older] = await costs(chat(), r, k, { olderCompanion: true });
-        // The turn's own publish to start is the companion's `start`'s.
-        expect(older!.companion.slice(0, 2)).toEqual(['start', 'publish']);
-        expect(turn!.companion).toEqual(['start', ...older!.companion.slice(2)]);
-      }
+      const [, turn] = await costs(chat(), 1, 0);
+      expect(turn!.companion).toEqual(['start', 'close']);
     },
   );
 
