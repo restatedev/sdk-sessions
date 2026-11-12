@@ -84,7 +84,8 @@ copies its new entries (the model's replies, the tools' results) into the
 agent's conversation of turns, in the same transaction: what `messages`
 shows ([docs/conversation.md](../../docs/conversation.md)). A commit that
 copied a reply with tool calls, or tools' results, is published once it is
-done (pi commits each result on its own: one publish each), and nothing else
+done, in a `chat` turn (pi commits each result on its own: one publish each;
+a `prompt()` in a handler of your own publishes nothing), and nothing else
 is: a tool call's start publishes nothing, so a follower reads the calls
 once they are stored, and each output once it is. The views show
 each turn as it was asked and answered, not pi's summaries and handoffs.

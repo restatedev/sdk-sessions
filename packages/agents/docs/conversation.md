@@ -149,7 +149,13 @@ const SCHEMA = new Schema('restate_agents.turns', [
   a publish, before each Restate call, send or wait of the library (a call
   record, LangGraph's nodes and interrupts), and when its attempt fails
   with an error in process; a crash loses it, and the retry makes it again.
-  A conversation written directly writes each step as it comes. A
+  That is the conversation's own durability. Telling followers is not: the
+  conversation stores a turn, and knows nothing of the companion. After
+  each write of steps that commits, the run makes what `answerOnce` passed
+  to `Conversation.hold`: what the `chat` turn it runs in asked for (a
+  followed turn's publish, which `chatTurn` sets), or nothing, for a turn
+  run outside one. A conversation written directly writes each step as it
+  comes. A
   reply at the end can be dropped (to ask the model again), which is one
   range delete; its `seq` is kept in the start row, so cursors never go
   back.

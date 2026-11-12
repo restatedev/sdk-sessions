@@ -143,6 +143,7 @@ the tools' results) into the agent's conversation of turns, in the same
 transaction: what `messages` shows
 ([docs/conversation.md](../../docs/conversation.md)). A flush that copied a
 reply with tool calls, or tools' results, is published once it is stored,
+in a `chat` turn (a `prompt()` in a handler of your own publishes nothing),
 and nothing else is: a tool call's start publishes nothing. The tools of a
 reply run one after another, and each result is flushed with the next call,
 before its tool runs (the checkpoint policy's barrier): one commit, and one

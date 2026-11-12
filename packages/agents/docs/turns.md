@@ -11,11 +11,13 @@ explain why the model is as it is.
 
 The code:
 
-- [`src/common.ts`](../src/common.ts): `chatHandler`, the turn's wrapper:
-  start and close in the companion, cancellation, attempts; and `answering`,
-  which settles the call records as the turn stores results;
+- [`src/common.ts`](../src/common.ts): `chatHandler`, the turn's wrapper
+  (`chatTurn`): start, publishes and close in the companion, cancellation,
+  attempts; and `answering`, which settles the call records as the turn
+  stores results;
 - `src/conversation.ts` (new): the conversation, `Conversation`, `Turn`,
-  `answerOnce` (which answers a prompt), `settle` and `compact`;
+  `answerOnce` (which answers a prompt, and stores it: it knows nothing of
+  the companion), `settle` and `compact`;
 - [`src/companion.ts`](../src/companion.ts): the companion;
 - [`src/object.ts`](../src/object.ts): the views (`status`, `stop`, `clear`,
   `sync`, `watch`) and the private handlers (`erase`, `settle`, `compact`);
@@ -152,11 +154,13 @@ sequenceDiagram
    its tools run; the tools' results before the model is asked again). A
    final reply, which no tool waits for, is held, and commits with the
    answer. After each write of steps that commits, the turn publishes once,
-   and waits for it (`Conversation.hold`, which `answerOnce` sets: `append`
-   and `appendReply` publish themselves; a framework that copies its steps
-   in a transaction of its own, `copyIn`, publishes once that commits). So
-   a follower sees the calls as their tools start, and their results before
-   the model's next request.
+   and waits for it. The `chat` turn asks for it (`chatTurn`, for a
+   followed turn), and the conversation makes it without knowing what it
+   is: `answerOnce` passes it to `Conversation.hold`, `append` and
+   `appendReply` make it themselves, and a framework that copies its steps
+   in a transaction of its own, `copyIn`, makes it once that commits
+   (`Turn.stepsCommitted`). So a follower sees the calls as their tools
+   start, and their results before the model's next request.
 4. **Answer.** The answer is stored on the turn's row, with what the turn
    carries, and the final reply, in one commit. If the turns before the next turn's window outgrow the agent's
    budget, the agent sends itself `compact`
@@ -663,6 +667,39 @@ A handler of your own may prompt more than once (`claude.prompt(ctx, …)`
 twice, say): each prompt is a turn of the conversation, `<id>`, then
 `<id>:2`. A retried attempt makes them in the same order, so each finds its
 own answer, and the companion's turn is the invocation, all of them.
+
+## A turn outside a `chat` turn
+
+Storing a turn and telling followers about it are two jobs, of two layers.
+The conversation (`answerOnce`) stores the turn, whatever handler runs it.
+The `chat` turn (`chatTurn`: a `chatHandler`, a framework's `chat()`, the
+private `steered`) starts it in the companion, publishes its steps (unless
+the agent runs in the background) and closes it.
+
+A handler of your own that calls a framework's `prompt()` (or `answerOnce`)
+outside `chatHandler` runs a turn that only the conversation knows: it is
+stored, step by step, and answered once, as any; but the companion is not
+told of it. `status` does not show it, `stop` does not stop it, no `steer`
+reaches it, and it publishes nothing: a follower sees it once something
+else publishes (the next `chat` turn, say). Wrap the handler in
+`chatHandler` for all of that (`summarize: chatHandler(async (ctx, topic)
+=> pi.prompt(ctx, …))`).
+
+Which objects can do what:
+
+| Object                                     | Companion | A turn of `chat` (`chatHandler`)              | A turn of a handler of your own (`prompt()`)                         |
+| ------------------------------------------ | --------- | --------------------------------------------- | -------------------------------------------------------------------- |
+| a framework's `agent()`                    | served    | published, steered, followed (`sync`)         | (it has none)                                                        |
+| `sessionObject()` with a `messages` view   | served    | published, steered, followed (`sync`)         | stored; waits for signals; publishes nothing                         |
+| `sessionObject()` without one              | served    | published (`watch`), not steered (no `steer`) | stored; waits for signals; publishes nothing                         |
+| a session object of `@restatedev/sessions` | none      | fails at once (`NoCompanion`, terminal)       | stored; a wait for a signal fails the turn (`NoCompanion`, terminal) |
+
+A wait for a signal (`signal()`, `waitFor`, LangGraph's interrupts and
+`waitForSignal`) needs the companion, not a `chat` turn: in a handler of
+your own on an object of `sessionObject()` it waits as in `chat` (see the
+limit on its waits below). An object without a companion fails it once,
+with a terminal error that says so, rather than calling a companion nobody
+serves; as it does a `chat` turn, and any publish.
 
 ## What a client sees
 

@@ -125,7 +125,8 @@ replies, the tools' results) is copied into the turn after each of
 OpenCode's commits, in a `ctx.db` transaction of its own, by OpenCode's
 message and part ids, so a copy a crash missed is caught up, before a tool
 call runs, the answer, and any close of the turn. A copy of a reply with
-tool calls, or of tools' results, is published once it is committed, and
+tool calls, or of tools' results, is published once it is committed, in a
+`chat` turn (a `prompt()` in a handler of your own publishes nothing), and
 nothing else is: a tool call's start publishes nothing. That is what `messages`
 shows ([docs/conversation.md](../../docs/conversation.md)); OpenCode's own
 "Continue" after a restart, its idle markers and its compactions are not

@@ -687,6 +687,16 @@ that takes its message as `chat` does (text, or a JSON string):
 summarize: chatHandler(async (ctx, topic) => pi.prompt(ctx, `Summarize what we said about ${topic}`)),
 ```
 
+`chatHandler` is what tells the companion of the turn: `status` shows it,
+`stop` stops it, `steer` reaches it, and its steps are published for
+followers. A `prompt()` in a handler without it stores its turn and
+publishes nothing (a follower sees it with the next publish); a `signal`
+tool still waits, as the object's companion keeps the wait. A session
+object of `@restatedev/sessions` has no companion: a `prompt()` there
+stores its turns too, but a wait for a signal fails the turn, and a
+`chatHandler` the message, with a terminal error that says so
+([A turn outside a `chat` turn](docs/turns.md#a-turn-outside-a-chat-turn)).
+
 pi also has `withPi(ctx, options, work)`, for more than a prompt: the Harness's own
 API, such as compacting the conversation (see its README).
 
