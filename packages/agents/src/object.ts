@@ -96,7 +96,7 @@ const WAITS = { inactivityTimeout: { minutes: 5 } } satisfies restate.HandlerOpt
  * it answers, and `notifications` and `watch`, the revision of its
  * conversation, and a wait for a newer one (an agent's
  * has `clear` and `sync` too: {@link FOLLOWED}). Each asks the object's
- * companion (its own `<name>.agentprebuild.restate`, at the same key), which
+ * companion (its own `<name>.agentprebuilt.restate`, at the same key), which
  * knows what the object does: they run while the object's handler works.
  * They are the only way a client reaches the companion, whose handlers
  * Restate's ingress refuses.

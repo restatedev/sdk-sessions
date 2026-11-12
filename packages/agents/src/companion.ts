@@ -1,6 +1,6 @@
 // An agent's companion: a virtual object of its own, named
-// `<agent>.agentprebuild.restate` (agent `assistant`'s is
-// `assistant.agentprebuild.restate`) and keyed as the agent (`alice`), that
+// `<agent>.agentprebuilt.restate` (agent `assistant`'s is
+// `assistant.agentprebuilt.restate`) and keyed as the agent (`alice`), that
 // each agent brings with it. It keeps what the agent's key is doing: its
 // waits, whose `wait` returns once `resolve` gives the wait its value; the
 // message the agent answers; the messages steered to it that it has not taken
@@ -17,12 +17,12 @@ import type { Answering } from './common.ts';
 import type { Status } from './object.ts';
 
 /**
- * What an agent's companion's name adds to the agent's: `<agent>.agentprebuild.restate`.
+ * What an agent's companion's name adds to the agent's: `<agent>.agentprebuilt.restate`.
  * Restate refuses the names that start with `restate`, so it is a suffix.
  */
-export const COMPANION_SUFFIX = '.agentprebuild.restate';
+export const COMPANION_SUFFIX = '.agentprebuilt.restate';
 
-/** The name of the companion of agent `agent`: `<agent>.agentprebuild.restate`. */
+/** The name of the companion of agent `agent`: `<agent>.agentprebuilt.restate`. */
 export const companionName = (agent: string) => `${agent}${COMPANION_SUFFIX}`;
 
 /** The companion object of an agent, as a client takes it: see {@link companionFor}. */
@@ -64,7 +64,7 @@ export const withCompanion = <D extends { name: string }>(definition: D): D => {
 
 /**
  * The companion object of `agent` (an `sessionObject()` or `agent()` of
- * @restatedev/agents), named `<agent>.agentprebuild.restate`: served with
+ * @restatedev/agents), named `<agent>.agentprebuilt.restate`: served with
  * the agent, and keyed as the agent. Clients reach it only through the
  * agent's own views (`status`, `pending`, `signal`, `watch`...).
  */
@@ -347,7 +347,7 @@ const shared = <I, O>(fn: (ctx: restate.ObjectSharedContext<State>, input: I) =>
 
 /**
  * The companion of agent `agent`: an object named
- * `<agent>.agentprebuild.restate` ({@link companionName}), keyed as the
+ * `<agent>.agentprebuilt.restate` ({@link companionName}), keyed as the
  * agent, whose handlers only the agent's own handlers and views call
  * (Restate's ingress refuses them all): clients ask the agent's views
  * (`status`, `pending`, `signal`, `steer`, `watch`...), which ask it. Its

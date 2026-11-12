@@ -103,7 +103,7 @@ curl localhost:8080/support/alice/signal --json '{"name": "approval", "value": "
 ```
 
 `serve` serves each agent with its own companion, a virtual object named
-`<agent>.agentprebuild.restate` (here `support.agentprebuild.restate`) and
+`<agent>.agentprebuilt.restate` (here `support.agentprebuilt.restate`) and
 keyed as the agent (`alice`), which keeps its waits and what it is doing;
 you never name it, and clients reach it through the agent's views
 (`status`, `pending`, `signal`).

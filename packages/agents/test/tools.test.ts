@@ -139,7 +139,7 @@ describe('signal', () => {
     expect(result).toBe('approved');
     expect(made).toMatchObject([
       {
-        service: 'assistant.agentprebuild.restate',
+        service: 'assistant.agentprebuilt.restate',
         key: 'alice',
         method: 'wait',
         parameter: { id: 'inv1:call_1', name: 'approval', input: { order: '103' } },
@@ -339,7 +339,7 @@ describe('object', () => {
     expect(cancels).toEqual([turn]);
     expect(calls).toEqual([
       {
-        service: 'desk.agentprebuild.restate',
+        service: 'desk.agentprebuilt.restate',
         method: 'status',
         key: 'alice',
         parameter: undefined,

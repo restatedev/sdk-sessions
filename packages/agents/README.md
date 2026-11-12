@@ -59,8 +59,8 @@ curl localhost:8080/assistant/alice/messages                                 # t
 conversation of its own, with a database of its own, and answers one
 message at a time. `serve` (@restatedev/sessions' `restate.serve`) serves it
 on PORT (default 9080), with the agent's companion: a virtual object of
-the agent's own, named `<agent>.agentprebuild.restate`
-(`assistant.agentprebuild.restate`) and keyed as the agent (`alice`), which
+the agent's own, named `<agent>.agentprebuilt.restate`
+(`assistant.agentprebuilt.restate`) and keyed as the agent (`alice`), which
 keeps its waits and what it is doing ([The companion](#the-companion)).
 Each agent brings its companion with it: you never name it. An endpoint of
 your own binds what `served([assistant])` lists (the agents with their
@@ -304,7 +304,7 @@ made so far.
 **What it is doing.** `status` says which message the agent answers, if
 any (its invocation id, to attach to its answer, and since when), and what
 its tools wait for ([Signals](#signals)). The message is in the agent's
-companion (`support.agentprebuild.restate`, key `alice`), which `chat` tells
+companion (`support.agentprebuilt.restate`, key `alice`), which `chat` tells
 when it starts, and when it answers or fails for good (Restate's UI shows it
 there):
 
@@ -493,16 +493,16 @@ with `approval: true`, those its permission rules ask about: see
 [its README](src/opencode/README.md#permissions).
 
 A wait ends with its agent's invocation: a cancelled or killed one leaves `pending`.
-The waits are kept by the agent's companion, `<agent>.agentprebuild.restate`
+The waits are kept by the agent's companion, `<agent>.agentprebuilt.restate`
 keyed as the agent, which `serve` serves beside it. See
 [`examples/intermediate/support.ts`](../examples/intermediate/support.ts).
 
 ## The companion
 
 Each agent brings a companion of its own: a virtual object named
-`<agent>.agentprebuild.restate`, the agent's name as it is (agent `support`
-has `support.agentprebuild.restate`), keyed as the agent (`support/alice`'s
-is `support.agentprebuild.restate/alice`). It keeps what the agent's key is
+`<agent>.agentprebuilt.restate`, the agent's name as it is (agent `support`
+has `support.agentprebuilt.restate`), keyed as the agent (`support/alice`'s
+is `support.agentprebuilt.restate/alice`). It keeps what the agent's key is
 doing: the message it answers, the waits of its tools, the messages steered
 to it, and the revision a follower waits on. `serve` serves it with the
 agent, without your naming it (Restate refuses names that start with
@@ -584,7 +584,7 @@ The same delivery is yours from any handler (a session object's, or a
 service's or workflow's of the SDK), for events of other kinds (a queue, a
 schedule): `deliver(ctx, agent, key, text, { idempotencyKey })`.
 Every `sessionObject()` and `agent()` brings its own companion,
-`companionOf(agent)` (the object `<agent>.agentprebuild.restate`, at the
+`companionOf(agent)` (the object `<agent>.agentprebuilt.restate`, at the
 agent's own keys), which `deliver` and `webhook` check for.
 
 The agent's message says where it comes from, with the body as JSON:

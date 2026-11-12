@@ -4,7 +4,7 @@
 //
 // Checks: the agent waits for the signal (`pending` lists the wait, with
 // what the model waits for; `status` and `messages` answer meanwhile), held
-// by its own companion (`support.agentprebuild.restate`, keyed `alice`, which
+// by its own companion (`support.agentprebuilt.restate`, keyed `alice`, which
 // the ingress refuses; no `signals` is served) until
 // it is resolved by its id, then answers
 // with every tool's result; a signal no one waits for is dropped, unless it
@@ -185,7 +185,7 @@ try {
   const services = ((await (await fetch(`${ADMIN}/services`)).json()) as { services: { name: string }[] }).services;
   const names = services.map((s) => s.name);
   assert.ok(
-    names.includes('support.agentprebuild.restate') && names.includes('auditor.agentprebuild.restate'),
+    names.includes('support.agentprebuilt.restate') && names.includes('auditor.agentprebuilt.restate'),
     names.join(', '),
   );
   assert.ok(!names.includes('signals'), names.join(', '));
@@ -193,14 +193,14 @@ try {
     method: 'POST',
     headers: { 'content-type': 'application/json', accept: 'application/json' },
     body: JSON.stringify({
-      query: "SELECT DISTINCT service_key FROM state WHERE service_name = 'support.agentprebuild.restate'",
+      query: "SELECT DISTINCT service_key FROM state WHERE service_name = 'support.agentprebuilt.restate'",
     }),
   });
   assert.deepEqual(((await companionKeys.json()) as { rows: { service_key: string }[] }).rows, [
     { service_key: 'alice' },
   ]);
   for (const handler of ['status', 'pending', 'resolve', 'publish']) {
-    const direct = await fetch(`${INGRESS}/support.agentprebuild.restate/alice/${handler}`, { method: 'POST' });
+    const direct = await fetch(`${INGRESS}/support.agentprebuilt.restate/alice/${handler}`, { method: 'POST' });
     assert.ok(!direct.ok, `the ingress took the companion's ${handler}: ${direct.status}`);
   }
   const sofar = (await post('support/alice/messages')) as Messages;

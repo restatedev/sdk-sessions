@@ -1,4 +1,4 @@
-// An agent's companion (`<agent>.agentprebuild.restate`, keyed as the agent):
+// An agent's companion (`<agent>.agentprebuilt.restate`, keyed as the agent):
 // the turn it keeps from `start` to `close`, which `status` reads (and the
 // `stop` view, through `status`), and watches (`awaitTurn`). Its handlers run
 // on a fake context, which keeps the state and records what they send to the
@@ -398,20 +398,20 @@ describe('the companion of each agent', () => {
   const one = agentNamed('one');
   const two = agentNamed('two');
 
-  it('is its own, named `<agent>.agentprebuild.restate`, and served with it: an endpoint serves no `signals`', () => {
-    expect(COMPANION_SUFFIX).toBe('.agentprebuild.restate');
-    expect(companionOf(one).name).toBe('one.agentprebuild.restate');
-    expect(companionOf(two).name).toBe('two.agentprebuild.restate');
+  it('is its own, named `<agent>.agentprebuilt.restate`, and served with it: an endpoint serves no `signals`', () => {
+    expect(COMPANION_SUFFIX).toBe('.agentprebuilt.restate');
+    expect(companionOf(one).name).toBe('one.agentprebuilt.restate');
+    expect(companionOf(two).name).toBe('two.agentprebuilt.restate');
     expect(companionOf(one)).not.toBe(companionOf(two));
-    expect(names([one, two])).toEqual(['one', 'one.agentprebuild.restate', 'two', 'two.agentprebuild.restate']);
+    expect(names([one, two])).toEqual(['one', 'one.agentprebuilt.restate', 'two', 'two.agentprebuilt.restate']);
     expect(names([one, two])).not.toContain('signals');
     // The name of the agent as it is, whatever it is.
-    expect(companionOf(agentNamed('Billing_v2')).name).toBe('Billing_v2.agentprebuild.restate');
+    expect(companionOf(agentNamed('Billing_v2')).name).toBe('Billing_v2.agentprebuilt.restate');
     expect(() => companionOf({ name: 'plain' })).toThrow('plain is not an agent of @restatedev/agents');
   });
 
   it('is served with its agent when RESTATE_SERVE_ONLY names the agent alone', () => {
-    expect(names([one, two], 'two')).toEqual(['two', 'two.agentprebuild.restate']);
+    expect(names([one, two], 'two')).toEqual(['two', 'two.agentprebuilt.restate']);
   });
 
   it("has every handler private to the ingress: clients reach it through the agent's views", () => {
@@ -457,12 +457,12 @@ describe('the companion of each agent', () => {
       'notifications',
     ]);
     expect(new Set(companions.map((m) => `${m.service}/${m.key}`))).toEqual(
-      new Set(['one.agentprebuild.restate/alice']),
+      new Set(['one.agentprebuilt.restate/alice']),
     );
     expect(a.made.some((m) => m.service.startsWith('two'))).toBe(false);
     // The other agent's turn, at the same key: its own companion, which the first one's turn never called.
     expect(b.made).toEqual([]);
     expect(await b.run('chat', 'hi', 'inv_other')).toBe('ok');
-    expect(new Set(b.made.map((m) => `${m.service}/${m.key}`))).toEqual(new Set(['two.agentprebuild.restate/alice']));
+    expect(new Set(b.made.map((m) => `${m.service}/${m.key}`))).toEqual(new Set(['two.agentprebuilt.restate/alice']));
   });
 });

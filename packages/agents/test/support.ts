@@ -70,7 +70,7 @@ const made = (c: Made): Made => ({
  * An attempt of a handler, @restatedev/sessions's own, with the agent's
  * companion of following over `map`: `ctx`, a handler's context, and `view`,
  * a view's. `route` answers the calls to anything but a companion. A call of
- * another companion than the agent's own (`<agent>.agentprebuild.restate`),
+ * another companion than the agent's own (`<agent>.agentprebuilt.restate`),
  * or at another key than the agent's, fails.
  */
 export function sqlAttempt(
