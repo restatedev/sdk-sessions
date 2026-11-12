@@ -50,6 +50,7 @@ import {
   afterStepsOf,
   answering,
   AttemptEnded,
+  settleAnswered,
   aborted,
   BUDGET,
   CANCELLED,
@@ -1640,7 +1641,13 @@ export async function answerOnce<I>(
   // run holds back first (`flushHeld`). After each write of steps that commits, the run makes what the turn it
   // runs in asked for, if anything (a `chat` turn's publish, which this does not know of): a turn outside one
   // stores its steps, and that is all.
-  conversation.hold(afterStepsOf(ctx));
+  // Before it, the call records whose results the commit stored are forgotten (calls.ts): once per commit, for
+  // every turn.
+  const afterSteps = afterStepsOf(ctx);
+  conversation.hold(async () => {
+    await settleAnswered(ctx);
+    await afterSteps?.();
+  });
   holding(ctx, () => conversation.flush());
   const answered = await forPrompt(ctx, promptId, () =>
     answering(

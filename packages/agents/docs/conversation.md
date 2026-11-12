@@ -551,7 +551,10 @@ invocation (the next invocation's first call replaces it):
   harness stores the call) waits with `rejoin`: the call made again joins
   the wait an earlier attempt opened with the same input, as Restate's
   tools do, until that call's result is stored.
-- **Forgetting.** At each publish and before each tool call, a record whose
+- **Forgetting.** After each commit of the turn's steps (in `answerOnce`'s
+  run, before anything the turn asked for then, such as a `chat` turn's
+  publish: once per commit, whoever runs the turn), before each tool call,
+  and at the turn's end, a record whose
   Restate call returned is forgotten once the turn has its result under the
   latest id it was made with (`Turn.stored`): a success, or the very error
   the call returned. Another error in the turn (one the framework made up for

@@ -334,8 +334,6 @@ export const inboxOf = (ctx: restate.SessionContext) => INBOX.get(ctx);
 export const publish = async (ctx: restate.SessionContext) => {
   const companion = companionOfAgent(ctx, 'a publish');
   await flushHeld(ctx);
-  const stored = ANSWERING.get(ctx);
-  if (stored) await settled(ctx, stored);
   const published = await companion.publish();
   INBOX.get(ctx)?.saw(published);
 };
@@ -361,6 +359,17 @@ export const afterStepsOf = (ctx: restate.SessionContext): (() => Promise<void>)
  * and once its result is ({@link afterStepsOf}).
  */
 export async function toolCallStarted(ctx: restate.SessionContext) {
+  await settleAnswered(ctx);
+}
+
+/**
+ * Forget the call records (calls.ts) whose results the turn answering on
+ * `ctx` has stored ({@link answering}), if one does: after each commit of its
+ * steps (`answerOnce` does, before what the turn asked for then, such as a
+ * `chat` turn's publish, for every turn, in a `chat` turn or not), as a tool
+ * call starts, and as the turn ends.
+ */
+export async function settleAnswered(ctx: restate.SessionContext) {
   const stored = ANSWERING.get(ctx);
   if (stored) await settled(ctx, stored);
 }
@@ -384,8 +393,8 @@ function settled(ctx: restate.SessionContext, stored: Stored): Promise<void> {
 
 /**
  * Run `work`, a framework's turn on the conversation of turns, forgetting
- * the calls whose results it stores as it goes: each publish while it runs
- * (after a write of its steps commits), each tool call's start, and its
+ * the calls whose results it stores as it goes: each write of its steps
+ * that commits ({@link settleAnswered}), each tool call's start, and its
  * end, forget the Restate calls of
  * the tool calls whose results `stored` says are stored (calls.ts).
  */
@@ -508,8 +517,7 @@ export async function chatTurn<A>(
   // turn, which publishes it: one revision. The close is a call the turn
   // waits for, so that it is done before the turn ends (see `awaitTurn`).
   const end = async () => {
-    const stored = ANSWERING.get(ctx);
-    if (stored) await settled(ctx, stored);
+    await settleAnswered(ctx);
     await companion.close(invocationId);
   };
   const turn = new AbortController();

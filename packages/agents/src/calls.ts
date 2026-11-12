@@ -11,7 +11,7 @@
 // task), which it waits for again, or whose answer it gets.
 //
 // A call is kept until the framework's transcript has its result under the
-// last id it was made with ({@link settleCalls}, at each publish, and before each
+// last id it was made with ({@link settleCalls}, after each commit of steps, and before each
 // tool call): one that answered just before a crash, whose result the
 // framework had not stored, is made again as the same call. An error there
 // is not its result (the DeepSeek Harness gives the call it interrupted
@@ -219,7 +219,7 @@ export async function callOf(
  * Forget the calls that answered whose result the framework stored: those
  * of which `stored(id, failed)` is true for the last id they were made with,
  * `failed` the error that answered the call, if one did. Called
- * at each publish, and before each tool call, with the transcript as the
+ * after each commit of steps, and before each tool call, with the transcript as the
  * framework stored it: also in an attempt that made no call yet, which would
  * otherwise take one an earlier attempt made, and the model has the result
  * of.

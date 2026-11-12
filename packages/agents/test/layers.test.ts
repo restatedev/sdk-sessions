@@ -14,9 +14,9 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { z } from 'zod';
 import { publish } from '../src/common.ts';
 import { NoCompanion } from '../src/companion.ts';
-import { answerOnce } from '../src/conversation.ts';
+import { answerOnce, type Run } from '../src/conversation.ts';
 import { reply as tellerReply, teller } from './fakes/claude.ts';
-import { calling, ITEMS } from './fakes/items.ts';
+import { calling, type Item, ITEMS } from './fakes/items.ts';
 import { callTools, fakeProvider, say } from './fakes/pi.ts';
 import { followingOf, latestTurn, sqlAttempt } from './support.ts';
 
@@ -131,6 +131,35 @@ describe('a turn outside a `chat` turn', () => {
       expect(ran).toMatchObject({ value: 'Done', made: ['wait'], turn: { status: 'answered' } });
     },
   );
+});
+
+/** A run of the made-up framework: a round of one tool call (`c1`), then `fail`, if given, or `done`. */
+const roundThen =
+  (fail?: Error): Run<Item> =>
+  async (conversation) => {
+    await conversation.turn.appendReply([calling('c1')]);
+    await conversation.turn.append({ result: 'c1', output: 'found' });
+    if (fail) throw fail;
+    return 'done';
+  };
+
+describe('a prompt after a `chat` turn, in the same invocation', () => {
+  it.each([
+    ['answered', undefined],
+    ['failed with a terminal error', new restate.TerminalError('no')],
+    ['failed with an error Restate retries', new Error('flaky')],
+  ] as const)('publishes nothing, the `chat` turn %s', async (_how, fail) => {
+    const chat = chatHandler((ctx, text) => answerOnce(ctx, text, ITEMS, roundThen(fail)));
+    const ran = await attempt(own, async (ctx) => {
+      await chat.handler(ctx, 'first').catch(() => {});
+      // Then a prompt of the handler's own, `<id>:2`: outside the `chat` turn, which has ended.
+      return answerOnce(ctx, 'second', ITEMS, roundThen());
+    });
+    expect(ran.value).toBe('done');
+    // The `chat` turn's own publishes (two of its steps' writes), with its start and, unless retried, its close.
+    const turn = ['start', 'publish', 'publish', ...(fail instanceof restate.TerminalError || !fail ? ['close'] : [])];
+    expect(ran.made).toEqual(turn);
+  });
 });
 
 describe('an object without a companion', () => {
