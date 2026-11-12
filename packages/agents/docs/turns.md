@@ -46,8 +46,8 @@ The Python SDK's agents follow the same turn, companion and conversation
   a suspension ends an attempt; Restate starts another, which runs the
   handler again from its first line and resumes from what the database has.
 - **Companion.** The agent's own virtual object, named
-  `<agent>.agentprebuilt.restate` and keyed as the agent (agent
-  `assistant`'s key `alice` has `assistant.agentprebuilt.restate/alice`),
+  `<agent>.prebuilt.restate` and keyed as the agent (agent
+  `assistant`'s key `alice` has `assistant.prebuilt.restate/alice`),
   which each agent brings with it and `serve` serves beside it. Only the
   agent's handlers and views call it (its handlers are private to the
   ingress), and it sends back to the agent it was made for (`settle`,
@@ -106,7 +106,7 @@ sequenceDiagram
   participant C as Client
   participant A as Agent (chat)
   participant DB as Key's database
-  participant S as Companion (assistant.agentprebuilt.restate)
+  participant S as Companion (assistant.prebuilt.restate)
   C->>A: chat("Plan my week")
   A->>S: start(turn, settles, publishes)
   S-)S: awaitTurn(turn)
@@ -233,7 +233,7 @@ sequenceDiagram
   participant O as Operator
   participant A as Agent (chat)
   participant DB as Key's database
-  participant S as Companion (assistant.agentprebuilt.restate)
+  participant S as Companion (assistant.prebuilt.restate)
   participant T as Agent (settle)
   A->>S: start(turn, settles)
   S-)S: awaitTurn(turn)
@@ -281,7 +281,7 @@ sequenceDiagram
   autonumber
   participant N as Next turn (chat)
   participant DB as Key's database
-  participant S as Companion (assistant.agentprebuilt.restate)
+  participant S as Companion (assistant.prebuilt.restate)
   participant T as Agent (settle)
   N->>S: start(next turn)
   Note over S: a turn before it never closed: close it, send settle
@@ -750,7 +750,7 @@ The companion's handler names and shapes are the Python SDK's (`start`,
 `status`, `watch`, `subscribe`, `unsubscribe`, `publish`, `notifications`,
 `forget`, `reset`, `steer`, `taken`). But an agent of this package and its
 companion are always the same code, in the same deployment: each agent
-brings its own (`<agent>.agentprebuilt.restate`, keyed as the agent), and
+brings its own (`<agent>.prebuilt.restate`, keyed as the agent), and
 no companion is shared with another SDK's agents, or another deployment's.
 
 An agent says it has `settle` as it starts a turn (`Started.settles`, which

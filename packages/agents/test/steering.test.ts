@@ -459,7 +459,7 @@ describe("an agent's steer view and steered handler", () => {
     const { run, calls } = steerable();
     expect(await run('steer', 'use Celsius', 'inv_view')).toEqual({ id: 'inv_view', turn: 'inv_turn' });
     expect(calls.find((c) => c.method === 'steer')).toMatchObject({
-      service: 'steerable.agentprebuilt.restate',
+      service: 'steerable.prebuilt.restate',
       key: 'alice',
       parameter: { id: 'inv_view', text: 'use Celsius' },
       idempotencyKey: 'inv_view:steer',

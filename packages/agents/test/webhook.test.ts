@@ -138,14 +138,14 @@ describe("an agent's companion", () => {
   it('is served beside the agent: restate.serve of an agent serves its own companion too', () => {
     expect(served([triage, audit]).map((s) => s.name)).toEqual([
       'triage',
-      'triage.agentprebuilt.restate',
+      'triage.prebuilt.restate',
       'audit',
-      'audit.agentprebuilt.restate',
+      'audit.prebuilt.restate',
     ]);
   });
 
-  it('is found from the agent: its own object, `<agent>.agentprebuilt.restate`', () => {
-    expect(companionOf(triage).name).toBe('triage.agentprebuilt.restate');
+  it('is found from the agent: its own object, `<agent>.prebuilt.restate`', () => {
+    expect(companionOf(triage).name).toBe('triage.prebuilt.restate');
     expect(() => companionOf({ name: 'plain' })).toThrow('plain is not an agent of @restatedev/agents');
   });
 

@@ -5,7 +5,7 @@
 // queues it at once as a turn of its own (the agent's private `steered`), in
 // order with the messages sent after it, and, if the turn being answered
 // takes steered messages, holds it for that turn too (`steer` of
-// signals.ts).
+// companion.ts).
 //
 // The turn learns of it from its next `publish`, which it makes anyway as it
 // starts and after each write of steps that commits (a reply with tool

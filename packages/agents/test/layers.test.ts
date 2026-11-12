@@ -168,7 +168,7 @@ describe('an object without a companion', () => {
     expect(ran.error).toBeInstanceOf(NoCompanion);
     expect(ran.error).toBeInstanceOf(restate.TerminalError);
     expect(String(ran.error)).toContain(
-      'plain-handler has no companion (plain-handler.agentprebuilt.restate), which a publish needs',
+      'plain-handler has no companion (plain-handler.prebuilt.restate), which a publish needs',
     );
     expect(ran.made).toEqual([]);
   });
@@ -187,7 +187,7 @@ describe('an object without a companion', () => {
       const ran = await attempt(plain, (ctx) => prompt(ctx, 'go', approval), { signal: () => 'approved' });
       expect(ran.error).toBeInstanceOf(restate.TerminalError);
       expect(String(ran.error)).toContain(
-        'plain-handler has no companion (plain-handler.agentprebuilt.restate), which a wait for a signal needs',
+        'plain-handler has no companion (plain-handler.prebuilt.restate), which a wait for a signal needs',
       );
       // Nothing waits, and the turn is closed with the error: the next prompt does not run into it again.
       expect(ran.made).toEqual([]);
