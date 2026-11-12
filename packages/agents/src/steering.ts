@@ -24,7 +24,7 @@ import type * as restate from '@restatedev/sessions';
 import type { Transaction } from '@restatedev/sessions';
 import { inboxOf, stopSignalOf } from './common.ts';
 import type { Conversation } from './conversation.ts';
-import { companionAt } from './companion.ts';
+import { companionHere } from './companion.ts';
 
 /**
  * Take the messages steered to the turn being answered, at a step: store
@@ -64,5 +64,5 @@ export async function takeSteers<I>(ctx: restate.SessionContext, conversation: C
  */
 export function tookSteers(ctx: restate.SessionContext, tx: Transaction, ids: string[]) {
   if (ids.length === 0) return;
-  tx.send(companionAt(ctx), ctx.key, { idempotencyKey: `taken:${ids[0]}` }).taken(ids);
+  tx.send(companionHere(ctx, 'steering'), ctx.key, { idempotencyKey: `taken:${ids[0]}` }).taken(ids);
 }

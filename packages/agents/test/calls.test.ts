@@ -1,6 +1,7 @@
 // The call records (calls.ts): a tool call's Restate calls made once, a
 // framework's own waits (`waitFor`), and what a stopped turn reports of its
 // calls (`outcomes`). As the Python SDK's tests of `_calls.py`.
+import { withCompanion } from '../src/companion.ts';
 import { type AttemptContext, contextOf } from '@restatedev/sessions/internal';
 import { memoryDatabase } from '@restatedev/sessions/test/support';
 import { describe, expect, it } from 'vitest';
@@ -24,7 +25,10 @@ function attempt(state: Map<string, Uint8Array>, id = 'inv1', answer: (method: s
     },
     genericSend: () => {},
   };
-  const ctx = contextOf(sdk as unknown as AttemptContext, memoryDatabase(state));
+  // An object with a companion, as `sessionObject()` makes one.
+  const ctx = contextOf(sdk as unknown as AttemptContext, memoryDatabase(state), {
+    definition: withCompanion({ name: 'waiter' }),
+  });
   return { ctx, made };
 }
 

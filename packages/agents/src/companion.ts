@@ -11,8 +11,8 @@
 // An agent's own handler cannot wait on an awakeable (it has no journal to
 // replay one from), so it calls `wait`, which can: a journaled handler of
 // this object, which waits without holding a process.
-import type { SessionContext } from '@restatedev/sessions';
-import { Link, needing, sdk as restate } from '@restatedev/sessions/internal';
+import type { SessionContext, ViewContext } from '@restatedev/sessions';
+import { definitionOf, Link, needing, sdk as restate } from '@restatedev/sessions/internal';
 import type { Answering } from './common.ts';
 import type { Status } from './object.ts';
 
@@ -77,6 +77,38 @@ export function companionOf(agent: { name: string }): Companion {
 
 /** Whether `agent` is an object of @restatedev/agents, with a companion. */
 export const hasCompanion = (agent: object) => COMPANION.of(agent) !== undefined;
+
+/**
+ * What a handler meets as it reaches for its object's companion when the
+ * object has none: a plain session object of @restatedev/sessions, say, that
+ * runs a framework's `prompt()` with a `signal` tool. A programming error,
+ * which a retry meets again: terminal, so the invocation fails once.
+ */
+export class NoCompanion extends restate.TerminalError {
+  constructor(service: string, needs: string) {
+    super(
+      `${service} has no companion (${companionName(service)}), which ${needs} needs: make it with sessionObject() ` +
+        'or agent() of @restatedev/agents, rather than a session object of @restatedev/sessions',
+    );
+    this.name = 'NoCompanion';
+  }
+}
+
+/**
+ * The companion of the object of `ctx` (a handler's or a view's), which
+ * `needs` (a wait for a signal, a chat turn, a publish...) needs: its own,
+ * which it calls with its own key. An object without one (not made by
+ * `sessionObject()` or an `agent()`) fails with {@link NoCompanion}, rather
+ * than call a companion that nobody serves.
+ *
+ *   ctx.rpc(companionHere(ctx, 'a wait for a signal'), ctx.key).wait(...)
+ */
+export function companionHere(ctx: SessionContext | ViewContext, needs: string): Companion {
+  const definition = definitionOf(ctx);
+  const companion = definition && COMPANION.of(definition);
+  if (!companion) throw new NoCompanion(ctx.request.target.service, needs);
+  return companion;
+}
 
 /**
  * Deliver `text` to `agent`'s key `key`, from any handler: a message of its

@@ -72,7 +72,6 @@ import {
   modelOf,
   providerOf,
   RETURNED_UNRECORDED,
-  stepped,
   stopSignalOf,
   toolCallStarted,
 } from '../common.ts';
@@ -568,7 +567,7 @@ const runOf =
         if (!copiedSteps) return;
         copiedSteps = false;
         // Failing, it fails the attempt, as a tool's error does: never the flush, which is done.
-        await stepped(ctx).catch(fail);
+        await turn.stepsCommitted().catch(fail);
       };
       // The messages steered to the turn, handed to the harness's step inbox as a publish lists them: only
       // once a reply with tool calls or a result is stored, so that a step after them places them, in this turn.

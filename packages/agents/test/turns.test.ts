@@ -749,8 +749,15 @@ describe("a turn's steps that no tool waits for", () => {
   });
 });
 
-/** What a run on the made-up framework made the companion do, past the turn's start, and what a follower saw at each publish. */
-async function publishes(run: Run<Item>, object?: { readonly name: string }) {
+/**
+ * What a run on the made-up framework made the companion do, and what a
+ * follower saw at each publish: as the body of a `chat` turn (`inChat`,
+ * `chatHandler`'s), or else by `answerOnce` alone, in a handler of your own.
+ */
+async function publishes(
+  run: Run<Item>,
+  { object, inChat = true }: { object?: { readonly name: string }; inChat?: boolean } = {},
+) {
   const map = new Map<string, Uint8Array>();
   const seen: number[] = [];
   const published = async () => {
@@ -758,12 +765,22 @@ async function publishes(run: Run<Item>, object?: { readonly name: string }) {
     seen.push((await read.end(() => latestTurn(read.view))).steps);
   };
   const sql = sqlAttempt({ map, key: 'k', id: 'inv_pub', published, object });
-  await sql.end(() => answerOnce(sql.ctx, 'q', ITEMS, run));
-  return { made: followingOf(map).made, seen };
+  const answer = (ctx: restate.SessionContext, text: string) => answerOnce(ctx, text, ITEMS, run);
+  const answered = await sql.end(() => (inChat ? handlerOf(chatHandler(answer))(sql.ctx, 'q') : answer(sql.ctx, 'q')));
+  const read = sqlAttempt({ map, key: 'k', id: 'read-last', shared: true });
+  const stored = await read.end(() => latestTurn(read.view));
+  return { made: followingOf(map).made, seen, answered, stored };
 }
 
+/** A run that stores a round of one tool call (`c1`), and answers. */
+const oneRound: Run<Item> = async (conversation) => {
+  await conversation.turn.appendReply([calling('c1')]);
+  await conversation.turn.append({ result: 'c1', output: 'found' });
+  return 'done';
+};
+
 describe("a turn's writes in `answerOnce`'s run", () => {
-  it('publish after each write of steps that commits: a reply with tool calls, results; not held ones, nor a copy', async () => {
+  it('publish after each write of steps that commits, in a `chat` turn: a reply with tool calls, results; not held ones, nor a copy', async () => {
     const { made, seen } = await publishes(async (conversation) => {
       const turn = conversation.turn;
       await turn.appendReply([calling('c1')]);
@@ -779,18 +796,36 @@ describe("a turn's writes in `answerOnce`'s run", () => {
       await turn.appendReply([{ role: 'assistant', text: 'done' }]);
       return 'done';
     });
-    expect(made).toEqual(['publish', 'publish', 'publish']);
-    // A follower reads each write as it is published: the final reply comes with the answer.
-    expect(seen).toEqual([1, 2, 4]);
+    expect(made).toEqual(['start', 'publish', 'publish', 'publish', 'close']);
+    // A follower reads each write as it is published (the start's first): the final reply comes with the answer.
+    expect(seen).toEqual([0, 1, 2, 4]);
   });
 
   it('publish nothing in the background: its turn publishes its end only', async () => {
     const quiet = sessionObject({ name: 'quiet-turns', background: true, handlers: {}, views: {} });
-    const { made } = await publishes(async (conversation) => {
-      await conversation.turn.appendReply([calling('c1')]);
-      await conversation.turn.append({ result: 'c1', output: 'found' });
-      return 'done';
-    }, quiet);
+    const { made } = await publishes(oneRound, { object: quiet });
+    expect(made).toEqual(['start', 'close']);
+  });
+
+  it('store the turn and publish nothing outside a `chat` turn: no companion handler is called', async () => {
+    const { made, answered, stored } = await publishes(
+      async (conversation) => {
+        await oneRound(conversation);
+        // A framework's copy says its steps committed: outside a `chat` turn, that is nothing.
+        await conversation.turn.stepsCommitted();
+        return 'done';
+      },
+      { inChat: false },
+    );
     expect(made).toEqual([]);
+    expect(answered).toBe('done');
+    expect(stored).toEqual({ steps: 3, status: 'answered' }); // the call, its result, the final reply
+  });
+
+  it('store the turn and publish nothing outside a `chat` turn, on an object without a companion', async () => {
+    const plain = restate.sessionObject({ name: 'plain-turns', handlers: {} });
+    const { made, stored } = await publishes(oneRound, { object: plain, inChat: false });
+    expect(made).toEqual([]);
+    expect(stored).toEqual({ steps: 3, status: 'answered' }); // the call, its result, the final reply
   });
 });

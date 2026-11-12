@@ -62,7 +62,7 @@ import { Command, InvalidUpdateError, type Pregel, type StateSnapshot, StateGrap
 import { flushHeld } from '../calls.ts';
 import { fromTool, stopSignalOf } from '../common.ts';
 import type { Conversation, Run, Turn } from '../conversation.ts';
-import { companionAt } from '../companion.ts';
+import { companionHere } from '../companion.ts';
 import { SqlCheckpointSaver } from './checkpointer.ts';
 import { running } from './context.ts';
 import { terminalOf } from './errors.ts';
@@ -286,6 +286,8 @@ async function resumesOf(ctx: restate.SessionContext, saver: SqlCheckpointSaver)
 async function resumed(ctx: restate.SessionContext, saver: SqlCheckpointSaver, snapshot: StateSnapshot) {
   const pending = interruptsOf(snapshot);
   if (pending.length === 0) return undefined;
+  // Checked before anything is stored: an object without a companion has no one to wait with.
+  const companion = companionHere(ctx, 'a wait for an interrupt');
   // What the turn holds back is written before it waits: the waits outlive the attempt.
   await flushHeld(ctx);
   const resumes = await resumesOf(ctx, saver);
@@ -295,7 +297,7 @@ async function resumed(ctx: restate.SessionContext, saver: SqlCheckpointSaver, s
       // As JSON, which the companion stores: the state may hold class instances.
       const input = value === undefined ? undefined : (JSON.parse(JSON.stringify(value)) as unknown);
       return ctx
-        .rpc(companionAt(ctx), ctx.key, { idempotencyKey: waitId })
+        .rpc(companion, ctx.key, { idempotencyKey: waitId })
         .wait({ id: waitId, name: INTERRUPT, ...(input === undefined ? {} : { input }) });
     }),
   );

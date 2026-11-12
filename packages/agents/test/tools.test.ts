@@ -2,6 +2,7 @@
 // with a fake context that records the calls they make.
 import * as restate from '@restatedev/sessions';
 import { call, sessionObject, send, signal, subagent, tool, workflow, type Tool } from '@restatedev/agents';
+import { withCompanion } from '../src/companion.ts';
 import { type AttemptContext, contextOf, invoke } from '@restatedev/sessions/internal';
 import { fakeContext, type Made, memoryDatabase } from '@restatedev/sessions/test/support';
 import { describe, expect, it } from 'vitest';
@@ -44,7 +45,10 @@ function context(state = new Map<string, Uint8Array>()) {
     },
     genericSend: (c: Record<string, unknown>) => void made.push({ kind: 'send', ...c }),
   };
-  const ctx = contextOf(sdk as unknown as AttemptContext, memoryDatabase(state));
+  // An object with a companion, as `sessionObject()` makes one.
+  const ctx = contextOf(sdk as unknown as AttemptContext, memoryDatabase(state), {
+    definition: withCompanion({ name: 'assistant' }),
+  });
   return { made, ctx, sdk };
 }
 

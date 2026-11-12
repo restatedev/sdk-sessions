@@ -220,6 +220,9 @@ describe("a turn's start", () => {
     const object = sessionObject({ name: 'quiet', background: true, handlers: { chat }, views: {} });
     const [, plain] = await costs(chat, 1, 0, { object });
     expect(plain!.companion).toEqual(['start', 'close']);
+    // Nor are its steps: rounds of tool calls make no publish, only the close does.
+    const [, rounds] = await costs(chat, 3, 2, { object });
+    expect(rounds!.companion).toEqual(['start', 'close']);
   });
 });
 

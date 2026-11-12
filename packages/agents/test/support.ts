@@ -8,7 +8,7 @@ import { type AttemptContext, contextOf } from '@restatedev/sessions/internal';
 import { type AttemptOptions, sqlAttempt as baseAttempt } from '@restatedev/sessions/test/support';
 import { z } from 'zod';
 import type { Audit, Transfer } from '@restatedev/sessions/test/ledger';
-import { companionName, COMPANION_SUFFIX } from '../src/companion.ts';
+import { companionName, COMPANION_SUFFIX, withCompanion } from '../src/companion.ts';
 import { SCHEMA, STEPS, TURNS } from '../src/conversation.ts';
 
 /**
@@ -166,8 +166,8 @@ export function sqlAttempt(
     cancelPreviousCalls: base.cancelPreviousCalls,
     invocation: (id: string) => ({ cancel: () => options.cancel?.(id) }),
   } as unknown as AttemptContext;
-  // A chat handler's: with explicit cancellation.
-  const definition = options.object;
+  // A chat handler's: with explicit cancellation. An object of its own is the test's; else one with a companion.
+  const definition = options.object ?? withCompanion({ name: service });
   const ctx = contextOf(sdk, base.db, { explicitCancellation: true, definition });
   return { ...base, ctx, view: contextOf(sdk, base.db, { view: true, definition }) };
 }
