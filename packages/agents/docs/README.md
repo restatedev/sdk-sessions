@@ -36,7 +36,8 @@ OpenCode's resume budget ([OpenCode's return](opencode.md),
   of messages (pi, DeepSeek) keeps its own history, and the turn
   holds copies of its messages (framework-owned history).
 - **Every write is the turn's own, made once:** the prompt by its id, a
-  tool's Restate calls by idempotency keys. A retried attempt resumes from
+  tool's Restate calls by idempotency keys (a workflow's run by its
+  workflow id). A retried attempt resumes from
   what is stored; it does not replay, and does not ask the model again for a
   reply it stored.
 - **A turn whose invocation dies is closed, never finished:** `settle`, or
