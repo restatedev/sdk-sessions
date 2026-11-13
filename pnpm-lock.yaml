@@ -113,7 +113,7 @@ importers:
         version: 0.2.1-rc.2(@deepseek-ai/cordis-plugin-loader@1.0.6)(@deepseek-ai/cordis@4.0.5)(@deepseek-ai/dsh-credentials@0.2.1-rc.2(@deepseek-ai/cordis@4.0.5))(@deepseek-ai/dsh-launch-environment@0.2.1-rc.2(@deepseek-ai/cordis@4.0.5))(@deepseek-ai/dsh-llm-deepseek@0.2.1-rc.2(71960c16ca9e9b41dd26f4662f40e3b4))(@deepseek-ai/dsh-llm@0.2.1-rc.2(@deepseek-ai/cordis@4.0.5))
       '@deepseek-ai/dsh-llm-pi-ai':
         specifier: 0.2.1-rc.2
-        version: 0.2.1-rc.2(e2d0b7496b6a0c4e4a9f826dd2c2c8cd)
+        version: 0.2.1-rc.2(6171d0b44bbea97c7c70ebec37ab63b5)
       '@deepseek-ai/dsh-ptc-runtime':
         specifier: 0.2.1-rc.2
         version: 0.2.1-rc.2(@deepseek-ai/cordis@4.0.5)(@deepseek-ai/dsh-sandbox@0.2.1-rc.2(@deepseek-ai/cordis@4.0.5)(@deepseek-ai/dsh-llm@0.2.1-rc.2(@deepseek-ai/cordis@4.0.5))(@deepseek-ai/dsh-session@0.2.1-rc.2(@deepseek-ai/cordis@4.0.5)(@deepseek-ai/dsh-scope@0.2.1-rc.2(@deepseek-ai/cordis@4.0.5))))
@@ -154,44 +154,47 @@ importers:
         specifier: 0.2.1-rc.2
         version: 0.2.1-rc.2(7c74ae09be77145a81b9b3cef273e232)
       '@earendil-works/chord':
-        specifier: 1.4.0
-        version: 1.4.0
+        specifier: 1.5.2
+        version: 1.5.2(esbuild@0.28.2)(ws@8.21.0)
       '@earendil-works/pi-ai':
-        specifier: 1.4.0
-        version: 1.4.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(supports-color@7.2.0)(undici@8.12.2)(ws@8.22.0)(zod@4.6.5)
+        specifier: 1.5.2
+        version: 1.5.2(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(supports-color@7.2.0)(undici@8.12.2)(ws@8.21.0)(zod@4.6.5)
       '@earendil-works/pi-durable':
-        specifier: 1.4.0
-        version: 1.4.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(supports-color@7.2.0)(undici@8.12.2)(ws@8.22.0)(zod@4.6.5)
+        specifier: 1.5.2
+        version: 1.5.2(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(esbuild@0.28.2)(supports-color@7.2.0)(undici@8.12.2)(ws@8.21.0)(zod@4.6.5)
+      '@earendil-works/pi-schema':
+        specifier: 1.5.2
+        version: 1.5.2
       '@langchain/anthropic':
         specifier: 1.5.11
-        version: 1.5.11(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)(zod@4.6.5))(ws@8.22.0))
+        version: 1.5.11(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)(zod@4.6.5))(ws@8.21.0))
       '@langchain/core':
         specifier: 1.4.0
-        version: 1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)(zod@4.6.5))(ws@8.22.0)
+        version: 1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)(zod@4.6.5))(ws@8.21.0)
       '@langchain/langgraph':
         specifier: 1.4.18
-        version: 1.4.18(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)(zod@4.6.5))(ws@8.22.0))(zod@4.6.5)
+        version: 1.4.18(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)(zod@4.6.5))(ws@8.21.0))(zod@4.6.5)
       '@langchain/langgraph-checkpoint':
         specifier: 1.1.5
-        version: 1.1.5(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)(zod@4.6.5))(ws@8.22.0))
+        version: 1.1.5(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)(zod@4.6.5))(ws@8.21.0))
       '@langchain/langgraph-checkpoint-validation':
         specifier: 1.1.1
-        version: 1.1.1(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)(zod@4.6.5))(ws@8.22.0))(@langchain/langgraph-checkpoint@1.1.5(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)(zod@4.6.5))(ws@8.22.0)))(@opentelemetry/api@1.9.0)(@types/node@24.19.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2))
+        version: 1.1.1(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)(zod@4.6.5))(ws@8.21.0))(@langchain/langgraph-checkpoint@1.1.5(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)(zod@4.6.5))(ws@8.21.0)))(@opentelemetry/api@1.9.0)(@types/node@24.19.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2))
       '@langchain/openai':
         specifier: 1.7.0
-        version: 1.7.0(@aws-sdk/credential-provider-node@3.972.86)(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)(zod@4.6.5))(ws@8.22.0))(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)
+        version: 1.7.0(@aws-sdk/credential-provider-node@3.972.86)(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)(zod@4.6.5))(ws@8.21.0))(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)
       '@opencode/core':
         specifier: 2.2.6
-        version: 2.2.6(@aws-sdk/credential-provider-node@3.972.86)(@opentelemetry/api@1.9.0)(@opentelemetry/semantic-conventions@1.43.0)(@opentui/core@0.8.1(typescript@7.0.2)(web-tree-sitter@0.25.10))(@smithy/signature-v4@5.7.5)(graphql@16.15.0)(redis@6.3.1(@opentelemetry/api@1.9.0))(supports-color@7.2.0)(typebox@1.3.27)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2))(ws@8.22.0)
+        version: 2.2.6(@aws-sdk/credential-provider-node@3.972.86)(@opentelemetry/api@1.9.0)(@opentelemetry/semantic-conventions@1.43.0)(@opentui/core@0.8.1(typescript@7.0.2)(web-tree-sitter@0.25.10))(@smithy/signature-v4@5.7.5)(graphql@16.15.0)(redis@6.3.1(@opentelemetry/api@1.9.0))(supports-color@7.2.0)(typebox@1.3.27)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2))(ws@8.21.0)
       '@opencode/plugin':
         specifier: 2.2.6
         version: 2.2.6(@opentelemetry/semantic-conventions@1.43.0)(@opentui/core@0.8.1(typescript@7.0.2)(web-tree-sitter@0.25.10))(redis@6.3.1(@opentelemetry/api@1.9.0))(supports-color@7.2.0)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2))
       '@opencode/sdk':
         specifier: 2.2.6
-        version: 2.2.6(@aws-sdk/credential-provider-node@3.972.86)(@opentelemetry/api@1.9.0)(@opentelemetry/semantic-conventions@1.43.0)(@opentui/core@0.8.1(typescript@7.0.2)(web-tree-sitter@0.25.10))(@smithy/signature-v4@5.7.5)(graphql@16.15.0)(redis@6.3.1(@opentelemetry/api@1.9.0))(supports-color@7.2.0)(typebox@1.3.27)(typescript@7.0.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2))(web-tree-sitter@0.25.10)(ws@8.22.0)
+        version: 2.2.6(@aws-sdk/credential-provider-node@3.972.86)(@opentelemetry/api@1.9.0)(@opentelemetry/semantic-conventions@1.43.0)(@opentui/core@0.8.1(typescript@7.0.2)(web-tree-sitter@0.25.10))(@smithy/signature-v4@5.7.5)(graphql@16.15.0)(redis@6.3.1(@opentelemetry/api@1.9.0))(supports-color@7.2.0)(typebox@1.3.27)(typescript@7.0.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2))(web-tree-sitter@0.25.10)(ws@8.21.0)
       '@opencode/server':
         specifier: 2.2.6
-        version: 2.2.6(@aws-sdk/credential-provider-node@3.972.86)(@opentelemetry/api@1.9.0)(@opentelemetry/semantic-conventions@1.43.0)(@opentui/core@0.8.1(typescript@7.0.2)(web-tree-sitter@0.25.10))(@smithy/signature-v4@5.7.5)(graphql@16.15.0)(redis@6.3.1(@opentelemetry/api@1.9.0))(supports-color@7.2.0)(typebox@1.3.27)(typescript@7.0.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2))(web-tree-sitter@0.25.10)(ws@8.22.0)
+        version: 2.2.6(@aws-sdk/credential-provider-node@3.972.86)(@opentelemetry/api@1.9.0)(@opentelemetry/semantic-conventions@1.43.0)(@opentui/core@0.8.1(typescript@7.0.2)(web-tree-sitter@0.25.10))(@smithy/signature-v4@5.7.5)(graphql@16.15.0)(redis@6.3.1(@opentelemetry/api@1.9.0))(supports-color@7.2.0)(typebox@1.3.27)(typescript@7.0.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2))(web-tree-sitter@0.25.10)(ws@8.21.0)
       '@restatedev/restate-sdk':
         specifier: 1.18.2
         version: 1.18.2
@@ -208,8 +211,8 @@ importers:
   packages/e2e:
     dependencies:
       '@earendil-works/pi-ai':
-        specifier: 1.4.0
-        version: 1.4.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(supports-color@7.2.0)(undici@8.12.2)(ws@8.22.0)(zod@4.6.5)
+        specifier: 1.5.2
+        version: 1.5.2(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(supports-color@7.2.0)(undici@8.12.2)(ws@8.22.0)(zod@4.6.5)
       '@restatedev/agents':
         specifier: workspace:*
         version: link:../agents
@@ -233,17 +236,20 @@ importers:
   packages/examples:
     dependencies:
       '@earendil-works/pi-ai':
-        specifier: 1.4.0
-        version: 1.4.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(supports-color@7.2.0)(undici@8.12.2)(ws@8.22.0)(zod@4.6.5)
+        specifier: 1.5.2
+        version: 1.5.2(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(supports-color@7.2.0)(undici@8.12.2)(ws@8.21.0)(zod@4.6.5)
       '@earendil-works/pi-durable':
-        specifier: 1.4.0
-        version: 1.4.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(supports-color@7.2.0)(undici@8.12.2)(ws@8.22.0)(zod@4.6.5)
+        specifier: 1.5.2
+        version: 1.5.2(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(esbuild@0.28.2)(supports-color@7.2.0)(undici@8.12.2)(ws@8.21.0)(zod@4.6.5)
+      '@earendil-works/pi-schema':
+        specifier: 1.5.2
+        version: 1.5.2
       '@langchain/core':
         specifier: 1.4.0
-        version: 1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)(zod@4.6.5))(ws@8.22.0)
+        version: 1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)(zod@4.6.5))(ws@8.21.0)
       '@langchain/openai':
         specifier: 1.7.0
-        version: 1.7.0(@aws-sdk/credential-provider-node@3.972.86)(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)(zod@4.6.5))(ws@8.22.0))(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)
+        version: 1.7.0(@aws-sdk/credential-provider-node@3.972.86)(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)(zod@4.6.5))(ws@8.21.0))(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)
       '@modelcontextprotocol/client':
         specifier: 2.0.0
         version: 2.0.0
@@ -301,14 +307,14 @@ importers:
   packages/template:
     dependencies:
       '@earendil-works/chord':
-        specifier: 1.4.0
-        version: 1.4.0
+        specifier: 1.5.2
+        version: 1.5.2(esbuild@0.28.2)(ws@8.21.0)
       '@earendil-works/pi-ai':
-        specifier: 1.4.0
-        version: 1.4.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(supports-color@7.2.0)(undici@8.12.2)(ws@8.22.0)(zod@4.6.5)
+        specifier: 1.5.2
+        version: 1.5.2(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(supports-color@7.2.0)(undici@8.12.2)(ws@8.21.0)(zod@4.6.5)
       '@earendil-works/pi-durable':
-        specifier: 1.4.0
-        version: 1.4.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(supports-color@7.2.0)(undici@8.12.2)(ws@8.22.0)(zod@4.6.5)
+        specifier: 1.5.2
+        version: 1.5.2(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(esbuild@0.28.2)(supports-color@7.2.0)(undici@8.12.2)(ws@8.21.0)(zod@4.6.5)
       '@restatedev/agents':
         specifier: workspace:*
         version: link:../agents
@@ -506,10 +512,6 @@ packages:
 
   '@aws-sdk/util-locate-window@3.965.10':
     resolution: {integrity: sha512-ycwH6Zd2GhuSqdXX9ihbCjeGTB6xOJs+O3+Jb8/zDG9978XU80qs75dfkPJRMNKe5MvBZPuNeFpd4JZKPoUF4g==}
-    engines: {node: '>=20.0.0'}
-
-  '@aws-sdk/xml-builder@3.972.41':
-    resolution: {integrity: sha512-ctjVSyCMegrWfXlx6VqzSBFI6UqmQ5ZlnfMhdLIiWmhoH8UAQxSCP5N3OpG7X3k4LnS7ou74C4mt20+bfTW2aQ==}
     engines: {node: '>=20.0.0'}
 
   '@aws-sdk/xml-builder@3.972.42':
@@ -898,25 +900,40 @@ packages:
   '@deepseek-ai/schemastery@3.18.5':
     resolution: {integrity: sha512-Mnobvqf9rHsZYv4g5edj5ddxS1oF1kIdSlz0DunUgnY3LWG5F26MqvH3YOOsSaodCgyzJ16OMN9O99/s5Crtdw==}
 
-  '@earendil-works/chord@1.4.0':
-    resolution: {integrity: sha512-dTbgyz4xgDS5KAUFx1bFENqj0Cr1N3tYxJJOYStc6g6HS78FSBZydyoCwLoddiQRF+VgRS0fpgAi+iKxjZ3BQA==}
+  '@earendil-works/chord@1.5.2':
+    resolution: {integrity: sha512-3g088g7qVXL2cpRAKWjj9za6RLls9FBnuUo5c0hBZ0xCftBQjae0opS+34M22vdXTVE7BNqkRG/FPc9BsM7eEg==}
     engines: {node: '>=22.19.0'}
+    peerDependencies:
+      esbuild: 0.28.2
+      react: 19.3.0
+      ws: 8.21.0
+    peerDependenciesMeta:
+      esbuild:
+        optional: true
+      react:
+        optional: true
+      ws:
+        optional: true
 
-  '@earendil-works/pi-ai@1.4.0':
-    resolution: {integrity: sha512-hQM/C4+1w8rHYACzDDf+0vQMnEnpzIop1tptIERVgR3ZeT/hHSzBNG8PaWPgxWQjqSeKCyBZSyp8uTT6eKK1pQ==}
+  '@earendil-works/pi-ai@1.5.2':
+    resolution: {integrity: sha512-2tWPSnV3qzfiDIY3aWluBag3vC++Vs+VsXt/UquSU5onPMohPih72FUhIhaqmDdMYubOgB3Byl9uF4Vk40JLvQ==}
     engines: {node: '>=22.19.0'}
     hasBin: true
 
-  '@earendil-works/pi-codemode@1.4.0':
-    resolution: {integrity: sha512-23CNAXpS9DuLzPMyYuvrXVVio46x4YhffCgCqaWmF7F5H8PooqjrQvX4ucF6M0BhUd+x2tV6r1J0dv8cCME4Cg==}
+  '@earendil-works/pi-codemode@1.5.2':
+    resolution: {integrity: sha512-HoZQ40a9RgdZ1VgmrX6x8887cNXedaRJT1l+Ie5YRIMK4gY7v0EpsiNqf6dmixrKylZlTgUSyR+vE8xhjfkr+w==}
     engines: {node: '>=22.19.0'}
 
-  '@earendil-works/pi-durable@1.4.0':
-    resolution: {integrity: sha512-EtIyXH1MBSXdJSkodmy+CYXuwfve3gPrD4GNCZ0XmuRWLPupwRlNQ7fdaXjRcLoKb6SWkT/yEzK+sMmrqvYK+Q==}
+  '@earendil-works/pi-durable@1.5.2':
+    resolution: {integrity: sha512-zDB3anbI/yD0IG+VVY+g5tU+c5XOVqQAFwLkXRMiqZb4p/afWro0voZtLNoRAWcDA2r73kvmH6kKin9Ka8l55g==}
     engines: {node: '>=22.19.0'}
 
-  '@earendil-works/pi-telemetry@1.4.0':
-    resolution: {integrity: sha512-MLIfowwUYIY65jSjMX82paZOrX/NTvLk6D08h+3Jq42a99RzUOewzuCR0zOlPul3D6UBfddat76VT6LvsHEs1w==}
+  '@earendil-works/pi-schema@1.5.2':
+    resolution: {integrity: sha512-hJoyCXWUhsSrXY5wJo2Q4kHXUsR51pNhkJHAMkWRwVMLDRtMDPkKNaa+JlVRVqTw1hjdSxcVVaFLSDbKlaTXEQ==}
+    engines: {node: '>=22.19.0'}
+
+  '@earendil-works/pi-telemetry@1.5.2':
+    resolution: {integrity: sha512-m+cumjIqNh1aMISi/9ttcG3ZOwIdriPbz/eMyWmRMJCGa/WcgY1RX4lrb7HvsHhSfI/JUeBESA4nOCr8C3y5ow==}
     engines: {node: '>=22.19.0'}
 
   '@effect/opentelemetry@4.1.0':
@@ -2243,13 +2260,6 @@ packages:
     resolution: {integrity: sha512-t09vSN3MdfsyCHoFcTRCH/iUtG7OJ0CsjzB8cjAmKc/va/kIgeDI/TxsigdncE/4be734m0cvIYwNaV4i2XqAw==}
     engines: {node: '>=10'}
 
-  '@smithy/core@3.36.0':
-    resolution: {integrity: sha512-3hJiwG1F5t1SoXqp/yOCmYXziyx7ZVqF63S5W6YU201e/qwVaHPex+E/3vvyY9a3ORq/b+BydeNZpP2saQ9X2g==}
-    engines: {node: '>=18.0.0'}
-    deprecated: |-
-      Deprecated due to a bug in custom logger data redaction. Upgrade to the latest version. If you used a custom logger with this
-        version, review your logs and rotate any credentials or other secrets. See https://github.com/aws/aws-sdk-js-v3/issues/8393.
-
   '@smithy/core@3.39.0':
     resolution: {integrity: sha512-JJ/46AWQ4ipS1N2eZmUj7yzIhH8NhQIfAE+dce7NSB6dmFh+7hvD4pbofcoT4I0Xzfy/LNhZx3V2QhwYyAiqdg==}
     engines: {node: '>=18.0.0'}
@@ -2278,16 +2288,8 @@ packages:
     resolution: {integrity: sha512-i1uORV1v3qBqP43ayRKzIdm1q5x14tf8N4Dd06/QUX1Szm6VxHMrTsu20X5E63UFsaNZCRjI4SXG0jDmqYa+3w==}
     engines: {node: '>=18.0.0'}
 
-  '@smithy/signature-v4@5.7.4':
-    resolution: {integrity: sha512-tHy0K0VtqNd5Y7Y41h0a0Lhh0L1GzC08dTWg0F7vRJWFtTENg7IZikf3wQkanYIRdb7ngoIPMTmqgUi401fEeQ==}
-    engines: {node: '>=18.0.0'}
-
   '@smithy/signature-v4@5.7.5':
     resolution: {integrity: sha512-WPjdr5oWOk1LArpI4pavu+fSo+/evi0Re1olxGvqwuZopd4gYR1UGCi+Soyn/IjmafqbWs+ZC+3AKxJS3ZpwUg==}
-    engines: {node: '>=18.0.0'}
-
-  '@smithy/types@4.19.0':
-    resolution: {integrity: sha512-r7jh49VJxGerfAcTQA6gXcKc+98zOp/tqRwzYjgOE+iSQsP6cEU1hq2QzbuipmP68QtYdY9wKEhiCQZIzHgZ4Q==}
     engines: {node: '>=18.0.0'}
 
   '@smithy/types@4.20.0':
@@ -4398,7 +4400,7 @@ snapshots:
   '@aws-crypto/crc32@5.2.0':
     dependencies:
       '@aws-crypto/util': 5.2.0
-      '@aws-sdk/types': 3.974.6
+      '@aws-sdk/types': 3.975.0
       tslib: 2.8.1
 
   '@aws-crypto/sha256-browser@5.2.0':
@@ -4406,7 +4408,7 @@ snapshots:
       '@aws-crypto/sha256-js': 5.2.0
       '@aws-crypto/supports-web-crypto': 5.2.0
       '@aws-crypto/util': 5.2.0
-      '@aws-sdk/types': 3.974.6
+      '@aws-sdk/types': 3.975.0
       '@aws-sdk/util-locate-window': 3.965.10
       '@smithy/util-utf8': 2.3.0
       tslib: 2.8.1
@@ -4414,7 +4416,7 @@ snapshots:
   '@aws-crypto/sha256-js@5.2.0':
     dependencies:
       '@aws-crypto/util': 5.2.0
-      '@aws-sdk/types': 3.974.6
+      '@aws-sdk/types': 3.975.0
       tslib: 2.8.1
 
   '@aws-crypto/supports-web-crypto@5.2.0':
@@ -4423,46 +4425,46 @@ snapshots:
 
   '@aws-crypto/util@5.2.0':
     dependencies:
-      '@aws-sdk/types': 3.974.6
+      '@aws-sdk/types': 3.975.0
       '@smithy/util-utf8': 2.3.0
       tslib: 2.8.1
 
   '@aws-sdk/client-bedrock-runtime@3.1127.0':
     dependencies:
-      '@aws-sdk/core': 3.978.3
+      '@aws-sdk/core': 3.980.1
       '@aws-sdk/credential-provider-node': 3.972.86
       '@aws-sdk/eventstream-handler-node': 3.972.36
       '@aws-sdk/middleware-eventstream': 3.972.31
       '@aws-sdk/middleware-websocket': 3.972.56
       '@aws-sdk/token-providers': 3.1127.0
-      '@aws-sdk/types': 3.974.6
-      '@smithy/core': 3.36.0
+      '@aws-sdk/types': 3.975.0
+      '@smithy/core': 3.39.0
       '@smithy/fetch-http-handler': 5.8.0
-      '@smithy/node-http-handler': 4.12.1
-      '@smithy/types': 4.19.0
+      '@smithy/node-http-handler': 4.14.2
+      '@smithy/types': 4.20.0
       tslib: 2.8.1
 
   '@aws-sdk/client-cognito-identity@3.1057.0':
     dependencies:
       '@aws-crypto/sha256-browser': 5.2.0
       '@aws-crypto/sha256-js': 5.2.0
-      '@aws-sdk/core': 3.978.3
+      '@aws-sdk/core': 3.980.1
       '@aws-sdk/credential-provider-node': 3.972.86
-      '@aws-sdk/types': 3.974.6
-      '@smithy/core': 3.36.0
+      '@aws-sdk/types': 3.975.0
+      '@smithy/core': 3.39.0
       '@smithy/fetch-http-handler': 5.8.0
-      '@smithy/node-http-handler': 4.12.1
-      '@smithy/types': 4.19.0
+      '@smithy/node-http-handler': 4.14.2
+      '@smithy/types': 4.20.0
       tslib: 2.8.1
 
   '@aws-sdk/core@3.978.3':
     dependencies:
-      '@aws-sdk/types': 3.974.6
-      '@aws-sdk/xml-builder': 3.972.41
+      '@aws-sdk/types': 3.975.0
+      '@aws-sdk/xml-builder': 3.972.42
       '@aws/lambda-invoke-store': 0.3.0
-      '@smithy/core': 3.36.0
-      '@smithy/signature-v4': 5.7.4
-      '@smithy/types': 4.19.0
+      '@smithy/core': 3.39.0
+      '@smithy/signature-v4': 5.7.5
+      '@smithy/types': 4.20.0
       bowser: 2.14.1
       tslib: 2.8.1
 
@@ -4482,7 +4484,7 @@ snapshots:
       '@aws-sdk/nested-clients': 3.998.1
       '@aws-sdk/types': 3.975.0
       '@smithy/core': 3.39.0
-      '@smithy/types': 4.19.0
+      '@smithy/types': 4.20.0
       tslib: 2.8.1
 
   '@aws-sdk/credential-provider-env@3.972.74':
@@ -4584,44 +4586,44 @@ snapshots:
       '@aws-sdk/credential-provider-web-identity': 3.972.80
       '@aws-sdk/nested-clients': 3.997.48
       '@aws-sdk/types': 3.974.6
-      '@smithy/core': 3.36.0
+      '@smithy/core': 3.39.0
       '@smithy/credential-provider-imds': 4.5.2
-      '@smithy/types': 4.19.0
+      '@smithy/types': 4.20.0
       tslib: 2.8.1
 
   '@aws-sdk/eventstream-handler-node@3.972.36':
     dependencies:
-      '@aws-sdk/types': 3.974.6
-      '@smithy/core': 3.36.0
-      '@smithy/types': 4.19.0
+      '@aws-sdk/types': 3.975.0
+      '@smithy/core': 3.39.0
+      '@smithy/types': 4.20.0
       tslib: 2.8.1
 
   '@aws-sdk/middleware-eventstream@3.972.31':
     dependencies:
-      '@aws-sdk/types': 3.974.6
-      '@smithy/core': 3.36.0
-      '@smithy/types': 4.19.0
+      '@aws-sdk/types': 3.975.0
+      '@smithy/core': 3.39.0
+      '@smithy/types': 4.20.0
       tslib: 2.8.1
 
   '@aws-sdk/middleware-websocket@3.972.56':
     dependencies:
-      '@aws-sdk/core': 3.978.3
-      '@aws-sdk/types': 3.974.6
-      '@smithy/core': 3.36.0
+      '@aws-sdk/core': 3.980.1
+      '@aws-sdk/types': 3.975.0
+      '@smithy/core': 3.39.0
       '@smithy/fetch-http-handler': 5.8.0
-      '@smithy/signature-v4': 5.7.4
-      '@smithy/types': 4.19.0
+      '@smithy/signature-v4': 5.7.5
+      '@smithy/types': 4.20.0
       tslib: 2.8.1
 
   '@aws-sdk/nested-clients@3.997.48':
     dependencies:
-      '@aws-sdk/core': 3.978.3
+      '@aws-sdk/core': 3.980.1
       '@aws-sdk/signature-v4-multi-region': 3.996.48
-      '@aws-sdk/types': 3.974.6
-      '@smithy/core': 3.36.0
+      '@aws-sdk/types': 3.975.0
+      '@smithy/core': 3.39.0
       '@smithy/fetch-http-handler': 5.8.0
-      '@smithy/node-http-handler': 4.12.1
-      '@smithy/types': 4.19.0
+      '@smithy/node-http-handler': 4.14.2
+      '@smithy/types': 4.20.0
       tslib: 2.8.1
 
   '@aws-sdk/nested-clients@3.998.1':
@@ -4637,9 +4639,9 @@ snapshots:
 
   '@aws-sdk/signature-v4-multi-region@3.996.48':
     dependencies:
-      '@aws-sdk/types': 3.974.6
-      '@smithy/signature-v4': 5.7.4
-      '@smithy/types': 4.19.0
+      '@aws-sdk/types': 3.975.0
+      '@smithy/signature-v4': 5.7.5
+      '@smithy/types': 4.20.0
       tslib: 2.8.1
 
   '@aws-sdk/signature-v4-multi-region@3.996.51':
@@ -4651,11 +4653,11 @@ snapshots:
 
   '@aws-sdk/token-providers@3.1127.0':
     dependencies:
-      '@aws-sdk/core': 3.978.3
-      '@aws-sdk/nested-clients': 3.997.48
-      '@aws-sdk/types': 3.974.6
-      '@smithy/core': 3.36.0
-      '@smithy/types': 4.19.0
+      '@aws-sdk/core': 3.980.1
+      '@aws-sdk/nested-clients': 3.998.1
+      '@aws-sdk/types': 3.975.0
+      '@smithy/core': 3.39.0
+      '@smithy/types': 4.20.0
       tslib: 2.8.1
 
   '@aws-sdk/token-providers@3.1150.0':
@@ -4669,7 +4671,7 @@ snapshots:
 
   '@aws-sdk/types@3.974.6':
     dependencies:
-      '@smithy/types': 4.19.0
+      '@smithy/types': 4.20.0
       tslib: 2.8.1
 
   '@aws-sdk/types@3.975.0':
@@ -4679,11 +4681,6 @@ snapshots:
 
   '@aws-sdk/util-locate-window@3.965.10':
     dependencies:
-      tslib: 2.8.1
-
-  '@aws-sdk/xml-builder@3.972.41':
-    dependencies:
-      '@smithy/types': 4.19.0
       tslib: 2.8.1
 
   '@aws-sdk/xml-builder@3.972.42':
@@ -4878,7 +4875,7 @@ snapshots:
     optionalDependencies:
       '@deepseek-ai/cordis-plugin-loader': 1.0.6(@deepseek-ai/cordis@4.0.5)
 
-  '@deepseek-ai/dsh-llm-pi-ai@0.2.1-rc.2(e2d0b7496b6a0c4e4a9f826dd2c2c8cd)':
+  '@deepseek-ai/dsh-llm-pi-ai@0.2.1-rc.2(6171d0b44bbea97c7c70ebec37ab63b5)':
     dependencies:
       '@deepseek-ai/cordis': 4.0.5(@deepseek-ai/cordis-plugin-loader@1.0.6)
       '@deepseek-ai/dsh-attachment': 0.2.1-rc.2(@deepseek-ai/cordis@4.0.5)(@deepseek-ai/dsh-brand@0.2.1-rc.2(@deepseek-ai/cordis@4.0.5))
@@ -4891,7 +4888,7 @@ snapshots:
       '@deepseek-ai/dsh-timeout': 0.2.1-rc.2(@deepseek-ai/cordis@4.0.5)
       '@deepseek-ai/dsh-util-values': 0.2.1-rc.2(@deepseek-ai/cordis@4.0.5)
       '@deepseek-ai/schemastery': 3.18.5
-      '@earendil-works/pi-ai': 1.4.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(supports-color@7.2.0)(undici@8.12.2)(ws@8.22.0)(zod@4.6.5)
+      '@earendil-works/pi-ai': 1.5.2(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(supports-color@7.2.0)(undici@8.12.2)(ws@8.21.0)(zod@4.6.5)
     optionalDependencies:
       '@deepseek-ai/cordis-plugin-loader': 1.0.6(@deepseek-ai/cordis@4.0.5)
     transitivePeerDependencies:
@@ -5071,23 +5068,51 @@ snapshots:
       '@deepseek-ai/cosmokit': 1.8.6
       '@standard-schema/spec': 1.1.0
 
-  '@earendil-works/chord@1.4.0':
+  '@earendil-works/chord@1.5.2(esbuild@0.28.2)(ws@8.21.0)':
     dependencies:
-      '@earendil-works/pi-telemetry': 1.4.0
-      typebox: 1.3.27
+      '@earendil-works/pi-schema': 1.5.2
+      '@earendil-works/pi-telemetry': 1.5.2
+    optionalDependencies:
+      esbuild: 0.28.2
+      ws: 8.21.0
 
-  '@earendil-works/pi-ai@1.4.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(supports-color@7.2.0)(undici@8.12.2)(ws@8.22.0)(zod@4.6.5)':
+  '@earendil-works/pi-ai@1.5.2(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(supports-color@7.2.0)(undici@8.12.2)(ws@8.21.0)(zod@4.6.5)':
     dependencies:
       '@anthropic-ai/sdk': 0.129.0(zod@4.6.5)
       '@aws-sdk/client-bedrock-runtime': 3.1127.0
-      '@earendil-works/pi-telemetry': 1.4.0
+      '@earendil-works/pi-schema': 1.5.2
+      '@earendil-works/pi-telemetry': 1.5.2
+      '@google/genai': 2.21.0(supports-color@7.2.0)
+      '@smithy/node-http-handler': 4.12.1
+      http-proxy-agent: 9.1.0(supports-color@7.2.0)
+      https-proxy-agent: 9.1.0(supports-color@7.2.0)
+      openai: 7.19.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(undici@8.12.2)(ws@8.21.0)(zod@4.6.5)
+      partial-json: 0.1.7
+    transitivePeerDependencies:
+      - '@aws-sdk/credential-provider-node'
+      - '@modelcontextprotocol/sdk'
+      - '@smithy/hash-node'
+      - '@smithy/signature-v4'
+      - bufferutil
+      - kerberos
+      - supports-color
+      - undici
+      - utf-8-validate
+      - ws
+      - zod
+
+  '@earendil-works/pi-ai@1.5.2(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(supports-color@7.2.0)(undici@8.12.2)(ws@8.22.0)(zod@4.6.5)':
+    dependencies:
+      '@anthropic-ai/sdk': 0.129.0(zod@4.6.5)
+      '@aws-sdk/client-bedrock-runtime': 3.1127.0
+      '@earendil-works/pi-schema': 1.5.2
+      '@earendil-works/pi-telemetry': 1.5.2
       '@google/genai': 2.21.0(supports-color@7.2.0)
       '@smithy/node-http-handler': 4.12.1
       http-proxy-agent: 9.1.0(supports-color@7.2.0)
       https-proxy-agent: 9.1.0(supports-color@7.2.0)
       openai: 7.19.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(undici@8.12.2)(ws@8.22.0)(zod@4.6.5)
       partial-json: 0.1.7
-      typebox: 1.3.27
     transitivePeerDependencies:
       - '@aws-sdk/credential-provider-node'
       - '@modelcontextprotocol/sdk'
@@ -5101,33 +5126,37 @@ snapshots:
       - ws
       - zod
 
-  '@earendil-works/pi-codemode@1.4.0':
+  '@earendil-works/pi-codemode@1.5.2':
     dependencies:
       quickjs-wasi: 3.6.2
 
-  '@earendil-works/pi-durable@1.4.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(supports-color@7.2.0)(undici@8.12.2)(ws@8.22.0)(zod@4.6.5)':
+  '@earendil-works/pi-durable@1.5.2(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(esbuild@0.28.2)(supports-color@7.2.0)(undici@8.12.2)(ws@8.21.0)(zod@4.6.5)':
     dependencies:
-      '@earendil-works/chord': 1.4.0
-      '@earendil-works/pi-ai': 1.4.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(supports-color@7.2.0)(undici@8.12.2)(ws@8.22.0)(zod@4.6.5)
-      '@earendil-works/pi-codemode': 1.4.0
-      '@earendil-works/pi-telemetry': 1.4.0
+      '@earendil-works/chord': 1.5.2(esbuild@0.28.2)(ws@8.21.0)
+      '@earendil-works/pi-ai': 1.5.2(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(supports-color@7.2.0)(undici@8.12.2)(ws@8.21.0)(zod@4.6.5)
+      '@earendil-works/pi-codemode': 1.5.2
+      '@earendil-works/pi-schema': 1.5.2
+      '@earendil-works/pi-telemetry': 1.5.2
       '@silvia-odwyer/photon': 0.3.3
       diff: 8.0.4
-      typebox: 1.3.27
     transitivePeerDependencies:
       - '@aws-sdk/credential-provider-node'
       - '@modelcontextprotocol/sdk'
       - '@smithy/hash-node'
       - '@smithy/signature-v4'
       - bufferutil
+      - esbuild
       - kerberos
+      - react
       - supports-color
       - undici
       - utf-8-validate
       - ws
       - zod
 
-  '@earendil-works/pi-telemetry@1.4.0': {}
+  '@earendil-works/pi-schema@1.5.2': {}
+
+  '@earendil-works/pi-telemetry@1.5.2': {}
 
   '@effect/opentelemetry@4.1.0(@opentelemetry/api-logs@0.219.0)(@opentelemetry/api@1.9.0)(@opentelemetry/resources@2.8.0(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-logs@0.219.0(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-metrics@2.8.0(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-trace-node@2.8.0(@opentelemetry/api@1.9.0))(@opentelemetry/semantic-conventions@1.43.0)(effect@4.1.0)':
     dependencies:
@@ -5332,18 +5361,18 @@ snapshots:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.6.0
 
-  '@langchain/anthropic@1.5.11(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)(zod@4.6.5))(ws@8.22.0))':
+  '@langchain/anthropic@1.5.11(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)(zod@4.6.5))(ws@8.21.0))':
     dependencies:
       '@anthropic-ai/sdk': 0.122.0(zod@4.6.5)
-      '@langchain/core': 1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)(zod@4.6.5))(ws@8.22.0)
+      '@langchain/core': 1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)(zod@4.6.5))(ws@8.21.0)
       zod: 4.6.5
 
-  '@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)(zod@4.6.5))(ws@8.22.0)':
+  '@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)(zod@4.6.5))(ws@8.21.0)':
     dependencies:
       '@cfworker/json-schema': 4.1.6
       '@standard-schema/spec': 1.1.0
       js-tiktoken: 1.0.21
-      langsmith: 0.11.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)(zod@4.6.5))(ws@8.22.0)
+      langsmith: 0.11.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)(zod@4.6.5))(ws@8.21.0)
       mustache: 4.2.0
       p-queue: 6.6.2
       zod: 4.6.7
@@ -5354,10 +5383,10 @@ snapshots:
       - openai
       - ws
 
-  '@langchain/langgraph-checkpoint-validation@1.1.1(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)(zod@4.6.5))(ws@8.22.0))(@langchain/langgraph-checkpoint@1.1.5(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)(zod@4.6.5))(ws@8.22.0)))(@opentelemetry/api@1.9.0)(@types/node@24.19.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2))':
+  '@langchain/langgraph-checkpoint-validation@1.1.1(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)(zod@4.6.5))(ws@8.21.0))(@langchain/langgraph-checkpoint@1.1.5(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)(zod@4.6.5))(ws@8.21.0)))(@opentelemetry/api@1.9.0)(@types/node@24.19.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2))':
     dependencies:
-      '@langchain/core': 1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)(zod@4.6.5))(ws@8.22.0)
-      '@langchain/langgraph-checkpoint': 1.1.5(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)(zod@4.6.5))(ws@8.22.0))
+      '@langchain/core': 1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)(zod@4.6.5))(ws@8.21.0)
+      '@langchain/langgraph-checkpoint': 1.1.5(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)(zod@4.6.5))(ws@8.21.0))
       vitest: 4.1.12(@opentelemetry/api@1.9.0)(@types/node@24.19.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2))
       yargs: 17.7.3
       zod: 4.6.5
@@ -5376,23 +5405,23 @@ snapshots:
       - msw
       - vite
 
-  '@langchain/langgraph-checkpoint@1.1.5(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)(zod@4.6.5))(ws@8.22.0))':
+  '@langchain/langgraph-checkpoint@1.1.5(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)(zod@4.6.5))(ws@8.21.0))':
     dependencies:
-      '@langchain/core': 1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)(zod@4.6.5))(ws@8.22.0)
+      '@langchain/core': 1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)(zod@4.6.5))(ws@8.21.0)
 
-  '@langchain/langgraph-sdk@1.12.5(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)(zod@4.6.5))(ws@8.22.0))':
+  '@langchain/langgraph-sdk@1.12.5(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)(zod@4.6.5))(ws@8.21.0))':
     dependencies:
-      '@langchain/core': 1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)(zod@4.6.5))(ws@8.22.0)
+      '@langchain/core': 1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)(zod@4.6.5))(ws@8.21.0)
       '@langchain/protocol': 0.0.19
       '@types/json-schema': 7.0.15
       p-queue: 9.3.5
       p-retry: 7.1.1
 
-  '@langchain/langgraph@1.4.18(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)(zod@4.6.5))(ws@8.22.0))(zod@4.6.5)':
+  '@langchain/langgraph@1.4.18(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)(zod@4.6.5))(ws@8.21.0))(zod@4.6.5)':
     dependencies:
-      '@langchain/core': 1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)(zod@4.6.5))(ws@8.22.0)
-      '@langchain/langgraph-checkpoint': 1.1.5(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)(zod@4.6.5))(ws@8.22.0))
-      '@langchain/langgraph-sdk': 1.12.5(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)(zod@4.6.5))(ws@8.22.0))
+      '@langchain/core': 1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)(zod@4.6.5))(ws@8.21.0)
+      '@langchain/langgraph-checkpoint': 1.1.5(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)(zod@4.6.5))(ws@8.21.0))
+      '@langchain/langgraph-sdk': 1.12.5(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)(zod@4.6.5))(ws@8.21.0))
       '@langchain/protocol': 0.0.19
       '@standard-schema/spec': 1.1.0
       zod: 4.6.5
@@ -5400,11 +5429,11 @@ snapshots:
       - react
       - react-dom
 
-  '@langchain/openai@1.7.0(@aws-sdk/credential-provider-node@3.972.86)(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)(zod@4.6.5))(ws@8.22.0))(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)':
+  '@langchain/openai@1.7.0(@aws-sdk/credential-provider-node@3.972.86)(@langchain/core@1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)(zod@4.6.5))(ws@8.21.0))(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)':
     dependencies:
-      '@langchain/core': 1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)(zod@4.6.5))(ws@8.22.0)
+      '@langchain/core': 1.4.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)(zod@4.6.5))(ws@8.21.0)
       js-tiktoken: 1.0.21
-      openai: 7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)(zod@4.6.5)
+      openai: 7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)(zod@4.6.5)
       zod: 4.6.5
     transitivePeerDependencies:
       - '@aws-sdk/credential-provider-node'
@@ -5742,111 +5771,6 @@ snapshots:
       - vite-plugin-solid
       - ws
 
-  '@opencode/core@2.2.6(@aws-sdk/credential-provider-node@3.972.86)(@opentelemetry/api@1.9.0)(@opentelemetry/semantic-conventions@1.43.0)(@opentui/core@0.8.1(typescript@7.0.2)(web-tree-sitter@0.25.10))(@smithy/signature-v4@5.7.5)(graphql@16.15.0)(redis@6.3.1(@opentelemetry/api@1.9.0))(supports-color@7.2.0)(typebox@1.3.27)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2))(ws@8.22.0)':
-    dependencies:
-      '@ai-sdk/provider': 3.0.19
-      '@ai-sdk/provider-utils': 4.0.62(zod@4.6.7)
-      '@effect/platform-node': 4.1.0(effect@4.1.0)(redis@6.3.1(@opentelemetry/api@1.9.0))
-      '@effect/platform-node-shared': 4.1.0(effect@4.1.0)
-      '@effect/sql-sqlite-bun': 4.1.0(effect@4.1.0)
-      '@effect/sql-sqlite-node': 4.1.0(effect@4.1.0)
-      '@ff-labs/fff-bun': 0.10.5
-      '@ff-labs/fff-node': 0.10.5
-      '@lydell/node-pty': 1.2.0-beta.12
-      '@modelcontextprotocol/client': 2.3.1
-      '@modelcontextprotocol/core': 2.3.1
-      '@modelcontextprotocol/server': 2.3.1
-      '@opencode/ai': 2.2.6(supports-color@7.2.0)
-      '@opencode/codemode': 2.2.6
-      '@opencode/plugin': 2.2.6(@opentelemetry/semantic-conventions@1.43.0)(@opentui/core@0.8.1(typescript@7.0.2)(web-tree-sitter@0.25.10))(redis@6.3.1(@opentelemetry/api@1.9.0))(supports-color@7.2.0)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2))
-      '@opencode/plugin-browser': 2.2.6(@opentelemetry/semantic-conventions@1.43.0)(@opentui/core@0.8.1(typescript@7.0.2)(web-tree-sitter@0.25.10))(redis@6.3.1(@opentelemetry/api@1.9.0))(supports-color@7.2.0)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2))
-      '@opencode/pty': 0.4.0
-      '@opencode/schema': 2.2.6
-      '@opencode/util': 2.2.6(@opentelemetry/semantic-conventions@1.43.0)(redis@6.3.1(@opentelemetry/api@1.9.0))(supports-color@7.2.0)
-      '@parcel/watcher': 2.5.1
-      '@silvia-odwyer/photon-node': 0.3.4
-      '@standard-schema/spec': 1.1.0
-      bun-pty: 0.4.11
-      diff: 8.0.4
-      drizzle-orm: 1.0.0-rc.5-169397b(@effect/sql-sqlite-bun@4.1.0(effect@4.1.0))(@effect/sql-sqlite-node@4.1.0(effect@4.1.0))(@opentelemetry/api@1.9.0)(effect@4.1.0)(typebox@1.3.27)(zod@4.6.7)
-      effect: 4.1.0
-      fuzzysort: 3.1.0
-      gitlab-ai-provider: 6.23.1(@ai-sdk/provider-utils@4.0.62(zod@4.6.7))(@ai-sdk/provider@3.0.19)(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(graphql@16.15.0)(supports-color@7.2.0)(ws@8.22.0)
-      gray-matter: 4.0.3
-      htmlparser2: 8.0.2
-      http-proxy-agent: 7.0.2(supports-color@7.2.0)
-      https-proxy-agent: 7.0.6(supports-color@7.2.0)
-      immer: 11.1.4
-      jose: 6.0.11
-      jsonc-parser: 3.3.1
-      mime-types: 3.0.2
-      which: 6.0.1
-      zod: 4.6.7
-    transitivePeerDependencies:
-      - '@aws-sdk/client-rds-data'
-      - '@aws-sdk/credential-provider-node'
-      - '@cloudflare/workers-types'
-      - '@drizzle-team/minipg'
-      - '@effect/sql-d1'
-      - '@effect/sql-libsql'
-      - '@effect/sql-mysql2'
-      - '@effect/sql-pg'
-      - '@effect/sql-pglite'
-      - '@effect/sql-sqlite-do'
-      - '@effect/sql-sqlite-wasm'
-      - '@electric-sql/pglite'
-      - '@libsql/client'
-      - '@libsql/client-wasm'
-      - '@neondatabase/serverless'
-      - '@op-engineering/op-sqlite'
-      - '@opencode/theme'
-      - '@opentelemetry/api'
-      - '@opentelemetry/sdk-trace-web'
-      - '@opentelemetry/semantic-conventions'
-      - '@opentui/core'
-      - '@opentui/solid'
-      - '@planetscale/database'
-      - '@sinclair/typebox'
-      - '@smithy/hash-node'
-      - '@smithy/signature-v4'
-      - '@sqlitecloud/drivers'
-      - '@tidbcloud/serverless'
-      - '@tursodatabase/database'
-      - '@tursodatabase/database-common'
-      - '@tursodatabase/database-wasm'
-      - '@tursodatabase/serverless'
-      - '@tursodatabase/sync'
-      - '@types/better-sqlite3'
-      - '@types/mssql'
-      - '@types/pg'
-      - '@types/sql.js'
-      - '@upstash/redis'
-      - '@vercel/postgres'
-      - '@xata.io/client'
-      - arktype
-      - better-sqlite3
-      - bufferutil
-      - bun-types
-      - electron
-      - encoding
-      - expo-sqlite
-      - graphql
-      - mssql
-      - mysql2
-      - pg
-      - postgres
-      - redis
-      - solid-js
-      - sql.js
-      - sqlite3
-      - supports-color
-      - typebox
-      - utf-8-validate
-      - valibot
-      - vite
-      - vite-plugin-solid
-      - ws
-
   '@opencode/plugin-browser@2.2.6(@opentelemetry/semantic-conventions@1.43.0)(@opentui/core@0.8.1(typescript@7.0.2)(web-tree-sitter@0.25.10))(redis@6.3.1(@opentelemetry/api@1.9.0))(supports-color@7.2.0)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2))':
     dependencies:
       '@opencode/plugin': 2.2.6(@opentelemetry/semantic-conventions@1.43.0)(@opentui/core@0.8.1(typescript@7.0.2)(web-tree-sitter@0.25.10))(redis@6.3.1(@opentelemetry/api@1.9.0))(supports-color@7.2.0)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2))
@@ -5932,13 +5856,13 @@ snapshots:
       '@standard-schema/spec': 1.1.0
       effect: 4.1.0
 
-  '@opencode/sdk@2.2.6(@aws-sdk/credential-provider-node@3.972.86)(@opentelemetry/api@1.9.0)(@opentelemetry/semantic-conventions@1.43.0)(@opentui/core@0.8.1(typescript@7.0.2)(web-tree-sitter@0.25.10))(@smithy/signature-v4@5.7.5)(graphql@16.15.0)(redis@6.3.1(@opentelemetry/api@1.9.0))(supports-color@7.2.0)(typebox@1.3.27)(typescript@7.0.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2))(web-tree-sitter@0.25.10)(ws@8.22.0)':
+  '@opencode/sdk@2.2.6(@aws-sdk/credential-provider-node@3.972.86)(@opentelemetry/api@1.9.0)(@opentelemetry/semantic-conventions@1.43.0)(@opentui/core@0.8.1(typescript@7.0.2)(web-tree-sitter@0.25.10))(@smithy/signature-v4@5.7.5)(graphql@16.15.0)(redis@6.3.1(@opentelemetry/api@1.9.0))(supports-color@7.2.0)(typebox@1.3.27)(typescript@7.0.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2))(web-tree-sitter@0.25.10)(ws@8.21.0)':
     dependencies:
       '@opencode/client': 2.2.6(effect@4.1.0)
-      '@opencode/core': 2.2.6(@aws-sdk/credential-provider-node@3.972.86)(@opentelemetry/api@1.9.0)(@opentelemetry/semantic-conventions@1.43.0)(@opentui/core@0.8.1(typescript@7.0.2)(web-tree-sitter@0.25.10))(@smithy/signature-v4@5.7.5)(graphql@16.15.0)(redis@6.3.1(@opentelemetry/api@1.9.0))(supports-color@7.2.0)(typebox@1.3.27)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2))(ws@8.22.0)
+      '@opencode/core': 2.2.6(@aws-sdk/credential-provider-node@3.972.86)(@opentelemetry/api@1.9.0)(@opentelemetry/semantic-conventions@1.43.0)(@opentui/core@0.8.1(typescript@7.0.2)(web-tree-sitter@0.25.10))(@smithy/signature-v4@5.7.5)(graphql@16.15.0)(redis@6.3.1(@opentelemetry/api@1.9.0))(supports-color@7.2.0)(typebox@1.3.27)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2))(ws@8.21.0)
       '@opencode/plugin': 2.2.6(@opentelemetry/semantic-conventions@1.43.0)(@opentui/core@0.8.1(typescript@7.0.2)(web-tree-sitter@0.25.10))(redis@6.3.1(@opentelemetry/api@1.9.0))(supports-color@7.2.0)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2))
       '@opencode/schema': 2.2.6
-      '@opencode/server': 2.2.6(@aws-sdk/credential-provider-node@3.972.86)(@opentelemetry/api@1.9.0)(@opentelemetry/semantic-conventions@1.43.0)(@opentui/core@0.8.1(typescript@7.0.2)(web-tree-sitter@0.25.10))(@smithy/signature-v4@5.7.5)(graphql@16.15.0)(redis@6.3.1(@opentelemetry/api@1.9.0))(supports-color@7.2.0)(typebox@1.3.27)(typescript@7.0.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2))(web-tree-sitter@0.25.10)(ws@8.22.0)
+      '@opencode/server': 2.2.6(@aws-sdk/credential-provider-node@3.972.86)(@opentelemetry/api@1.9.0)(@opentelemetry/semantic-conventions@1.43.0)(@opentui/core@0.8.1(typescript@7.0.2)(web-tree-sitter@0.25.10))(@smithy/signature-v4@5.7.5)(graphql@16.15.0)(redis@6.3.1(@opentelemetry/api@1.9.0))(supports-color@7.2.0)(typebox@1.3.27)(typescript@7.0.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2))(web-tree-sitter@0.25.10)(ws@8.21.0)
       '@opencode/util': 2.2.6(@opentelemetry/semantic-conventions@1.43.0)(redis@6.3.1(@opentelemetry/api@1.9.0))(supports-color@7.2.0)
       effect: 4.1.0
     transitivePeerDependencies:
@@ -6009,11 +5933,11 @@ snapshots:
       - web-tree-sitter
       - ws
 
-  '@opencode/server@2.2.6(@aws-sdk/credential-provider-node@3.972.86)(@opentelemetry/api@1.9.0)(@opentelemetry/semantic-conventions@1.43.0)(@opentui/core@0.8.1(typescript@7.0.2)(web-tree-sitter@0.25.10))(@smithy/signature-v4@5.7.5)(graphql@16.15.0)(redis@6.3.1(@opentelemetry/api@1.9.0))(supports-color@7.2.0)(typebox@1.3.27)(typescript@7.0.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2))(web-tree-sitter@0.25.10)(ws@8.22.0)':
+  '@opencode/server@2.2.6(@aws-sdk/credential-provider-node@3.972.86)(@opentelemetry/api@1.9.0)(@opentelemetry/semantic-conventions@1.43.0)(@opentui/core@0.8.1(typescript@7.0.2)(web-tree-sitter@0.25.10))(@smithy/signature-v4@5.7.5)(graphql@16.15.0)(redis@6.3.1(@opentelemetry/api@1.9.0))(supports-color@7.2.0)(typebox@1.3.27)(typescript@7.0.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2))(web-tree-sitter@0.25.10)(ws@8.21.0)':
     dependencies:
       '@effect/platform-node': 4.1.0(effect@4.1.0)(redis@6.3.1(@opentelemetry/api@1.9.0))
       '@effect/platform-node-shared': 4.1.0(effect@4.1.0)
-      '@opencode/core': 2.2.6(@aws-sdk/credential-provider-node@3.972.86)(@opentelemetry/api@1.9.0)(@opentelemetry/semantic-conventions@1.43.0)(@opentui/core@0.8.1(typescript@7.0.2)(web-tree-sitter@0.25.10))(@smithy/signature-v4@5.7.5)(graphql@16.15.0)(redis@6.3.1(@opentelemetry/api@1.9.0))(supports-color@7.2.0)(typebox@1.3.27)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2))(ws@8.22.0)
+      '@opencode/core': 2.2.6(@aws-sdk/credential-provider-node@3.972.86)(@opentelemetry/api@1.9.0)(@opentelemetry/semantic-conventions@1.43.0)(@opentui/core@0.8.1(typescript@7.0.2)(web-tree-sitter@0.25.10))(@smithy/signature-v4@5.7.5)(graphql@16.15.0)(redis@6.3.1(@opentelemetry/api@1.9.0))(supports-color@7.2.0)(typebox@1.3.27)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2))(ws@8.21.0)
       '@opencode/protocol': 2.2.6
       '@opencode/schema': 2.2.6
       '@opencode/simulation': 2.2.6(@aws-sdk/credential-provider-node@3.972.86)(@opentelemetry/api@1.9.0)(@opentelemetry/semantic-conventions@1.43.0)(@smithy/signature-v4@5.7.5)(graphql@16.15.0)(redis@6.3.1(@opentelemetry/api@1.9.0))(supports-color@7.2.0)(typebox@1.3.27)(typescript@7.0.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2))(web-tree-sitter@0.25.10)
@@ -6670,11 +6594,6 @@ snapshots:
 
   '@sindresorhus/is@4.6.0': {}
 
-  '@smithy/core@3.36.0':
-    dependencies:
-      '@smithy/types': 4.19.0
-      tslib: 2.8.1
-
   '@smithy/core@3.39.0':
     dependencies:
       '@smithy/types': 4.20.0
@@ -6689,7 +6608,7 @@ snapshots:
   '@smithy/eventstream-codec@4.2.14':
     dependencies:
       '@aws-crypto/crc32': 5.2.0
-      '@smithy/types': 4.19.0
+      '@smithy/types': 4.20.0
       '@smithy/util-hex-encoding': 4.5.2
       tslib: 2.8.1
 
@@ -6705,8 +6624,8 @@ snapshots:
 
   '@smithy/node-http-handler@4.12.1':
     dependencies:
-      '@smithy/core': 3.36.0
-      '@smithy/types': 4.19.0
+      '@smithy/core': 3.39.0
+      '@smithy/types': 4.20.0
       tslib: 2.8.1
 
   '@smithy/node-http-handler@4.14.2':
@@ -6715,20 +6634,10 @@ snapshots:
       '@smithy/types': 4.20.0
       tslib: 2.8.1
 
-  '@smithy/signature-v4@5.7.4':
-    dependencies:
-      '@smithy/core': 3.36.0
-      '@smithy/types': 4.19.0
-      tslib: 2.8.1
-
   '@smithy/signature-v4@5.7.5':
     dependencies:
       '@smithy/core': 3.39.0
       '@smithy/types': 4.20.0
-      tslib: 2.8.1
-
-  '@smithy/types@4.19.0':
-    dependencies:
       tslib: 2.8.1
 
   '@smithy/types@4.20.0':
@@ -6742,12 +6651,12 @@ snapshots:
 
   '@smithy/util-buffer-from@4.5.2':
     dependencies:
-      '@smithy/core': 3.36.0
+      '@smithy/core': 3.39.0
       tslib: 2.8.1
 
   '@smithy/util-hex-encoding@4.5.2':
     dependencies:
-      '@smithy/core': 3.36.0
+      '@smithy/core': 3.39.0
       tslib: 2.8.1
 
   '@smithy/util-utf8@2.3.0':
@@ -7322,30 +7231,6 @@ snapshots:
       - utf-8-validate
       - ws
 
-  gitlab-ai-provider@6.23.1(@ai-sdk/provider-utils@4.0.62(zod@4.6.7))(@ai-sdk/provider@3.0.19)(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(graphql@16.15.0)(supports-color@7.2.0)(ws@8.22.0):
-    dependencies:
-      '@ai-sdk/provider': 3.0.19
-      '@ai-sdk/provider-utils': 4.0.62(zod@4.6.7)
-      '@anthropic-ai/sdk': 0.71.2(zod@3.25.76)
-      '@anycable/core': 0.9.2
-      graphql-request: 6.1.0(graphql@16.15.0)
-      isomorphic-ws: 5.0.0(ws@8.22.0)
-      openai: 6.49.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(ws@8.22.0)(zod@3.25.76)
-      proper-lockfile: 4.1.2
-      socket.io-client: 4.8.4(supports-color@7.2.0)
-      vscode-jsonrpc: 8.2.1
-      zod: 3.25.76
-    transitivePeerDependencies:
-      - '@aws-sdk/credential-provider-node'
-      - '@smithy/hash-node'
-      - '@smithy/signature-v4'
-      - bufferutil
-      - encoding
-      - graphql
-      - supports-color
-      - utf-8-validate
-      - ws
-
   glob@13.0.5:
     dependencies:
       minimatch: 10.2.5
@@ -7503,10 +7388,6 @@ snapshots:
     dependencies:
       ws: 8.21.0
 
-  isomorphic-ws@5.0.0(ws@8.22.0):
-    dependencies:
-      ws: 8.22.0
-
   jose@6.0.11: {}
 
   jose@6.2.12: {}
@@ -7556,14 +7437,14 @@ snapshots:
 
   kind-of@6.0.3: {}
 
-  langsmith@0.11.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)(zod@4.6.5))(ws@8.22.0):
+  langsmith@0.11.0(@opentelemetry/api@1.9.0)(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)(zod@4.6.5))(ws@8.21.0):
     dependencies:
       p-queue: 6.6.2
     optionalDependencies:
       '@opentelemetry/api': 1.9.0
       '@opentelemetry/sdk-trace-base': 2.8.0(@opentelemetry/api@1.9.0)
-      openai: 7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)(zod@4.6.5)
-      ws: 8.22.0
+      openai: 7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)(zod@4.6.5)
+      ws: 8.21.0
 
   lightningcss-android-arm64@1.33.0:
     optional: true
@@ -7829,12 +7710,13 @@ snapshots:
       ws: 8.21.0
       zod: 3.25.76
 
-  openai@6.49.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(ws@8.22.0)(zod@3.25.76):
+  openai@7.19.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(undici@8.12.2)(ws@8.21.0)(zod@4.6.5):
     optionalDependencies:
       '@aws-sdk/credential-provider-node': 3.972.86
       '@smithy/signature-v4': 5.7.5
-      ws: 8.22.0
-      zod: 3.25.76
+      undici: 8.12.2
+      ws: 8.21.0
+      zod: 4.6.5
 
   openai@7.19.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(undici@8.12.2)(ws@8.22.0)(zod@4.6.5):
     optionalDependencies:
@@ -7844,13 +7726,13 @@ snapshots:
       ws: 8.22.0
       zod: 4.6.5
 
-  openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.22.0)(zod@4.6.5):
+  openai@7.43.0(@aws-sdk/credential-provider-node@3.972.86)(@smithy/signature-v4@5.7.5)(google-auth-library@10.9.1(supports-color@7.2.0))(undici@8.12.2)(ws@8.21.0)(zod@4.6.5):
     optionalDependencies:
       '@aws-sdk/credential-provider-node': 3.972.86
       '@smithy/signature-v4': 5.7.5
       google-auth-library: 10.9.1(supports-color@7.2.0)
       undici: 8.12.2
-      ws: 8.22.0
+      ws: 8.21.0
       zod: 4.6.5
 
   oxfmt@0.72.0:
@@ -8272,7 +8154,8 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  typebox@1.3.27: {}
+  typebox@1.3.27:
+    optional: true
 
   typescript@5.6.1-rc: {}
 

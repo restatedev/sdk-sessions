@@ -94,11 +94,11 @@ install with it, and the packages of the frameworks it imports, so that
 `@restatedev/agents/pi` brings pi alone:
 
 ```sh
-npm install @restatedev/agents @earendil-works/{pi-durable,pi-ai,chord}@1.4.0                           # pi
+npm install @restatedev/agents @earendil-works/{pi-durable,pi-ai,chord}@1.5.2                           # pi
 npm install @restatedev/agents @anthropic-ai/sdk                                                        # Claude
 npm install @restatedev/agents @langchain/core @langchain/langgraph @langchain/langgraph-checkpoint \
   @langchain/openai                       # LangGraph, and the provider of its models: or @langchain/anthropic
-npm install @restatedev/agents @earendil-works/pi-ai@1.4.0 @deepseek-ai/cordis \
+npm install @restatedev/agents @earendil-works/pi-ai@1.5.2 @deepseek-ai/cordis \
   @deepseek-ai/{dsh-agent,dsh-agent-loop,dsh-llm,dsh-llm-deepseek-api-key,dsh-llm-pi-ai,dsh-session}@0.2.1-rc.2 \
   @deepseek-ai/{dsh-session-checkpoint-policy,dsh-session-persistence,dsh-session-projection}@0.2.1-rc.2 \
   @deepseek-ai/{dsh-system-prompt,dsh-tools,dsh-user-approval}@0.2.1-rc.2 \
@@ -106,8 +106,9 @@ npm install @restatedev/agents @earendil-works/pi-ai@1.4.0 @deepseek-ai/cordis \
 npm install @restatedev/agents @opencode/{core,sdk,server,plugin}@2.2.6 effect@4.1.0                     # OpenCode, on Node 24
 ```
 
-pi's packages stay on 1.4 (`~1.4.0`): pi-ai 1.5 no longer exports `Type`,
-which `@restatedev/agents/pi` imports, so the pi agent does not load on 1.5.
+pi's packages are on 1.5 (`~1.5.2`): pi changes its API in minor releases
+(1.5 dropped pi-ai's `Type`, and changed pi-durable's storage), so a minor
+newer than the one @restatedev/agents is tested on is not taken.
 A subpath whose packages are missing fails as it is imported, naming the
 first it lacks. The packages are not published yet:
 [`pnpm --filter e2e packaging`](../e2e/packaging.ts) installs them from
