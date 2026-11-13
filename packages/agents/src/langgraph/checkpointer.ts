@@ -274,7 +274,7 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
       )) as [string, string, string, Uint8Array, string | null, number][]
     )
       .map((row) => ({ row, key: writesSortKey(row[4] ?? '', row[0], row[5]) }))
-      .sort((a, b) => compareWritesSortKeys(a.key, b.key))
+      .toSorted((a, b) => compareWritesSortKeys(a.key, b.key))
       .map(({ row }) => row);
     const config = (id: string) => ({ configurable: { thread_id: threadId, checkpoint_ns: ns, checkpoint_id: id } });
     return {
