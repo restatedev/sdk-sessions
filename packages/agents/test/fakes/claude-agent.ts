@@ -121,6 +121,8 @@ export async function startTeller(): Promise<string> {
   if (!server) {
     server = createServer((req, res) => void answer(req, res));
     await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
+    // It answers while its process lives, and keeps none alive.
+    server.unref();
   }
   return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 }

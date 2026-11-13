@@ -833,6 +833,14 @@ let unmoved = 0;
  * before the kill landed ahead of the answer. Still closed unanswered.
  */
 const repliedThenKilled: string[] = [];
+/**
+ * Killed invocations whose turn was answered, its answer stored before the
+ * kill landed (between the answer's commit and the invocation's end): the
+ * turn is over, as a stop that comes once the turn answered changes
+ * nothing. A turn that answers within milliseconds of its transfer (Claude
+ * Code's, on the teller) meets it.
+ */
+const answeredThenKilled: string[] = [];
 for (const [name, s] of sessions) {
   // A page at a time, from the latest back.
   const said: Messages['messages'] = [];
@@ -897,7 +905,12 @@ for (const [name, s] of sessions) {
     if (kill?.outcome === 'killed') {
       assert.ok(n <= 1, `moved more than once: ${evidence}`);
       // Closed, not answered: its last word is the closing note, after
-      // whatever its own invocation's model said.
+      // whatever its own invocation's model said; unless its answer was
+      // stored before the kill landed: then it moved the money once.
+      if (!(texts.at(-1) ?? '').startsWith('Ended: ') && texts.at(-1)?.startsWith('Done:') && n === 1) {
+        answeredThenKilled.push(kill.invocation);
+        continue;
+      }
       assert.match(texts.at(-1) ?? '', /^Ended: /, `a killed turn not closed: ${evidence}`);
       if (texts.some((t) => t.startsWith('Done:'))) {
         repliedThenKilled.push(`${kill.invocation}${kill.repliedAtKill ? '' : ', copied after the kill'}`);
@@ -1021,7 +1034,8 @@ const killedBy = Map.groupBy(killed, (k) => `${k.name} ${k.outcome} ${k.how}`);
 console.error(
   `prompts killed: ${[...killedBy].map(([what, ks]) => `${ks.length} ${what}`).join(', ')}; ` +
     `${killedCalls.length} of the killed had called the ledger, ${unmoved} moved no money, ` +
-    `${repliedThenKilled.length} held their model's reply (${repliedThenKilled.join(', ')})`,
+    `${repliedThenKilled.length} held their model's reply (${repliedThenKilled.join(', ')}), ` +
+    `${answeredThenKilled.length} were answered before the kill landed (${answeredThenKilled.join(', ')})`,
 );
 for (const name of KILLED) {
   assert.ok(
