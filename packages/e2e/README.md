@@ -47,7 +47,8 @@ server, are in its `test/` directory (`pnpm test` at the root runs them all).
 - [`agentlib.ts`](agentlib.ts): agentlib agents, on a journaled virtual
   object with every agent's views, on a scripted model: a signal's wait and
   a message steered to its turn, `messages` by page, cursor and summary,
-  `sync`, a denied approval, a stop, a refusal (424), `clear`, and the
+  `sync`, a denied approval, a stop, a refusal (424), `clear`, sub-agents
+  both ways (of a pi agent and to one, stopped with the turn), and the
   service process killed mid-turn, after which the replayed turn asks the
   model no second time (`pnpm --filter e2e agentlib`).
 - [`restate-tools.ts`](restate-tools.ts): Restate's own agent tools, on a

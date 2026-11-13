@@ -10,7 +10,8 @@
 // call that needs approval, denied; a stopped turn, which the
 // next turn's model sees ended (with a message steered to it, if it took
 // one); a provider's refusal (424), and a model's
-// failure that is none (500); a sub-agent of a pi agent; `clear`, whose
+// failure that is none (500); a sub-agent of a pi agent, and a pi agent (and
+// another agentlib agent) as a sub-agent of one, stopped with its turn; `clear`, whose
 // ids go on; and a crash of the service process mid-turn, after which the
 // turn is replayed: the model is asked no second time for a step it answered.
 //
@@ -24,7 +25,16 @@ import * as restate from '@restatedev/restate-sdk';
 import { asyncTool, journaledModel, tool, type Message, type ModelResponse } from '@restatedev/agentlib';
 import { sleep as genSleep } from '@restatedev/restate-sdk-gen';
 import { createModels } from '@earendil-works/pi-ai/models';
-import { CANCELLED, served, subagent, UNANSWERED, type Messages, type Status, type Waiting } from '@restatedev/agents';
+import {
+  CANCELLED,
+  served,
+  signal,
+  subagent,
+  UNANSWERED,
+  type Messages,
+  type Status,
+  type Waiting,
+} from '@restatedev/agents';
 import * as agentlib from '@restatedev/agents/agentlib';
 import type { Steered, Synced } from '@restatedev/agents/client';
 import * as pi from '@restatedev/agents/pi';
@@ -44,7 +54,11 @@ const lines = (messages: Messages['messages']) =>
 
 /** What a tool message says to the scripted model. */
 const said = (m: Extract<Message, { role: 'tool' }>) =>
-  m.result.status === 'success' ? JSON.stringify(m.result.output).replaceAll('"', '') : m.result.status;
+  m.result.status === 'success'
+    ? JSON.stringify(m.result.output).replaceAll('"', '')
+    : m.result.status === 'error'
+      ? `error: ${m.result.message}`
+      : m.result.status;
 
 /**
  * The model: "Plan" waits for an approval, "Transfer" moves money (which
@@ -69,6 +83,14 @@ function script(messages: readonly Message[]): ModelResponse {
     return { type: 'final', text: steered.length > 0 ? `${done}, and: ${steered.join(' / ')}` : done };
   }
   const text = (prompt as { content: string }).content;
+  // "Ask <tool>: <task name>: <task>": hands the task to a sub-agent.
+  const ask = /^Ask (\w+): ([a-z0-9-]+): (.*)$/s.exec(text);
+  if (ask) {
+    return {
+      type: 'tool_calls',
+      calls: [{ id: `call_${messages.length}`, name: ask[1]!, input: { name: ask[2]!, task: ask[3]! } }],
+    };
+  }
   if (text.startsWith('Plan'))
     return { type: 'tool_calls', calls: [{ id: `call_${messages.length}`, name: 'wait_for_approval', input: {} }] };
   if (text.startsWith('Transfer'))
@@ -124,6 +146,28 @@ models.setProvider(
 );
 const boss = pi.agent({ name: 'boss', model: 'script/script', models, tools: [subagent(planner)] });
 
+// The other way: an agentlib agent whose tools hand tasks to a pi agent, which waits when asked to, and to
+// the agentlib planner.
+models.setProvider(
+  fakeProvider('helper', 'helper', ({ messages }) => {
+    const last = messages.at(-1)!;
+    if (last.role === 'toolResult') return say(`Pi waited: ${textOf(last.content)}`);
+    const text = textOf(last.content);
+    return text.startsWith('Wait') ? callTools([['wait_for_approval', {}]]) : say(`Pi says: ${text}`);
+  }),
+);
+const helper = pi.agent({
+  name: 'helper',
+  model: 'helper/helper',
+  models,
+  tools: [signal('approval', { description: 'Wait for a manager', input: z.object({}) })],
+});
+const lead = agentlib.agent({
+  name: 'lead',
+  model,
+  tools: { helper: agentlib.subagent(helper), planner: agentlib.subagent(planner) },
+});
+
 const napper = agentlib.agent({
   name: 'napper',
   model,
@@ -156,7 +200,7 @@ if (process.argv[2] === 'serve') {
       stdio: ['ignore', 'ignore', 'inherit'],
     }));
   try {
-    await restate.serve({ services: served([planner, boss]), port: PORT });
+    await restate.serve({ services: served([planner, boss, helper, lead]), port: PORT });
     serveChild();
     for (
       let i = 0;
@@ -354,6 +398,38 @@ if (process.argv[2] === 'serve') {
     assert.deepEqual(await conversation('planner/henry.greeting'), [
       ['user', 'Hello from the boss'],
       ['assistant', 'Answered: Hello from the boss'],
+    ]);
+
+    // The other way: an agentlib agent hands a pi agent a task, at its key `<key>.<task name>`; the same name
+    // continues it.
+    assert.equal(await post('lead/olga/chat', 'Ask helper: greeting: hello'), 'Done with Pi says: hello');
+    assert.equal(await post('lead/olga/chat', 'Ask helper: greeting: again'), 'Done with Pi says: again');
+    assert.deepEqual(await conversation('helper/olga.greeting'), [
+      ['user', 'hello'],
+      ['assistant', 'Pi says: hello'],
+      ['user', 'again'],
+      ['assistant', 'Pi says: again'],
+    ]);
+    assert.deepEqual((await conversation('lead/olga')).slice(0, 2), [
+      ['user', 'Ask helper: greeting: hello'],
+      ['assistant', 'helper: Pi says: hello'],
+    ]);
+    // Stopping the agentlib turn stops the pi turn it waits for.
+    const chores = (await post('lead/pete/chat/send', 'Ask helper: chores: Wait for it')) as { invocationId: string };
+    await waiting('helper/pete.chores');
+    assert.deepEqual(await post('lead/pete/stop'), { stopped: chores.invocationId });
+    for (let i = 0; ((await post('helper/pete.chores/status')) as Status).answering !== null; i++) {
+      if (i > 300) throw new Error("the sub-agent's turn was not stopped");
+      await sleep(100);
+    }
+    assert.deepEqual(await post('helper/pete.chores/pending'), []);
+    assert.deepEqual((await conversation('helper/pete.chores')).at(-1), ['assistant', CANCELLED]);
+    // A sub-agent (agentlib's) that fails for good: the tool's error, which the model sees.
+    const failed = (await post('lead/quin/chat', 'Ask planner: x: Refuse me')) as string;
+    assert.match(failed, /^Done with error: .*refused/);
+    assert.deepEqual(await conversation('planner/quin.x'), [
+      ['user', 'Refuse me'],
+      ['assistant', UNANSWERED],
     ]);
 
     // Cleared: the conversation starts over, its ids going on.

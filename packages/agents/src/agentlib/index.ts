@@ -24,9 +24,19 @@ import {
   type ToolContext,
   ConversationConflictError,
   GuardrailError,
+  handlerTool,
   tool,
 } from '@restatedev/agentlib';
-import { channel, execute, internal, type Channel, type Future, type Operation } from '@restatedev/restate-sdk-gen';
+import {
+  call as callHandler,
+  channel,
+  execute,
+  internal,
+  serde,
+  type Channel,
+  type Future,
+  type Operation,
+} from '@restatedev/restate-sdk-gen';
 import type { aiModel as aiModelType } from '@restatedev/agentlib/provider';
 import { sdk as restate } from '@restatedev/sessions/internal';
 import { z } from 'zod';
@@ -213,6 +223,64 @@ export const signal = (name: string, { description, input }: { description: stri
       return (yield* waitFor(context.ctx, callId, name, value)) as JsonValue;
     },
   });
+
+/** An object with a `chat` handler; another object needs subagent's `handler`. */
+type WithChat<M> = M extends { chat: unknown }
+  ? unknown
+  : { 'an agent with a chat handler, or a handler option': never };
+
+/**
+ * A tool that hands a task to `target` (an agent of any framework, or any
+ * virtual object, through `handler`): to its key `<this key>.<task name>`,
+ * through its `chat`, and answers with its answer. Tasks of different names
+ * run at once; the same name continues the same task, in the sub-agent's
+ * own conversation. The model calls it by its key in `tools`:
+ *
+ *   tools: { planner: agentlib.subagent(planner) }
+ *
+ * The call is journaled: a crash replays its answer rather than hand the
+ * task again. Stopping the turn stops the sub-agent's turn (Restate cancels
+ * the call); a sub-agent that fails for good (refused, say) is the tool's
+ * error, which the model sees.
+ */
+export function subagent<M>(
+  target: restate.VirtualObjectDefinition<string, M> & WithChat<M>,
+  options?: { description?: string },
+): AgentlibTool;
+/** A sub-agent through another of its handlers (which takes the task as text, or a JSON string). */
+export function subagent<M>(
+  target: restate.VirtualObjectDefinition<string, M>,
+  options: { description?: string; handler: keyof M & string },
+): AgentlibTool;
+export function subagent<M>(
+  target: restate.VirtualObjectDefinition<string, M>,
+  {
+    description = (target as { description?: string }).description,
+    handler,
+  }: { description?: string; handler?: keyof M & string } = {},
+): AgentlibTool {
+  return handlerTool<z.ZodType<{ name: string; task: string }>, AgentlibContext>({
+    description:
+      `Hand a task to the ${target.name} agent${description ? ` (${description})` : ''}, and get its answer. ` +
+      'Tasks of different names run at once; the same name continues the same task.',
+    input: z.object({
+      name: z
+        .string()
+        .regex(/^[a-z0-9-]+$/)
+        .describe('A short name for the task, such as "fizzbuzz"'),
+      task: z.string().describe('The task in full: the agent sees nothing else'),
+    }),
+    call: ({ name, task }, { context }) =>
+      callHandler<string, JsonValue>({
+        service: target.name,
+        method: handler ?? 'chat',
+        key: `${context.ctx.key}.${name}`,
+        parameter: task,
+        inputSerde: serde.json,
+        outputSerde: serde.json,
+      }),
+  });
+}
 
 /** What the agent keeps in its state, beside its messages: under `meta`. */
 interface Meta {

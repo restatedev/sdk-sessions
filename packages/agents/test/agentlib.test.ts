@@ -129,6 +129,23 @@ describe('approves', () => {
   });
 });
 
+describe('subagent', () => {
+  it('hands a named task to an agent, described by it, through its chat', () => {
+    const planner = agentlib.agent({ name: 'planner', description: 'Plans work', model: 'openai/gpt-6-sol' });
+    const tool = agentlib.subagent(planner);
+    expect(tool.description).toBe(
+      'Hand a task to the planner agent (Plans work), and get its answer. ' +
+        'Tasks of different names run at once; the same name continues the same task.',
+    );
+    expect(tool.inputSchema).toMatchObject({
+      type: 'object',
+      properties: { name: { type: 'string', pattern: '^[a-z0-9-]+$' }, task: { type: 'string' } },
+      required: ['name', 'task'],
+    });
+    expect(agentlib.subagent(planner, { description: 'Mine' }).description).toContain('(Mine)');
+  });
+});
+
 describe('agent', () => {
   it('refuses a model it cannot take, as it is defined', () => {
     expect(() => agentlib.agent({ name: 'a', model: 'gpt' })).toThrow('is not provider/model-id');

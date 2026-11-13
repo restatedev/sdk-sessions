@@ -876,6 +876,12 @@ in a session object: it is the one integration on the classic Restate SDK.
   `steering` event says which it took (`data.steer`): the turn keeps their
   ids in `taken`, which their own `steered` turn checks, and tells the
   companion (`taken`).
+- **Sub-agents**: `agentlib.subagent(agent)` is a `handlerTool` whose call
+  is the generator SDK's `call` of the agent's `chat`, by name (agentlib's
+  `serviceTool` takes the generator SDK's descriptors, which a definition
+  of the classic SDK is not), at `<key>.<task name>`. Restate journals it,
+  and cancels it with the turn: no call records, unlike `subagent()` in a
+  session object.
 - **Approvals**: agentlib's `onHumanApproval`, which waits for the signal
   `approval` through the companion's `wait`, by agentlib's own name for the
   ask (`<agent>:approval:<call>:<n>`).
@@ -895,5 +901,6 @@ in a session object: it is the one integration on the classic Restate SDK.
   tools with bounded numbers, so its tools' schemas go without them.
 - **Tests**: [`e2e/agentlib.ts`](../../e2e/agentlib.ts), against a real
   server: a signal's wait, steering, `messages` by page, cursor and
-  summary, `sync`, a denied approval, a stop, a refusal, `clear`, and the
-  service killed mid-turn (the model asked once per step).
+  summary, `sync`, a denied approval, a stop, a refusal, `clear`, sub-agents
+  both ways (a pi agent's, and of a pi agent: stopped with the turn), and
+  the service killed mid-turn (the model asked once per step).

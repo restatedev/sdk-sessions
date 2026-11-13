@@ -65,12 +65,50 @@ The tools of `@restatedev/agents` (`tool()`, `call`, `send`, `workflow`,
 `signal`, `subagent`) are for session objects, whose context they take: an
 agentlib agent takes agentlib's own, which do the same in the generator SDK
 (`serviceTool` and `handlerTool` call Restate's handlers, `agentTool`
-another agent of agentlib, in the same invocation). `agentlib.signal(name,
-{ description, input })` is the one tool this subpath adds: it waits for a
-signal as every agent's `signal()` tool does, which `pending` lists and
-`signal` resolves. An agent of another framework hands it a task with
+another agent of agentlib, in the same invocation). This subpath adds two:
+
+- `agentlib.signal(name, { description, input })` waits for a signal as
+  every agent's `signal()` tool does, which `pending` lists and `signal`
+  resolves.
+- `agentlib.subagent(agent, { description })` hands a task to an agent of
+  any framework (a pi agent, another agentlib agent...), at its key
+  `<this key>.<task name>`, as every agent's `subagent()` does: the same
+  name continues the task. The call is journaled (a crash replays its
+  answer), stopping the turn stops the sub-agent's turn (Restate cancels
+  the call), and a sub-agent that fails for good is the tool's error, which
+  the model sees. The model calls it by its key in `tools`:
+
+  ```ts
+  agentlib.agent({ name: 'lead', tools: { planner: agentlib.subagent(planner) } });
+  ```
+
+An agent of another framework hands an agentlib agent a task with
 `subagent(assistant)`, as any agent; `deliver` and `webhook` send it
 messages as they send any agent's.
+
+agentlib's `serviceTool`, and the generator SDK's typed `client`, take the
+generator SDK's own descriptors (`iface`, `service`, `object`): a session
+object or an agent of `@restatedev/agents`, a definition of the classic SDK,
+is not one. A tool of your own calls one with the generator SDK's `call`,
+by its name, as `agentlib.subagent` does:
+
+```ts
+import { handlerTool, type JsonValue } from '@restatedev/agentlib';
+import { call, serde } from '@restatedev/restate-sdk-gen';
+
+const status = handlerTool({
+  description: 'The status of an order.',
+  input: z.object({ order: z.string() }),
+  call: ({ order }) =>
+    call<{ order: string }, JsonValue>({
+      service: 'orders',
+      method: 'status',
+      parameter: { order },
+      inputSerde: serde.json,
+      outputSerde: serde.json,
+    }),
+});
+```
 
 ## Through crashes
 
