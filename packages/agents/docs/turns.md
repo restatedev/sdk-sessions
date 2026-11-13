@@ -347,7 +347,10 @@ sequenceDiagram
 - **Tool calls, once.** A tool call has an idempotency key of the
   invocation and its call id, `<invocation>:<call id>`. Restate's own tools
   (`call`, `send`, `workflow`, `subagent`, `signal`) make their call once
-  however often the tool call runs: a framework that gives a cut-off call a
+  however often the tool call runs, by that key; a workflow's `run`, which
+  Restate runs once per workflow id whatever the key, by the workflow's id
+  instead (the tool waits for the run by its invocation id, which a call
+  made again gets too): a framework that gives a cut-off call a
   new id (DeepSeek tells the model its call was cut off, and the
   model makes it again) gets the earlier call's id back
   ([Tool calls, once](conversation.md#tool-calls-once-the-call-records)).

@@ -509,7 +509,12 @@ server tool's container id, say), and for the Python SDK's layout.
 A tool call has an idempotency key, `<invocation>:<call id>`. The tools built
 on Restate (`call`, `send`, `workflow`, `subagent`, `signal`) and a
 framework's own waits (`waitFor`) record each Restate call they make, so that
-it is made once however often the tool call runs. The record is in
+it is made once however often the tool call runs. Each call carries the
+key, except a call of a workflow's `run`: Restate runs it once per workflow
+id, and refuses a second call of it whatever its key, so the tool calls it
+without one and waits for the run by the call's invocation id
+(`runWorkflow` in `src/tools.ts`), which the refused call of a later attempt
+gets too. The record is in
 `restate_agent_calls`, one row that holds the calls of the key's latest
 invocation (the next invocation's first call replaces it):
 

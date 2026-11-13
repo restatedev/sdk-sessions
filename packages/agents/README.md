@@ -434,7 +434,15 @@ and Restate retries it: the tool call runs again.
 **Once.** A crash runs an unfinished tool call again with the same call id.
 A tool that must not run twice passes its `idempotencyKey` on (made of the
 invocation's id and the call id), as Restate's tools do with each call they
-make: run again, it is the same call. The DeepSeek Harness and OpenCode tell
+make: run again, it is the same call. A workflow's `run` is the exception:
+Restate runs it once per workflow id, and refuses a second call of it
+whatever its idempotency key. Restate's `workflow` tool (and `call` of a
+workflow's `run`) calls it without a key, and waits for the run by the
+call's invocation id: run again, the refused call's invocation id is the
+run's. A tool of your own that runs a workflow does the same (`start` and
+`attach` of `@restatedev/sessions/internal`), with a workflow id that a run
+again gets too (made of the agent's key and the `callId`, as `workflow`'s
+is). The DeepSeek Harness and OpenCode tell
 the model that a cut-off tool call was interrupted instead, and the model
 makes it again as a new tool call: Restate's tools then make the same call,
 if the input is the same (so a wait for an approval outlasts a restart), and
