@@ -25,8 +25,10 @@ import { createModels } from '@earendil-works/pi-ai/models';
 import {
   CANCELLED,
   call,
+  sessionObject,
   signal,
   signals,
+  subagent,
   webhook,
   workflow,
   type Messages,
@@ -92,6 +94,79 @@ const support = pi.agent({
   ],
 });
 
+// An agent whose turns Restate suspends whenever they wait more than 100 ms
+// (its object's inactivity timeout), whatever the server's default: each tool
+// call waits longer, and a suspended turn resumes as a new attempt, which runs
+// the cut-off tool call again. Each gets the result of the call the attempt
+// before it made: a service's handler and a sub-agent (by the call's
+// idempotency key), and a workflow's run (which Restate runs once per id,
+// refusing a second call of it whatever its idempotency key: the tool waits
+// for the run that started instead).
+const slow = restate.service({
+  name: 'slow',
+  handlers: {
+    lookup: async (ctx: restate.Context, { order }: { order: string }) => {
+      await ctx.sleep({ milliseconds: 500 });
+      return `found ${order}`;
+    },
+  },
+});
+const slowRefund = restate.workflow({
+  name: 'slowRefund',
+  handlers: {
+    run: async (ctx: restate.WorkflowContext, { order }: { order: string }) => {
+      await ctx.sleep({ milliseconds: 500 });
+      return `refunded ${order} slowly`;
+    },
+  },
+});
+// A sub-agent whose answer is a call that waits too: with an idempotency key,
+// so that the attempt that resumes it gets that call's result, rather than
+// make a new call, which would suspend it again.
+const clerk = sessionObject({
+  name: 'clerk',
+  handlers: {
+    chat: async (ctx, task: string) =>
+      ctx.rpc(slow, { idempotencyKey: `${ctx.request.id}:lookup` }).lookup({ order: task }),
+  },
+});
+const patientModels = createModels();
+const patientSteps: Parameters<typeof callTools>[0] = [
+  ['slow_lookup', { order: '103' }],
+  ['clerk', { name: 'check', task: '104' }],
+  ['refund_slowly', { order: '103' }],
+  ['slowRefund_run', { key: 'refund-105', order: '105' }],
+];
+patientModels.setProvider(
+  fakeProvider('patient', 'patient', ({ messages }) => {
+    const results = messages.filter((m) => m.role === 'toolResult').map((m) => textOf(m.content));
+    const next = patientSteps[results.length];
+    return next ? callTools([next]) : say(results.join(' / '));
+  }),
+);
+const patientChat = pi.chat({
+  model: 'patient/patient',
+  models: patientModels,
+  tools: [
+    call(slow, 'lookup', { description: 'Look an order up', input: z.object({ order: z.string() }) }),
+    subagent(clerk, { description: 'A clerk' }),
+    workflow(slowRefund, { name: 'refund_slowly', description: 'Refund', input: z.object({ order: z.string() }) }),
+    call(slowRefund, 'run', { description: 'Refund under an id', input: z.object({ order: z.string() }) }),
+  ],
+});
+// Each attempt of its turns, counted: suspended, a turn has more than one.
+let patientAttempts = 0;
+const patientHandler = patientChat.handler;
+patientChat.handler = (ctx, text) => {
+  patientAttempts++;
+  return patientHandler(ctx, text);
+};
+const patient = sessionObject({
+  name: 'patient',
+  handlers: { chat: patientChat },
+  options: { inactivityTimeout: { milliseconds: 100 } },
+});
+
 // An agent on LangGraph, which stores a tool's result before it publishes the step: asked to audit, its
 // model (the teller) waits for a manager's approval, then reports it.
 const auditor = langgraph.agent({
@@ -129,7 +204,10 @@ const server = spawn(SERVER, ['--base-dir', dir], {
   stdio: 'ignore',
 });
 try {
-  await restate.serve({ services: [orders, refund, support, auditor, triage, hooks, signals], port: PORT });
+  await restate.serve({
+    services: [orders, refund, support, auditor, triage, hooks, signals, slow, slowRefund, clerk, patient],
+    port: PORT,
+  });
   for (
     let i = 0;
     !(await fetch(`${ADMIN}/health`).then(
@@ -433,7 +511,11 @@ try {
   assert.deepEqual(last()?.parts[0], { type: 'text', text: 'order 103: delivered / approved / refunded 103' });
   assert.ok(seen.length < 20, `${seen.length} changes`);
   // A sync that waited reads its page after the revision it returns: the
-  // change that ended its wait (here, the approval's result) is in it.
+  // change that ended its wait is in it. Here that is the signal, which
+  // ended the wait (`status` lists it no more); the approval's result is the
+  // turn's next change, in that page if the turn stored it by then, or else
+  // in a sync after it (a turn suspended while it waited resumes first): a
+  // follower syncs on from the cursor and revision it got.
   const olga = ingress.objectClient(agent('auditor'), 'olga');
   const olgas = await ingress
     .objectSendClient(agent('auditor'), 'olga')
@@ -445,8 +527,14 @@ try {
   await olga.signal({ name: 'approval', value: 'approved' });
   const synced = await syncing;
   assert.ok(synced.revision > asOf.revision, JSON.stringify(synced));
-  // (and what changed after it, if the turn went on: the next sync reads on from the cursor)
-  assert.deepEqual(lines(synced.messages)[0], ['assistant', 'audit({}): approved'], JSON.stringify(synced));
+  assert.deepEqual(synced.status.waiting, [], JSON.stringify(synced));
+  const read = [...synced.messages];
+  for (let page = synced, i = 0; !read.some((m) => m.role === 'assistant'); i++) {
+    if (i > 20) throw new Error(`the approval's result was not synced: ${JSON.stringify(read)}`);
+    page = await olga.sync({ cursor: page.cursor, revision: page.revision, timeoutSeconds: 30 });
+    read.push(...page.messages);
+  }
+  assert.deepEqual(lines(read)[0], ['assistant', 'audit({}): approved'], JSON.stringify(read));
   assert.equal(await ingress.result(olgas), 'Done: approved');
 
   // A watch with nothing new answers at its timeout, with the same revision.
@@ -465,6 +553,16 @@ try {
   assert.ok(keyed.ok, await keyed.text());
   const byKey = await fetch(`${INGRESS}/restate/invocation/support/ivy/chat/msg-1/attach`);
   assert.equal(await byKey.json(), 'order 103: delivered / approved / refunded 103');
+
+  // Tool calls that outlast the turn's inactivity timeout: each suspends the
+  // turn, and the attempt that resumes it gets the result of the call made
+  // before, a workflow's run's too (not "the workflow method was already
+  // invoked").
+  assert.equal(
+    await post('patient/zoe/chat', 'Refund order 103'),
+    'found 103 / found 104 / refunded 103 slowly / refunded 105 slowly',
+  );
+  assert.ok(patientAttempts > 4, `the turn was not suspended: ${patientAttempts} attempts`);
 
   // A handler's terminal error is the tool's answer, for the model.
   assert.equal(await post('support/dave/chat', 'Refund order 999'), 'Error: no order 999');

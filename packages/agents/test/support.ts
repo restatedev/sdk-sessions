@@ -142,6 +142,8 @@ export function sqlAttempt(
     following.closed.push(turn);
     following.revision++;
   }
+  /** The results of the invocations sends started, by their id. */
+  const sent = new Map<string, Promise<unknown>>();
   const route = (c: Made) => {
     if (c.service !== 'signals') {
       if (options.route) return options.route(made(c));
@@ -159,10 +161,25 @@ export function sqlAttempt(
       target: { service: options.object?.name ?? options.service ?? 'agent', key: options.key ?? 'k', handler: 'chat' },
     }),
     genericCall: async (c: Made) => route(c),
-    genericSend: (c: Made) => void route(c),
+    // A send's invocation: one per target and key, as a workflow's run is,
+    // whose result `attach` gets.
+    genericSend: (c: Made) => {
+      const id = `inv_${c.service}_${c.key ?? ''}`;
+      const result = Promise.resolve(route(c));
+      result.catch(() => {});
+      if (!sent.has(id)) sent.set(id, result);
+      return { invocationId: Promise.resolve(id) };
+    },
     cancellation: base.cancellation,
     cancelPreviousCalls: base.cancelPreviousCalls,
-    invocation: (id: string) => ({ cancel: () => options.cancel?.(id) }),
+    invocation: (id: string) => ({
+      cancel: () => options.cancel?.(id),
+      attach: async () => {
+        const result = sent.get(id);
+        if (result === undefined) throw new Error(`no invocation ${id} in this test`);
+        return result;
+      },
+    }),
   } as unknown as AttemptContext;
   // A chat handler's: with explicit cancellation.
   const definition = options.object;

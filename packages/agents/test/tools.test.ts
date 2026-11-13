@@ -42,7 +42,17 @@ function context(state = new Map<string, Uint8Array>()) {
       made.push({ kind: 'call', ...c });
       return c.method === 'wait' ? 'approved' : `${String(c.method)} done`;
     },
-    genericSend: (c: Record<string, unknown>) => void made.push({ kind: 'send', ...c }),
+    // A send's invocation is the workflow run's of its key, as Restate's is.
+    genericSend: (c: Record<string, unknown>) => {
+      made.push({ kind: 'send', ...c });
+      return { invocationId: Promise.resolve(`inv_${String(c.service)}_${String(c.key)}`) };
+    },
+    invocation: (id: string) => ({
+      attach: async () => {
+        made.push({ kind: 'attach', id });
+        return 'run done';
+      },
+    }),
   };
   const ctx = contextOf(sdk as unknown as AttemptContext, memoryDatabase(state));
   return { made, ctx, sdk };
@@ -119,13 +129,40 @@ describe('send', () => {
 });
 
 describe('workflow', () => {
-  it('runs a workflow of its own per tool call, to its result', async () => {
+  it('runs a workflow of its own per tool call, to its result: sent, then waited for', async () => {
     const t = workflow(refund, { description: 'Refund', input: z.object({ order: z.string() }) });
     expect(t.name).toBe('refund');
     const { result, made } = await run(t, { order: '103' });
     expect(result).toBe('run done');
+    // A send, not a call: Restate refuses a second call of a run, which a
+    // new attempt makes, and a send gets the id of the run that started.
     expect(made).toMatchObject([
-      { service: 'refund', method: 'run', key: 'alice-call_1', parameter: { order: '103' } },
+      { kind: 'send', service: 'refund', method: 'run', key: 'alice-call_1', parameter: { order: '103' } },
+      { kind: 'attach', id: 'inv_refund_alice-call_1' },
+    ]);
+    expect(made[0]?.idempotencyKey).toBeUndefined();
+  });
+
+  it('a new attempt waits for the run the first started, under the same id', async () => {
+    const t = workflow(refund, { description: 'Refund', input: z.object({ order: z.string() }) });
+    const state = new Map<string, Uint8Array>();
+    const first = context(state);
+    await t.run({ order: '103' }, { ctx: first.ctx, callId: 'call_1' });
+    const again = context(state);
+    await t.run({ order: '103' }, { ctx: again.ctx, callId: 'call_1' });
+    expect(again.made).toMatchObject([
+      { kind: 'send', key: 'alice-call_1' },
+      { kind: 'attach', id: 'inv_refund_alice-call_1' },
+    ]);
+  });
+
+  it("call of a workflow's run runs it as the workflow tool does", async () => {
+    const t = call(refund, 'run', { description: 'Refund', input: z.object({ order: z.string() }) });
+    const { result, made } = await run(t, { key: 'r1', order: '103' });
+    expect(result).toBe('run done');
+    expect(made).toMatchObject([
+      { kind: 'send', service: 'refund', method: 'run', key: 'r1', parameter: { order: '103' } },
+      { kind: 'attach', id: 'inv_refund_r1' },
     ]);
   });
 });

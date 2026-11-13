@@ -13,6 +13,7 @@ export { open, type Connection, type Store, type ConnectionTransaction } from '.
 export { PromiseSelector } from './selector.ts';
 export { needing, served } from './serve.ts';
 export {
+  attach,
   cancelCalls,
   cancelled,
   configOf,
@@ -20,6 +21,7 @@ export {
   definitionOf,
   HEAD_KEY,
   invoke,
+  start,
   withStoreWrapper,
   type AttemptContext,
 } from './object.ts';

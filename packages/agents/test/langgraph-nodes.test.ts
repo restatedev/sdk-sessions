@@ -108,8 +108,10 @@ describe('the prebuilt nodes', () => {
       },
     });
     expect(await ask('ship', 'inv_a')).toBe('result: "receipt"');
-    expect(made).toMatchObject([{ service: 'shipping', method: 'run', parameter: 'o1' }]);
-    expect(made[0]!.key).toBe(made[0]!.idempotencyKey);
+    // Sent, then waited for: a run again sends again, and waits for the run
+    // that started (Restate refuses a second call of a workflow's run).
+    expect(made).toMatchObject([{ service: 'shipping', method: 'run', parameter: 'o1', idempotencyKey: undefined }]);
+    expect(made[0]!.key).toMatch(/^langgraph:k:/);
   });
 
   it("ask another agent, on the key of this key and the node's name", async () => {

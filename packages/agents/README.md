@@ -191,7 +191,10 @@ The turn ends cancelled whenever the cancellation comes (during a model
 request too), and the agent does not go on: each framework stops its turn
 and records the cut-off tool calls as cancelled, in its own way, and the
 next message starts afresh. The calls its tools made (a wait for an
-approval, a sub-agent's task, a workflow) are cancelled with it. `chat`
+approval, a sub-agent's task) are cancelled with it; a workflow's run is
+the workflow's own, and goes on (its tool waits for the run rather than
+call it: Restate runs a workflow once per id, and refuses to call its `run`
+again, which a resumed attempt would). `chat`
 uses Restate's explicit cancellation for this (`explicitCancellation: true`,
 with `cancelled(ctx)` and `cancelCalls(ctx)` of `@restatedev/sessions/internal`).
 

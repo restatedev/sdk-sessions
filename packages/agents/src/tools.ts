@@ -6,7 +6,11 @@
 // A tool runs with the agent's context, and with the id of the model's tool
 // call: Restate calls carry an idempotency key made of the invocation id and
 // that id, so a tool call run again after a crash makes the same call, once.
+// A workflow's `run` is the exception: it runs once per workflow id, and
+// Restate refuses a second call of it whatever its idempotency key, so the
+// tool sends to it and waits for the run the send started ({@link runWorkflow}).
 import * as restate from '@restatedev/sessions';
+import { attach, start } from '@restatedev/sessions/internal';
 import { z } from 'zod';
 import { stopSignalOf, type Configure, configured, ToolError } from './common.ts';
 import { callOf } from './calls.ts';
@@ -142,18 +146,42 @@ type Target<M = unknown> =
 /** Whether a target is keyed: a virtual object (key) or a workflow (id). */
 const keyed = (target: Target) => 'object' in target || 'workflow' in target;
 
-/** Call `method` of `service`, with JSON in and out, once per tool call (see {@link ToolContext}). */
+/**
+ * Call `method` of `service`, with JSON in and out, once per tool call (see
+ * {@link ToolContext}): the call's idempotency key makes the call a new
+ * attempt makes again (after a crash, or a suspension) the one the first
+ * made, whose result it gets. A workflow's `run` runs instead ({@link runWorkflow}).
+ */
 const invoke = (
   { ctx, idempotencyKey }: ToolContext,
-  target: { service: string; method: string; key?: string; parameter: unknown },
+  target: { service: string; method: string; key?: string; parameter: unknown; workflow?: boolean },
 ) =>
-  ctx.rpc({
-    service: target.service,
-    handler: target.method,
-    key: target.key,
-    input: target.parameter,
-    idempotencyKey,
-  });
+  target.workflow && target.method === 'run'
+    ? runWorkflow(ctx, { service: target.service, key: target.key!, input: target.parameter })
+    : ctx.rpc({
+        service: target.service,
+        handler: target.method,
+        key: target.key,
+        input: target.parameter,
+        idempotencyKey,
+      });
+
+/**
+ * Run workflow `service` (its `run` handler) with id `key` and `input` to its
+ * end, and resolve to its result: a send to it, then a wait for the run the
+ * send started. A workflow's `run` runs once per id: Restate refuses a call
+ * of it once its run started, whatever the call's idempotency key, while a
+ * send to it starts nothing, and gets the id of the run that started. So a
+ * new attempt (after a crash, or a suspension while the run went on) that
+ * makes the call again waits for the run an earlier attempt started, and
+ * only the first starts one; and a fixed id that ran before gets its run's
+ * result. The run is the workflow's own, not a call of the attempt: stopping
+ * the turn does not cancel it. The Python SDK's `run_workflow`.
+ */
+export const runWorkflow = async (
+  ctx: restate.SessionContext,
+  { service, key, input }: { service: string; key: string; input: unknown },
+): Promise<unknown> => attach(ctx, await start(ctx, { service, handler: 'run', key, input }));
 
 interface TargetOptions<S extends z.ZodObject | undefined> {
   /** The tool's name, for the model; by default the handler's, such as `orders_status`. */
@@ -212,7 +240,12 @@ export const call = <M, S extends z.ZodObject | undefined = undefined>(
     input: inputOf(target, options),
     run: async (input, context) =>
       once(`${target.name}/${handler}`, input, context, async (c) =>
-        invoke(c, { service: target.name, method: handler, ...(await split(target, options, input, c.ctx)) }),
+        invoke(c, {
+          service: target.name,
+          method: handler,
+          workflow: 'workflow' in target,
+          ...(await split(target, options, input, c.ctx)),
+        }),
       ),
   });
 
@@ -241,6 +274,9 @@ export const send = <M, S extends z.ZodObject | undefined = undefined>(
  * A tool that runs the workflow `target` (its `run` handler) to the end, and
  * answers with its result. Each tool call is a workflow of its own, with an
  * id made of the agent's key and the tool call's id, unless `key` gives one.
+ * A tool call made again (after a crash, or a suspension while the workflow
+ * ran) waits for the run it started, and a `key` that ran before gets that
+ * run's result ({@link runWorkflow}).
  */
 export const workflow = <S extends z.ZodObject | undefined = undefined>(
   target: restate.WorkflowDefinition<string, { run: unknown }>,
@@ -252,11 +288,10 @@ export const workflow = <S extends z.ZodObject | undefined = undefined>(
     input: z.object(options.input?.shape ?? {}),
     run: async (input, context) =>
       once(target.name, input, context, async (c) =>
-        invoke(c, {
+        runWorkflow(c.ctx, {
           service: target.name,
-          method: 'run',
           key: options.key === undefined ? `${c.ctx.key}-${c.callId}` : await configured(options.key, c.ctx),
-          parameter: options.input ? input : undefined,
+          input: options.input ? input : undefined,
         }),
       ),
   });
