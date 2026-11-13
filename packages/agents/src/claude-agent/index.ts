@@ -51,14 +51,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   createSdkMcpServer,
+  prewarm,
   query,
   tool as mcpTool,
   type CanUseTool,
   type EffortLevel,
-  type HookCallback,
   type Options as SdkOptions,
   type Query,
   type SandboxSettings,
+  type SDKMessage,
   type SDKResultMessage,
   type SDKUserMessage,
   type SessionKey,
@@ -66,6 +67,7 @@ import {
   type SessionStoreEntry,
   type SpawnedProcess,
   type SpawnOptions,
+  type SpareProcess,
 } from '@anthropic-ai/claude-agent-sdk';
 import type { z } from 'zod';
 import {
@@ -95,7 +97,7 @@ import { conversationView } from '../messages.ts';
 import { tookSteers } from '../steering.ts';
 import { type Definition, sessionObject } from '../object.ts';
 import { type Answer, withChecked } from '../output.ts';
-import { type Tool as AnyTool, waitFor } from '../tools.ts';
+import { jsonSchemaOf, type Tool as AnyTool, waitFor } from '../tools.ts';
 import { spawnTied } from './process.ts';
 
 // The items: Claude Code's transcript, as the conversation keeps it.
@@ -235,6 +237,19 @@ const shown = (name: string) => (name.startsWith(PREFIX) ? name.slice(PREFIX.len
  */
 export const INTERRUPTED =
   "[Tool call interrupted: the session ended before this call's result was recorded, so its outcome is unknown. Check whether it took effect before relying on it or running it again.]";
+
+/** The end of the transcript `lines`, as a short text: what a resume that did not go on found. */
+const tailOf = (lines: Line[]) =>
+  lines
+    .slice(-8)
+    .map((l) => {
+      const blocks = blocksOf(l).map((b) => b.type);
+      const what = l.type === 'attachment' ? l.attachment?.type : (l as { operation?: string }).operation;
+      return [l.type, what, l.message?.stop_reason, blocks.join('+'), l.isApiErrorMessage ? 'api-error' : '']
+        .filter(Boolean)
+        .join(' ');
+    })
+    .join(' | ');
 
 /** The lines of the transcript at `subpath`, in order. */
 async function linesOf(db: DatabaseReader, subpath = ''): Promise<Line[]> {
@@ -397,6 +412,15 @@ export interface Options<O extends z.ZodObject | undefined = z.ZodObject | undef
    * (checked), and `chat` and `prompt` answer with (see output.ts).
    */
   output?: O;
+  /**
+   * Whether a Claude Code process is kept between the turns of a key (by
+   * default, for 60 s, 16 at most): the next turn of the key in this process
+   * uses it, if it holds the transcript exactly as the store has it, rather
+   * than start one (~0.4 s). `false` starts one for every turn, as on a
+   * platform that freezes a process between requests. `spares` keeps that
+   * many started for keys' first turns.
+   */
+  reuse?: false | Partial<Reuse>;
 }
 
 /** The signal that a call of Claude Code's own tools waits for, with `approval`. */
@@ -544,15 +568,333 @@ const homeOf = (ctx: restate.SessionContext) =>
     createHash('sha256').update(`${ctx.request.target.service}/${ctx.key}`).digest('hex').slice(0, 32),
   );
 
+/** How Claude Code processes are reused between the turns of a key: see {@link Options.reuse}. */
+export interface Reuse {
+  /** How long an idle process waits for its key's next turn before it is closed (default 60 s). */
+  idleMs: number;
+  /** How many idle processes this process keeps at most, the least recently used closed first (default 16). */
+  maxIdle: number;
+  /** How many started processes wait for a key's first turn, for each set of options (default 0). */
+  spares: number;
+}
+
+/** The defaults of {@link Reuse}. */
+const REUSE: Reuse = { idleMs: 60_000, maxIdle: 16, spares: 0 };
+
+/** The reuse of `options`, or none. */
+const reuseOf = (options: Options): Reuse | undefined =>
+  options.reuse === false ? undefined : { ...REUSE, ...options.reuse };
+
 /**
- * One run of a turn with Claude Code: its process, the mirror of its
- * transcript into `ctx.db` and the turn, the gate of its tool calls, and how
- * the run ends.
+ * A Claude Code process: its query and its input, and the callbacks it was
+ * started with (the store, the hooks, the tools, `canUseTool`), which reach
+ * the run that holds it now, as a process kept between turns outlives the
+ * run that started it: each run that takes it holds it (`run`), and lets go
+ * once it ends.
+ */
+class Claude {
+  /** The run that holds the process, if any: the callbacks reach it. */
+  run: Run | undefined;
+  readonly input = new Input();
+  query: Query | undefined;
+  #iterator: AsyncIterator<SDKMessage, void> | undefined;
+  #child: ChildProcess | undefined;
+  stderr = '';
+  /** The mirror's appends, one after another. */
+  appending: Promise<unknown> = Promise.resolve();
+  /** The uuid of the last line of the main transcript the process mirrored, once committed. */
+  lastUuid: string | undefined;
+  /** Whether the process is gone, or must not be used again. */
+  dead = false;
+  /** The pool's timer that closes the process once idle too long. */
+  idle: NodeJS.Timeout | undefined;
+  /** Whether it may be kept for the key's next turn: not one started to resume a cut-off turn. */
+  reusable = true;
+
+  /** A spare's parked process, until its claim. */
+  parked: SpareProcess | undefined;
+
+  fingerprint: string;
+  home: string;
+
+  constructor(fingerprint: string, home: string) {
+    this.fingerprint = fingerprint;
+    this.home = home;
+  }
+
+  /** The run that holds the process: a callback without one is a process's own, between turns, which we refuse. */
+  #held(): Run {
+    if (!this.run || this.dead) throw new Error('no turn holds this Claude Code process');
+    return this.run;
+  }
+
+  /** The next message of Claude Code's. */
+  next(): Promise<IteratorResult<SDKMessage, void>> {
+    this.#iterator ??= this.query![Symbol.asyncIterator]();
+    return this.#iterator.next();
+  }
+
+  /** The session store: the transcript in `ctx.db`, and the turn's copy of it, through the run that holds the process. */
+  readonly store: SessionStore = {
+    append: (key: SessionKey, entries: SessionStoreEntry[]) => {
+      const next = this.appending.then(() => this.#append(key, entries as Line[]));
+      this.appending = next.catch(() => {});
+      return next;
+    },
+    load: async (key: SessionKey) => {
+      const lines = await linesOf(this.#held().ctx.db, key.subpath ?? '');
+      return lines.length > 0 ? lines : null;
+    },
+    listSubkeys: async () => {
+      const rows = await this.#held().ctx.db.values(`SELECT DISTINCT subpath FROM ${ENTRIES} WHERE subpath <> ''`);
+      return rows.map(([subpath]) => String(subpath));
+    },
+  };
+
+  async #append(key: SessionKey, entries: Line[]) {
+    const run = this.run;
+    const subpath = key.subpath ?? '';
+    if (!run || run.fence.closed) {
+      // Metadata a process writes as it closes (no uuid) is nobody's; a line of the transcript nobody stores
+      // leaves the process ahead of the store: it is not used again.
+      if (entries.some((e) => e.uuid)) {
+        this.kill();
+        throw new Error('the attempt ended: nothing more is stored');
+      }
+      return;
+    }
+    await run.append(subpath, entries);
+    const last = subpath === '' ? entries.findLast((e) => e.uuid) : undefined;
+    if (last) this.lastUuid = last.uuid;
+  }
+
+  /** The hooks: each reaches the run that holds the process. */
+  readonly hooks: SdkOptions['hooks'] = {
+    PreToolUse: [{ hooks: [async (input) => this.#held().preToolUse(input)] }],
+    PostToolUse: [{ hooks: [async (input) => this.#held().postToolUse(input)] }],
+    PostToolUseFailure: [{ hooks: [async () => (this.run && (this.run.running -= 1), {})] }],
+  };
+
+  readonly canUseTool: CanUseTool = async (name, input, options) => this.#held().canUseTool(name, input, options);
+
+  /** Our tools, as an in-process MCP server: each call reaches the run that holds the process, and its tool. */
+  mcpServer(tools: readonly AnyTool[]) {
+    return createSdkMcpServer({
+      name: SERVER,
+      version: '1.0.0',
+      tools: tools.map((t) =>
+        mcpTool(t.name, t.description, t.input.shape, async (args: unknown, extra: unknown) =>
+          this.#held().callTool(t.name, args, extra),
+        ),
+      ),
+    });
+  }
+
+  /** Claude Code's process: killed at once when its run ends, tied to this process's life where it can be. */
+  readonly spawn = (options: SpawnOptions): SpawnedProcess => {
+    const child = spawnTied(options.command, options.args, {
+      cwd: options.cwd,
+      env: options.env,
+      signal: options.signal,
+    });
+    child.stderr?.on('data', (data: Buffer) => {
+      this.stderr = (this.stderr + data.toString()).slice(-4000);
+    });
+    child.once('exit', () => (this.dead = true));
+    this.#child = child;
+    return child as unknown as SpawnedProcess;
+  };
+
+  /** Kill Claude Code, at once: a process left alone would go on with its turn. */
+  kill() {
+    if (this.idle) clearTimeout(this.idle);
+    this.dead = true;
+    this.input.end();
+    try {
+      this.#child?.kill('SIGKILL');
+    } catch {
+      // gone already
+    }
+    if (this.home) void rm(this.home, { recursive: true, force: true }).catch(() => {});
+    for (const [key, kept] of idle) if (kept === this) idle.delete(key);
+  }
+}
+
+/**
+ * How many Claude Code processes this process started for turns, how many
+ * turns took a kept one instead, and how many took a spare.
+ */
+export const processes = { started: 0, reused: 0, spared: 0 };
+
+/** The idle processes, by agent and key: each holds the key's transcript as far as the store has it. */
+const idle = new Map<string, Claude>();
+
+/** The started processes that wait for a key's first turn, by the options they were started with. */
+const spares = new Map<string, Claude[]>();
+
+process.once('exit', () => {
+  for (const kept of idle.values()) kept.kill();
+  for (const list of spares.values()) for (const spare of list) spare.kill();
+});
+
+/**
+ * The idle process of `key` for a turn of `ctx`, if one can be used: started
+ * with the same options, alive, and holding the transcript exactly as the
+ * store has it (its last line the store's last, the same session). Any
+ * other is killed: another process (another replica, a crashed attempt)
+ * wrote the transcript since, or it is not what the options ask for.
+ */
+async function take(key: string, fingerprint: string, ctx: restate.SessionContext): Promise<Claude | undefined> {
+  const kept = idle.get(key);
+  if (!kept) return undefined;
+  idle.delete(key);
+  clearTimeout(kept.idle);
+  if (kept.dead || kept.fingerprint !== fingerprint) {
+    kept.kill();
+    return undefined;
+  }
+  const last = await ctx.db.get<{ uuid: string }>(
+    `SELECT uuid FROM ${ENTRIES} WHERE subpath = '' AND uuid IS NOT NULL ORDER BY seq DESC LIMIT 1`,
+  );
+  if (last?.uuid !== kept.lastUuid || kept.dead) {
+    kept.kill();
+    return undefined;
+  }
+  return kept;
+}
+
+/** Keep `claude`, idle, for the next turn of `key`: closed after `idleMs`, or as the least recently kept of `maxIdle`. */
+function keep(key: string, claude: Claude, { idleMs, maxIdle }: Reuse) {
+  idle.get(key)?.kill();
+  idle.set(key, claude);
+  claude.idle = setTimeout(() => claude.kill(), idleMs);
+  claude.idle.unref();
+  while (idle.size > maxIdle) idle.values().next().value!.kill();
+}
+
+/**
+ * The fingerprint of the options a process is started with, and is kept
+ * for: a process started with others is not used for a turn.
+ */
+const fingerprintOf = (options: Options, cwd: string | undefined, model: string | undefined) =>
+  JSON.stringify({
+    cwd,
+    model,
+    system: options.system ?? null,
+    tools: (options.tools ?? []).map((t) => [t.name, t.description, jsonSchemaOf(t)]),
+    approval: options.approval ?? false,
+    retry: options.retry ?? null,
+    effort: options.effort ?? null,
+    maxTurns: options.maxTurns ?? null,
+    sandbox: options.sandbox ?? null,
+    env: options.env ?? null,
+  });
+
+/**
+ * The options Claude Code is started with: for a turn of a key (`cwd`,
+ * `session`), or for a spare (none: its claim gives the cwd).
+ */
+function sdkOptionsOf(
+  claude: Claude,
+  options: Options,
+  { cwd, workspace, model, interrupted }: { cwd?: string; workspace: boolean; model?: string; interrupted: boolean },
+): SdkOptions {
+  const ours = (options.tools ?? []).map((t) => `${PREFIX}${t.name}`);
+  const retry = options.retry ?? {};
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    HOME: claude.home,
+    CLAUDE_CONFIG_DIR: claude.home,
+    CLAUDE_AGENT_SDK_CLIENT_APP: 'restatedev-agents',
+    CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+    DISABLE_AUTOUPDATER: '1',
+    DISABLE_TELEMETRY: '1',
+    DISABLE_ERROR_REPORTING: '1',
+    CLAUDE_CODE_MAX_RETRIES: String(retry.enabled === false ? 0 : (retry.maxRetries ?? 10)),
+    ...(interrupted
+      ? {
+          // Go on with the turn the transcript ends in, rather than wait for a prompt; however long ago it began.
+          CLAUDE_CODE_RESUME_INTERRUPTED_TURN: '1',
+          CLAUDE_CODE_RESUME_INTERRUPTED_TURN_MAX_AGE_MS: String(30 * 24 * 3_600_000),
+        }
+      : {}),
+    ...options.env,
+  };
+  const system = options.system;
+  return {
+    ...(cwd ? { cwd } : {}),
+    env,
+    settingSources: [],
+    strictMcpConfig: true,
+    persistSession: true,
+    sessionStore: claude.store,
+    sessionStoreFlush: 'eager',
+    ...(model ? { model } : {}),
+    ...(workspace
+      ? {
+          systemPrompt: {
+            type: 'preset',
+            preset: 'claude_code',
+            ...(system ? { append: system } : {}),
+            snapshot: false,
+          },
+        }
+      : system
+        ? { systemPrompt: { type: 'custom', prompt: system, snapshot: false } }
+        : {}),
+    tools: workspace ? BUILTINS : [],
+    disallowedTools: LEFT_OUT,
+    // Without `approval`: edits in the workspace (`acceptEdits`), reads and searches, and the shell, without asking.
+    allowedTools: options.approval || !workspace ? ours : [...ours, ...UNASKED],
+    ...((options.tools ?? []).length > 0 ? { mcpServers: { [SERVER]: claude.mcpServer(options.tools ?? []) } } : {}),
+    hooks: claude.hooks,
+    ...(options.approval
+      ? { permissionMode: 'default', canUseTool: claude.canUseTool }
+      : { permissionMode: 'acceptEdits', permissionPrompts: 'none' }),
+    ...(options.effort ? { effort: options.effort } : {}),
+    ...(options.maxTurns ? { maxTurns: options.maxTurns } : {}),
+    ...(options.sandbox ? { sandbox: options.sandbox } : {}),
+    spawnClaudeCodeProcess: claude.spawn,
+  };
+}
+
+/** Start spares for `options` until there are `count`, in the background. */
+function refill(fingerprint: string, options: Options, workspace: boolean, count: number) {
+  const list = spares.get(fingerprint) ?? [];
+  spares.set(fingerprint, list);
+  while (list.filter((s) => !s.dead).length < count) {
+    const spare = new Claude(fingerprint, '');
+    list.push(spare);
+    void (async () => {
+      try {
+        spare.home = await mkdtemp(join(tmpdir(), 'restate-claude-'));
+        const parked = await prewarm({ options: sdkOptionsOf(spare, options, { workspace, interrupted: false }) });
+        spare.parked = parked;
+        void parked.exited.then(() => spare.kill());
+      } catch {
+        spare.kill();
+      }
+    })();
+  }
+}
+
+/** A started spare of `fingerprint`, if one waits: taken from the spares. */
+function spareOf(fingerprint: string): Claude | undefined {
+  const list = spares.get(fingerprint) ?? [];
+  const at = list.findIndex((s) => !s.dead && s.parked !== undefined);
+  if (at < 0) return undefined;
+  return list.splice(at, 1)[0];
+}
+
+/**
+ * One run of a turn with Claude Code: the mirror of its transcript into
+ * `ctx.db` and the turn, the gate of its tool calls, its steered messages,
+ * and how it ends, with the process that holds it ({@link Claude}).
  */
 class Run {
-  readonly #ctx: restate.SessionContext;
+  readonly ctx: restate.SessionContext;
   readonly #turn: Turn<Item>;
-  readonly #options: Options;
   readonly #tools: Map<string, AnyTool>;
   /** Nothing more is stored once closed: the attempt ended, or the turn is being closed. */
   readonly fence = { closed: false };
@@ -561,8 +903,6 @@ class Run {
   /** The tool calls whose calls are committed, and the gates waiting for one. */
   readonly #committed = new Set<string>();
   readonly #gates = new Map<string, () => void>();
-  /** The mirror's appends, one after another. */
-  #appending: Promise<unknown> = Promise.resolve();
   /** Each message steered to the turn that this run gave Claude Code, by the uuid it was given. */
   readonly #steers = new Map<string, string>();
   /** The outputs our tools returned, by call id: copied as a tool call returns, before the transcript has them. */
@@ -570,20 +910,18 @@ class Run {
   /** The messages given to Claude Code that it has not queued yet, by their text: see {@link Run.#steer}. */
   readonly #queueing = new Map<string, () => void>();
   /** How many tool calls run now: a steered message is given only while one does. */
-  #running = 0;
-  #query: Query | undefined;
-  #child: ChildProcess | undefined;
-  readonly #input = new Input();
+  running = 0;
+  /** The process that holds the run. */
+  claude: Claude | undefined;
   readonly #failed = Promise.withResolvers<never>();
-  /** The last error Claude Code's assistant messages carried (an API error), and its result. */
+  /** The last error Claude Code's assistant messages carried (an API error). */
   #apiError: string | undefined;
-  #home: string | undefined;
-  #stderr = '';
+  /** The end of the transcript a resumed turn found, for its error should it not go on. */
+  tail = '';
 
   constructor(ctx: restate.SessionContext, turn: Turn<Item>, options: Options) {
-    this.#ctx = ctx;
+    this.ctx = ctx;
     this.#turn = turn;
-    this.#options = options;
     this.#tools = new Map((options.tools ?? []).map((t) => [t.name, t]));
     this.#failed.promise.catch(() => {});
   }
@@ -591,51 +929,28 @@ class Run {
   /** Fail the run, and the attempt: nothing more is stored, the process is killed. */
   fail(error: unknown): Promise<never> {
     this.fence.closed = true;
-    this.kill();
+    this.claude?.kill();
     this.#failed.reject(error);
     return new Promise<never>(() => {});
   }
 
-  /** Kill Claude Code, at once: a process left alone would go on with the turn. */
-  kill() {
-    this.#input.end();
-    try {
-      this.#child?.kill('SIGKILL');
-    } catch {
-      // gone already
-    }
+  /** The end of the attempt: nothing more is stored, and the process goes; the next attempt goes on with the turn. */
+  ended() {
+    this.fence.closed = true;
+    this.claude?.kill();
   }
 
   // The mirror.
 
-  /** The session store: the transcript in `ctx.db`, and the turn's copy of it, in one transaction. */
-  readonly store: SessionStore = {
-    append: (key: SessionKey, entries: SessionStoreEntry[]) => {
-      const next = this.#appending.then(() => this.#append(key, entries));
-      this.#appending = next.catch(() => {});
-      return next;
-    },
-    load: async (key: SessionKey) => {
-      const lines = await linesOf(this.#ctx.db, key.subpath ?? '');
-      return lines.length > 0 ? lines : null;
-    },
-    listSubkeys: async () => {
-      const rows = await this.#ctx.db.values(`SELECT DISTINCT subpath FROM ${ENTRIES} WHERE subpath <> ''`);
-      return rows.map(([subpath]) => String(subpath));
-    },
-  };
-
-  async #append(key: SessionKey, entries: SessionStoreEntry[]) {
-    // A run that ended stores nothing more: its process is being killed.
-    if (this.fence.closed) throw new Error('the attempt ended: nothing more is stored');
-    const subpath = key.subpath ?? '';
+  /** Store `entries`, lines of the transcript at `subpath`, and copy what is new of the turn, in one transaction. */
+  async append(subpath: string, entries: Line[]) {
     const turn = this.#turn;
     let steps = false;
     const calls: string[] = [];
     try {
-      await this.#ctx.db.transaction(async (tx) => {
+      await this.ctx.db.transaction(async (tx) => {
         const fresh: Line[] = [];
-        for (const entry of entries as Line[]) {
+        for (const entry of entries) {
           // A line Claude Code mirrors again (a retried batch) is stored once, by its uuid.
           if (
             entry.uuid &&
@@ -651,11 +966,16 @@ class Run {
           fresh.push(entry);
           for (const block of blocksOf(entry)) if (block.type === 'tool_use' && block.id) calls.push(block.id);
         }
+        // The session's id, as Claude Code names it (a spare's is its own), once.
+        const session = fresh.map((e) => e.sessionId).find((id): id is string => typeof id === 'string');
+        if (subpath === '' && session) {
+          await tx.execute(`INSERT OR IGNORE INTO ${SESSION} (row, session) VALUES (0, ?)`, [session]);
+        }
         if (subpath !== '' || this.#stopping || !turn.writable) return;
         const copied = newItems(fresh, turn, this.#steers);
         if (copied.length === 0 || !(await turn.copyIn(tx, copied))) return;
         tookSteers(
-          this.#ctx,
+          this.ctx,
           tx,
           copied.flatMap(({ steer }) => (steer === undefined ? [] : [steer])),
         );
@@ -682,7 +1002,7 @@ class Run {
   }
 
   /** Wait until tool call `id` is committed: a tool runs only once its call is stored. */
-  #gate = async (id: string) => {
+  async #gate(id: string) {
     if (this.#committed.has(id)) return;
     const committed = new Promise<void>((resolve) => this.#gates.set(id, resolve));
     let timer: NodeJS.Timeout | undefined;
@@ -699,16 +1019,16 @@ class Run {
     } finally {
       clearTimeout(timer);
     }
-  };
+  }
 
   // The hooks and tools.
 
-  readonly #preToolUse: HookCallback = async (input) => {
+  async preToolUse(input: unknown) {
     const { tool_use_id: id } = input as { tool_use_id: string };
     await this.#gate(id);
-    this.#running += 1;
+    this.running += 1;
     return {};
-  };
+  }
 
   /**
    * A tool call returned: in a turn that takes steered messages, its result
@@ -716,27 +1036,27 @@ class Run {
    * the turn since is given to Claude Code, which places it at its next step,
    * after the round's results. Claude Code awaits this before it goes on.
    */
-  readonly #postToolUse: HookCallback = async (input) => {
-    this.#running -= 1;
+  async postToolUse(input: unknown) {
+    this.running -= 1;
     const { tool_use_id: id } = input as { tool_use_id: string };
-    if (!inboxOf(this.#ctx) || this.fence.closed || this.#stopping) return {};
+    if (!inboxOf(this.ctx) || this.fence.closed || this.#stopping) return {};
     try {
       const output = this.#returned.get(id);
       const name = this.#turn.openCalls().find((c) => c.id === id)?.name;
       let copied = false;
       if (output !== undefined && name !== undefined && this.#turn.writable) {
-        copied = await this.#ctx.db.transaction((tx) =>
+        copied = await this.ctx.db.transaction((tx) =>
           this.#turn.copyIn(tx, [{ item: { type: 'results', results: [{ id, name, output }], from: `result:${id}` } }]),
         );
       }
       if (copied) await this.#turn.stepsCommitted();
-      else await publish(this.#ctx);
+      else await publish(this.ctx);
       await this.#steer();
     } catch (error) {
       await this.fail(error);
     }
     return {};
-  };
+  }
 
   /**
    * Give Claude Code each message steered to the turn that it has not been
@@ -746,8 +1066,8 @@ class Run {
    * later, or else answered as a turn of its own.
    */
   async #steer() {
-    const inbox = inboxOf(this.#ctx);
-    if (!inbox || this.#stopping || this.fence.closed || stopSignalOf(this.#ctx)?.aborted) return;
+    const inbox = inboxOf(this.ctx);
+    if (!inbox || this.#stopping || this.fence.closed || stopSignalOf(this.ctx)?.aborted) return;
     const held = new Set(this.#turn.steered().map((e) => e.steer));
     const given = new Set(this.#steers.values());
     const queued: Promise<void>[] = [];
@@ -756,7 +1076,7 @@ class Run {
       const uuid = uuidOf(`steer:${id}`);
       this.#steers.set(uuid, id);
       queued.push(new Promise<void>((resolve) => this.#queueing.set(text, resolve)));
-      this.#input.push(said(text, uuid, 'next'));
+      this.claude?.input.push(said(text, uuid, 'next'));
     }
     if (queued.length === 0) return;
     let timer: NodeJS.Timeout | undefined;
@@ -764,30 +1084,30 @@ class Run {
     clearTimeout(timer);
   }
 
-  /** A tool of ours, as an in-process MCP tool of Claude Code's. */
-  #mcpTool(t: AnyTool) {
-    return mcpTool(t.name, t.description, t.input.shape, async (args: unknown, extra: unknown) => {
-      const meta = (extra as Record<string, Record<string, unknown> | undefined>)[META];
-      const id = meta?.['claudecode/toolUseId'];
-      const callId = typeof id === 'string' ? id : '';
-      try {
-        await toolCallStarted(this.#ctx);
-        const output = await t.run(args, { ctx: this.#ctx, callId });
-        this.#returned.set(callId, output);
-        return { content: [{ type: 'text' as const, text: output }] };
-      } catch (error) {
-        // A tool's error fails the attempt (a terminal one is its answer, which `tool()` gives); the next resumes the turn.
-        return this.fail(error);
-      }
-    });
+  /** A call of our tool `name`, from Claude Code's MCP server. */
+  async callTool(name: string, args: unknown, extra: unknown) {
+    const meta = (extra as Record<string, Record<string, unknown> | undefined>)[META];
+    const id = meta?.['claudecode/toolUseId'];
+    const callId = typeof id === 'string' ? id : '';
+    try {
+      const t = this.#tools.get(name);
+      if (!t) throw new Error(`no tool ${name} in this turn`);
+      await toolCallStarted(this.ctx);
+      const output = await t.run(args, { ctx: this.ctx, callId });
+      this.#returned.set(callId, output);
+      return { content: [{ type: 'text' as const, text: output }] };
+    } catch (error) {
+      // A tool's error fails the attempt (a terminal one is its answer, which `tool()` gives); the next resumes the turn.
+      return this.fail(error);
+    }
   }
 
   /** Each call of Claude Code's own tools waits for a person's approval (`approval`). */
-  readonly #canUseTool: CanUseTool = async (name, input, { toolUseID, title, decisionReason }) => {
+  readonly canUseTool: CanUseTool = async (name, input, { toolUseID, title, decisionReason }) => {
     let value: unknown;
     try {
       value = await waitFor(
-        this.#ctx,
+        this.ctx,
         toolUseID,
         APPROVAL,
         { tool: name, input, ...(title ? { title } : {}), ...(decisionReason ? { reason: decisionReason } : {}) },
@@ -804,143 +1124,37 @@ class Run {
     };
   };
 
-  // The process.
-
-  /** Claude Code's process, killed at once when the run ends: tied to this process's life, where it can be. */
-  readonly #spawn = (options: SpawnOptions): SpawnedProcess => {
-    const child = spawnTied(options.command, options.args, {
-      cwd: options.cwd,
-      env: options.env,
-      signal: options.signal,
-    });
-    child.stderr?.on('data', (data: Buffer) => {
-      this.#stderr = (this.#stderr + data.toString()).slice(-4000);
-    });
-    this.#child = child;
-    return child as unknown as SpawnedProcess;
-  };
-
-  /**
-   * Run the turn: submit `prompt` (or, with `resume`, go on with the turn
-   * Claude Code was cut off in), and answer once Claude Code ends its turn.
-   */
-  async run({
-    prompt,
-    session,
-    resumes,
-    interrupted,
-  }: {
-    prompt?: SDKUserMessage;
-    session: string;
-    resumes: boolean;
-    interrupted: boolean;
-  }) {
-    const ctx = this.#ctx;
-    const options = this.#options;
-    const where = typeof options.workspace === 'function' ? await options.workspace(ctx) : options.workspace;
-    const cwd = where ?? homeOf(ctx);
-    await mkdir(cwd, { recursive: true });
-    this.#home = await mkdtemp(join(tmpdir(), 'restate-claude-'));
-    const ours = (options.tools ?? []).map((t) => `${PREFIX}${t.name}`);
-    const builtins = where !== undefined ? BUILTINS : [];
-    const retry = options.retry ?? {};
-    const model = modelOf(options.model);
-    const env: Record<string, string | undefined> = {
-      ...process.env,
-      HOME: this.#home,
-      CLAUDE_CONFIG_DIR: this.#home,
-      CLAUDE_AGENT_SDK_CLIENT_APP: 'restatedev-agents',
-      CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',
-      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
-      DISABLE_AUTOUPDATER: '1',
-      DISABLE_TELEMETRY: '1',
-      DISABLE_ERROR_REPORTING: '1',
-      CLAUDE_CODE_MAX_RETRIES: String(retry.enabled === false ? 0 : (retry.maxRetries ?? 10)),
-      ...(interrupted
-        ? {
-            // Go on with the turn the transcript ends in, rather than wait for a prompt; however long ago it began.
-            CLAUDE_CODE_RESUME_INTERRUPTED_TURN: '1',
-            CLAUDE_CODE_RESUME_INTERRUPTED_TURN_MAX_AGE_MS: String(30 * 24 * 3_600_000),
-          }
-        : {}),
-      ...options.env,
-    };
-    const system = options.system;
-    const sdkOptions: SdkOptions = {
-      cwd,
-      env,
-      settingSources: [],
-      strictMcpConfig: true,
-      persistSession: true,
-      sessionStore: this.store,
-      sessionStoreFlush: 'eager',
-      ...(resumes ? { resume: session } : { sessionId: session }),
-      ...(model ? { model } : {}),
-      ...(where !== undefined
-        ? {
-            systemPrompt: {
-              type: 'preset',
-              preset: 'claude_code',
-              ...(system ? { append: system } : {}),
-              snapshot: false,
-            },
-          }
-        : system
-          ? { systemPrompt: { type: 'custom', prompt: system, snapshot: false } }
-          : {}),
-      tools: builtins,
-      disallowedTools: LEFT_OUT,
-      // Without `approval`: edits in the workspace (`acceptEdits`), reads and searches, and the shell, without asking.
-      allowedTools: options.approval || where === undefined ? ours : [...ours, ...UNASKED],
-      ...(this.#tools.size > 0
-        ? {
-            mcpServers: {
-              [SERVER]: createSdkMcpServer({
-                name: SERVER,
-                version: '1.0.0',
-                tools: [...this.#tools.values()].map((t) => this.#mcpTool(t)),
-              }),
-            },
-          }
-        : {}),
-      hooks: {
-        PreToolUse: [{ hooks: [this.#preToolUse] }],
-        PostToolUse: [{ hooks: [this.#postToolUse] }],
-        PostToolUseFailure: [{ hooks: [async () => ((this.#running -= 1), {})] }],
-      },
-      ...(options.approval
-        ? { permissionMode: 'default', canUseTool: this.#canUseTool }
-        : { permissionMode: 'acceptEdits', permissionPrompts: 'none' }),
-      ...(options.effort ? { effort: options.effort } : {}),
-      ...(options.maxTurns ? { maxTurns: options.maxTurns } : {}),
-      ...(options.sandbox ? { sandbox: options.sandbox } : {}),
-      spawnClaudeCodeProcess: this.#spawn,
-    };
-    if (prompt) this.#input.push(prompt);
-    const q = query({ prompt: this.#input, options: sdkOptions });
-    this.#query = q;
-    return Promise.race([this.#answer(q, model, interrupted), this.#failed.promise]);
+  /** Run the turn on `claude`, which holds it: `prompt` given (unless the turn goes on without one), until its result. */
+  async run(claude: Claude, prompt: SDKUserMessage | undefined, model: string | undefined, interrupted: boolean) {
+    this.claude = claude;
+    claude.run = this;
+    if (prompt) claude.input.push(prompt);
+    return Promise.race([this.#answer(claude, model, interrupted), this.#failed.promise]);
   }
 
   /** Read Claude Code's messages until it ends its turn: its answer, or why it gave none. */
-  async #answer(q: Query, model: string | undefined, interrupted: boolean): Promise<string> {
-    let idle: NodeJS.Timeout | undefined;
+  async #answer(claude: Claude, model: string | undefined, interrupted: boolean): Promise<string> {
+    let idleTimer: NodeJS.Timeout | undefined;
     const busy = () => {
-      clearTimeout(idle);
-      idle = undefined;
+      clearTimeout(idleTimer);
+      idleTimer = undefined;
     };
     if (interrupted) {
       // A resumed turn starts at once: one that does nothing, Claude Code did not resume.
-      idle = setTimeout(
+      idleTimer = setTimeout(
         () =>
           void this.fail(
-            new Error(`the resumed turn did not go on within ${IDLE_MS / 1000} s: ${this.#stderr.slice(-500)}`),
+            new Error(
+              `the resumed turn did not go on within ${IDLE_MS / 1000} s (the transcript ends: ${this.tail}): ${claude.stderr.slice(-500)}`,
+            ),
           ),
         IDLE_MS,
       );
     }
     try {
-      for await (const message of q) {
+      for (;;) {
+        const { value: message, done } = await claude.next();
+        if (done) break;
         if (message.type === 'assistant') {
           busy();
           if (message.error && !message.parent_tool_use_id) this.#apiError = message.error;
@@ -949,30 +1163,29 @@ class Run {
           // Refused for good (a wrong key): Claude Code would ask again, for minutes.
           if (REFUSALS.has(message.error)) throw refused(message.error, model);
         } else if (message.type === 'result') {
-          this.#input.end();
-          return await this.#ended(message, model);
+          return await this.#ended(claude, message, model);
         }
       }
     } catch (error) {
       if (this.fence.closed) return new Promise<never>(() => {});
       if (error instanceof restate.TerminalError) throw error;
-      throw new Error(`Claude Code failed: ${String(error)} ${this.#stderr.slice(-500)}`, { cause: error });
+      throw new Error(`Claude Code failed: ${String(error)} ${claude.stderr.slice(-500)}`, { cause: error });
     } finally {
       busy();
     }
     if (this.fence.closed) return new Promise<never>(() => {});
-    throw new Error(`Claude Code ended without a result: ${this.#stderr.slice(-500)}`);
+    throw new Error(`Claude Code ended without a result: ${claude.stderr.slice(-500)}`);
   }
 
   /** The answer of Claude Code's turn, which ended with `result`. */
-  async #ended(result: SDKResultMessage, model: string | undefined) {
+  async #ended(claude: Claude, result: SDKResultMessage, model: string | undefined) {
     if (this.#stopping) return new Promise<never>(() => {});
     if (result.subtype === 'success' && !result.is_error) {
       // The final reply's lines reach the mirror around the result: the turn answers with what it stored.
-      await this.#appending;
+      await claude.appending;
       for (let waited = 0; this.#turn.finalReply() === undefined && waited < 5_000; waited += 20) {
         await new Promise((resolve) => setTimeout(resolve, 20));
-        await this.#appending;
+        await claude.appending;
       }
       return this.#turn.finalReply() ?? result.result;
     }
@@ -999,22 +1212,17 @@ class Run {
    */
   async close(status: string) {
     this.#stopping = true;
-    if (status === 'cancelled' && this.#query && !this.fence.closed) {
+    const claude = this.claude;
+    if (status === 'cancelled' && claude?.query && !this.fence.closed) {
       const done = (async () => {
-        await this.#query!.interrupt().catch(() => {});
-        await this.#appending;
+        await claude.query!.interrupt().catch(() => {});
+        await claude.appending;
       })();
       await Promise.race([done, new Promise((resolve) => setTimeout(resolve, STOP_MS))]);
     }
-    await this.#appending;
+    await claude?.appending;
     this.fence.closed = true;
-    this.kill();
-  }
-
-  /** Clean up: the process killed, its config directory removed. */
-  async end() {
-    this.kill();
-    if (this.#home) await rm(this.#home, { recursive: true, force: true }).catch(() => {});
+    claude?.kill();
   }
 
   /**
@@ -1025,7 +1233,7 @@ class Run {
    * Claude Code's own tools gets Claude Code's note, as it gives one.
    */
   async closeCutOff(session: string, ask: string) {
-    const ctx = this.#ctx;
+    const ctx = this.ctx;
     const lines = await linesOf(ctx.db);
     const { calls, last, lastReply } = cutOff(lines, ask);
     if (calls.length === 0 || !last?.uuid) return;
@@ -1089,6 +1297,70 @@ export interface ClaudeAgentSession {
   prompt: (text: string, check?: Check, reminder?: string) => Promise<string>;
 }
 
+/**
+ * The Claude Code process for a turn of `ctx`: the key's idle one if it
+ * holds the store's transcript, else a spare for a key's first turn, else a
+ * new one, which resumes the transcript (`resume`) or starts the session.
+ */
+async function claudeFor(
+  ctx: restate.SessionContext,
+  options: Options,
+  run: Run,
+  {
+    session,
+    resumes,
+    interrupted,
+    cwd,
+    workspace,
+    model,
+    fresh,
+  }: {
+    session: string;
+    resumes: boolean;
+    interrupted: boolean;
+    cwd: string;
+    workspace: boolean;
+    model: string | undefined;
+    fresh: boolean;
+  },
+): Promise<{ claude: Claude; claimed?: SpareProcess }> {
+  const reuse = reuseOf(options);
+  const key = `${ctx.request.target.service}/${ctx.key}`;
+  const fingerprint = fingerprintOf(options, cwd, model);
+  if (reuse && !interrupted) {
+    const kept = await take(key, fingerprint, ctx);
+    if (kept) {
+      processes.reused += 1;
+      return { claude: kept };
+    }
+    const spareKey = fingerprintOf(options, workspace ? 'workspace' : undefined, undefined);
+    if (reuse.spares > 0) {
+      const spare = fresh ? spareOf(spareKey) : undefined;
+      refill(spareKey, options, workspace, reuse.spares);
+      if (spare) {
+        // Kept, once it answered, for the key's next turns, as a process started for them is.
+        spare.fingerprint = fingerprint;
+        processes.spared += 1;
+        return { claude: spare, claimed: spare.parked };
+      }
+    }
+  }
+  const claude = new Claude(fingerprint, await mkdtemp(join(tmpdir(), 'restate-claude-')));
+  claude.reusable = !interrupted;
+  processes.started += 1;
+  // Held from its start: a resumed process loads the transcript through the run's `ctx.db`.
+  claude.run = run;
+  run.claude = claude;
+  claude.query = query({
+    prompt: claude.input,
+    options: {
+      ...sdkOptionsOf(claude, options, { cwd, workspace, model, interrupted }),
+      ...(resumes ? { resume: session } : { sessionId: session }),
+    },
+  });
+  return { claude };
+}
+
 /** Run the turn of `conversation` with Claude Code, with `options`. */
 const runOf = (ctx: restate.SessionContext, options: Options) => async (conversation: Conversation<Item>) => {
   const turn = conversation.turn;
@@ -1099,39 +1371,72 @@ const runOf = (ctx: restate.SessionContext, options: Options) => async (conversa
   const again = ask !== turn.prompt;
   const askUuid = uuidOf(`${again ? 'again' : 'prompt'}:${turn.id}`);
   const known = await sessionOf(ctx.db);
-  const session = known ?? uuidOf(`session:${turn.id}`);
-  if (!known) await ctx.db.execute(`INSERT OR REPLACE INTO ${SESSION} (row, session) VALUES (0, ?)`, [session]);
   const resumes = (await ctx.db.get(`SELECT 1 AS one FROM ${ENTRIES} WHERE subpath = '' LIMIT 1`)) !== undefined;
   // Whether the transcript has this ask: then Claude Code was cut off in this turn, and goes on with it.
   const interrupted =
     resumes &&
     (await ctx.db.get(`SELECT 1 AS one FROM ${ENTRIES} WHERE subpath = '' AND uuid = ?`, [askUuid])) !== undefined;
+  const where = typeof options.workspace === 'function' ? await options.workspace(ctx) : options.workspace;
+  const cwd = where ?? homeOf(ctx);
+  await mkdir(cwd, { recursive: true });
+  const model = modelOf(options.model);
   const run = new Run(ctx, turn, options);
   live.set(turn, (status) => run.close(status));
   const stop = stopSignalOf(ctx);
+  // An attempt that ends stores nothing more, and its process goes: the next goes on with the turn.
   const onStop = () => {
-    // An attempt that ends stores nothing more, and its process goes: the next goes on with the turn.
-    if (stop?.reason instanceof AttemptEnded) {
-      run.fence.closed = true;
-      run.kill();
-    }
+    if (stop?.reason instanceof AttemptEnded) run.ended();
   };
   stop?.addEventListener('abort', onStop, { once: true });
+  let claude: Claude | undefined;
+  let answered = false;
   try {
+    // A session that has a transcript resumes it; a new one's id is the first turn's (or a spare's own).
+    const fresh = known === undefined && !resumes;
+    const session = known ?? uuidOf(`session:${turn.id}`);
     if (interrupted) {
       await run.closeCutOff(session, askUuid);
-      return await run.run({ session, resumes, interrupted });
+      run.tail = tailOf(await linesOf(ctx.db));
     }
-    const text = items.read(ask.item).said?.[1] ?? '';
-    // The model is told how the turn before this one ended, if its run did not answer it.
-    const before = conversation.transcript.at(-2);
-    const note = !again && before ? await noteOf(ctx, before) : '';
-    const asked = note + text + (again ? '' : (turn.reminder ?? ''));
-    return await run.run({ prompt: said(asked, askUuid), session, resumes, interrupted });
+    let prompt: SDKUserMessage | undefined;
+    if (!interrupted) {
+      const text = items.read(ask.item).said?.[1] ?? '';
+      // The model is told how the turn before this one ended, if its run did not answer it.
+      const before = conversation.transcript.at(-2);
+      const note = !again && before ? await noteOf(ctx, before) : '';
+      prompt = said(note + text + (again ? '' : (turn.reminder ?? '')), askUuid);
+    }
+    const started = await claudeFor(ctx, options, run, {
+      session,
+      resumes,
+      interrupted,
+      cwd,
+      workspace: where !== undefined,
+      model,
+      fresh,
+    });
+    claude = started.claude;
+    if (started.claimed) {
+      // A spare: the claim starts the session, under an id of Claude Code's own (stored with its first lines).
+      claude.query = started.claimed.claim({ prompt: claude.input, options: { cwd, ...(model ? { model } : {}) } });
+    } else if (!known) {
+      await ctx.db.execute(`INSERT OR IGNORE INTO ${SESSION} (row, session) VALUES (0, ?)`, [session]);
+    }
+    const answer = await run.run(claude, prompt, model, interrupted);
+    answered = true;
+    return answer;
   } finally {
     stop?.removeEventListener('abort', onStop);
     live.delete(turn);
-    await run.end();
+    if (claude) {
+      claude.run = undefined;
+      const reuse = reuseOf(options);
+      // Kept for the key's next turn only once it answered, every line it wrote stored.
+      if (answered && reuse && claude.reusable && !claude.dead && !run.fence.closed) {
+        await claude.appending;
+        if (!claude.dead) keep(`${ctx.request.target.service}/${ctx.key}`, claude, reuse);
+      } else claude.kill();
+    }
   }
 };
 

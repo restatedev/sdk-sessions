@@ -901,6 +901,12 @@ first phase; what it found that the code rests on is below.
   own record of the stop in the transcript), and the turn closes cancelled.
   An attempt that ends kills the process (SIGKILL; on Linux it is also tied
   to the handler's process, `setpriv --pdeathsig`).
+- **Process reuse**: a process is kept, idle, after a turn it answered, for
+  the key's next turn in the same deployment process (60 s, 16 at most);
+  the next turn takes it only if its last mirrored line is the store's last
+  (else another process wrote the transcript since: it is killed, and the
+  turn resumes from the store), with its callbacks rebound to the new
+  turn's `ctx`. `reuse: false` starts one per turn.
 - **Errors**: a request refused for good (a wrong key, an unknown model) is
   424 at the first retry Claude Code would make; an outage is Claude Code's
   to retry (`CLAUDE_CODE_MAX_RETRIES`), then the attempt fails and the next

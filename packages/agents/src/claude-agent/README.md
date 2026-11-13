@@ -132,6 +132,40 @@ Claude Code's "interrupted" note, the model makes it again under a new id,
 and the call, with the same tool and input, joins the wait. The person is
 asked once, and the tool runs once, after the decision.
 
+## Process reuse
+
+Starting Claude Code takes about 0.4 s before its first model request; the
+next message on a process already open, about 20 to 50 ms. So a process is
+kept, idle, once its turn is answered, for the key's next turn in the same
+deployment process (Restate runs one turn of a key at a time). It is only a
+cache: the transcript in `ctx.db` stays what Claude Code is resumed from,
+and a turn takes a kept process only if it holds the transcript exactly as
+the store has it, its last line the store's last, and was started with the
+same options. Otherwise the process is killed and the turn starts its own,
+which resumes the transcript from the store: so a key whose turns move
+between deployment processes (replicas, a serverless platform) is answered
+as without reuse, and correctly, one start per move.
+
+- A process's callbacks (our tools, the hooks, `canUseTool`, the store) are
+  fixed at its start: each reaches the turn that holds the process now,
+  with that turn's `ctx`.
+- A process is kept only after a turn it answered, every line it wrote
+  stored. One whose attempt ended mid-turn (suspended, its connection lost,
+  killed, a crash), or whose turn was stopped, failed or refused, is killed:
+  the next attempt resumes the turn in a process of its own.
+- An idle process is closed after `idleMs` (60 s), and the least recently
+  used past `maxIdle` (16): each holds about 200 MB.
+- `spares` (0 by default) keeps that many processes started, for keys'
+  first turns, so that those do not wait for a start either. A spare cannot
+  resume a session (Claude Code's `prewarm`), so it only serves a key with
+  none yet; its session's id is Claude Code's, stored with its first lines.
+- `reuse: false` starts a process for every turn: for a platform that
+  freezes a process between requests (AWS Lambda, say), where an idle Claude
+  Code would be frozen too.
+
+`claudeAgent.processes` counts the processes started for turns, the turns
+that took a kept one, and those that took a spare.
+
 ## Not yet
 
 - Claude Code's subagents and background work (`Agent`, `Workflow`,

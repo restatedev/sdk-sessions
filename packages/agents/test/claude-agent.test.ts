@@ -21,7 +21,6 @@ import { callOf } from '../src/calls.ts';
 import { CANCELLED, ENDED, REFUSED, RETURNED_UNRECORDED } from '../src/common.ts';
 import { STEPS } from '../src/conversation.ts';
 import { bank } from './bank.ts';
-import { prompt } from './claude-agent.ts';
 import { tied } from '../src/claude-agent/process.ts';
 import type Anthropic from '@anthropic-ai/sdk';
 import { HttpError, script, startTeller, teller, tellerEnv } from './fakes/claude-agent.ts';
@@ -69,12 +68,26 @@ const rawTexts = () =>
     ),
   );
 
+/** Each suite with Claude Code's processes kept between turns (the default), and with one for every turn. */
+const REUSES: { name: string; reuse: false | undefined }[] = [
+  { name: 'processes kept', reuse: undefined },
+  { name: 'a process per turn', reuse: false },
+];
+
+/** The bank agent's handler (./claude-agent.ts), with `reuse`. */
+const bankChat = (reuse: false | undefined) =>
+  claudeAgent.chat({
+    system: 'You keep the books of a bank, with your tools. Answer briefly.',
+    tools: bank('ClaudeCodeAgent'),
+    reuse,
+  });
+
 /** Whether a request went on with a turn without a prompt: Claude Code's "Continue". */
 const continued = () => rawTexts().some((t) => t === 'Continue from where you left off.');
 
-describe('the Claude Code agent', () => {
+describe.each(REUSES)('the Claude Code agent ($name)', ({ reuse }) => {
   it('answers a message once: a retried attempt of an answered prompt starts nothing', async () => {
-    const c = conversation(prompt, 'once');
+    const c = conversation(bankChat(reuse), 'once');
     const first = await c.attempt('inv1', 'Please move 5 from 1 to 2');
     expect(first).toBe('Done: moved 5 from account 1 to account 2');
     const asked = script.requests.length;
@@ -86,7 +99,7 @@ describe('the Claude Code agent', () => {
   }, 60_000);
 
   it('resumes a crashed attempt in its tool call: the call made again under its id, the transfer once', async () => {
-    const c = conversation(prompt, 'crash');
+    const c = conversation(bankChat(reuse), 'crash');
     const input = 'Please move 7 from 3 to 4';
     await c.crash('inv1', input);
     expect(await c.attempt('inv1', input)).toBe('Done: moved 7 from account 3 to account 4');
@@ -100,7 +113,7 @@ describe('the Claude Code agent', () => {
   }, 60_000);
 
   it('resumes a turn crashed twice in a row in the same tool call: the stored result keeps the transcript whole', async () => {
-    const c = conversation(prompt, 'twice');
+    const c = conversation(bankChat(reuse), 'twice');
     const input = 'Please move 3 from 1 to 5';
     await c.crash('inv1', input);
     await c.crash('inv1', input);
@@ -111,7 +124,7 @@ describe('the Claude Code agent', () => {
   }, 90_000);
 
   it('resumes a turn however many attempts crash', async () => {
-    const c = conversation(prompt, 'crashes');
+    const c = conversation(bankChat(reuse), 'crashes');
     const input = 'Please move 4 from 2 to 3';
     for (let n = 0; n < 5; n++) await c.crash('inv1', input);
     expect(await c.attempt('inv1', input)).toBe('Done: moved 4 from account 2 to account 3');
@@ -119,7 +132,7 @@ describe('the Claude Code agent', () => {
   }, 120_000);
 
   it('closes a killed turn by the next message: never finished, the note told to the model', async () => {
-    const c = conversation(prompt, 'dead');
+    const c = conversation(bankChat(reuse), 'dead');
     await c.crash('inv1', 'Please move 1 from 0 to 1');
     expect(await c.attempt('inv2', 'Please move 2 from 0 to 1')).toBe('Done: moved 2 from account 0 to account 1');
     // The dead turn's transfer was not made again under the new invocation.
@@ -136,6 +149,31 @@ describe('the Claude Code agent', () => {
     expect(c.ledger.transfers.size).toBe(2);
   }, 60_000);
 
+  it('resumes a turn that crashed after a killed one: the killed turn closed, the crashed one answered', async () => {
+    const c = conversation(bankChat(reuse), 'dead-then-crash');
+    await c.crash('inv1', 'Please move 1 from 0 to 1');
+    await c.crash('inv2', 'Please move 2 from 0 to 1');
+    expect(await c.attempt('inv2', 'Please move 2 from 0 to 1')).toBe('Done: moved 2 from account 0 to account 1');
+    expect(c.ledger.transfers.size).toBe(2);
+    expect(await c.attempt('inv3', 'audit the books')).toMatch(/^Done: .*"transfers":2/);
+  }, 60_000);
+
+  it('answers after a turn killed at any of its state requests, the next crashed in its transfer', async () => {
+    const wrong: string[] = [];
+    for (let n = 1; n < 400; n += Number(process.env.CRASH_STRIDE ?? 5)) {
+      const c = conversation(bankChat(reuse), `killed-at-${n}`);
+      // Killed at its nth state request: never retried.
+      if ((await c.attempt('inv1', 'Please move 1 from 0 to 1', n)) !== 'crashed') break;
+      await c.crash('inv2', 'Please move 2 from 0 to 1');
+      const answer = await Promise.race([
+        c.attempt('inv2', 'Please move 2 from 0 to 1'),
+        new Promise((resolve) => setTimeout(() => resolve('no answer'), 15_000)),
+      ]).catch((error: unknown) => String(error));
+      if (answer !== 'Done: moved 2 from account 0 to account 1') wrong.push(`${n}: ${String(answer)}`);
+    }
+    expect(wrong).toEqual([]);
+  }, 600_000);
+
   it('tells the model which calls of a killed turn did happen', async () => {
     const returned = Promise.withResolvers<void>();
     const transfer = tool({
@@ -148,7 +186,7 @@ describe('the Claude Code agent', () => {
         return new Promise<never>(() => {});
       },
     });
-    const chat = handlerOf(claudeAgent.chat({ tools: [transfer] }));
+    const chat = handlerOf(claudeAgent.chat({ reuse, tools: [transfer] }));
     const map = new Map<string, Uint8Array>();
     const fence = { closed: false };
     const first = sqlAttempt({ map, fence, key: 'happened', id: 'inv1' });
@@ -167,7 +205,7 @@ describe('the Claude Code agent', () => {
   }, 60_000);
 
   it("closes a killed turn on its companion's `settle`, without Claude Code", async () => {
-    const c = conversation(prompt, 'settled');
+    const c = conversation(bankChat(reuse), 'settled');
     await c.crash('inv1', 'Please move 1 from 0 to 1');
     const agent = claudeAgent.agent({ name: 'ClaudeCodeAgent', tools: bank('ClaudeCodeAgent') });
     const map = c.state as Map<string, Uint8Array>;
@@ -192,14 +230,14 @@ describe('the Claude Code agent', () => {
   }, 60_000);
 
   it('answers with the stored final reply after a crash at the end of the turn, without the model', async () => {
-    const c = conversation(prompt, 'final');
+    const c = conversation(bankChat(reuse), 'final');
     // Crash after the final reply is stored, before the answer is: at the turn's last state requests.
     let crashAt = 0;
-    const full = conversation(prompt, 'final-count');
+    const full = conversation(bankChat(reuse), 'final-count');
     await full.attempt('inv1', 'Hello');
     // Count the state requests of a whole turn.
     for (let n = 1; ; n++) {
-      const probe = conversation(prompt, `final-probe-${n}`);
+      const probe = conversation(bankChat(reuse), `final-probe-${n}`);
       if ((await probe.attempt('inv1', 'Hello', n)) !== 'crashed') {
         crashAt = n - 1;
         break;
@@ -214,7 +252,7 @@ describe('the Claude Code agent', () => {
 
   it('closes a stopped turn cancelled, and answers the next message afresh with the note', async () => {
     const { failed, answer, parts } = await afterCancel(
-      claudeAgent.chat({ tools: [cancelledTransfer] }),
+      claudeAgent.chat({ reuse, tools: [cancelledTransfer] }),
       claudeAgent.messages(),
     );
     expect(failed).toBeInstanceOf(restate.CancelledError);
@@ -240,7 +278,7 @@ describe('the Claude Code agent', () => {
   }, 60_000);
 
   it('ends a turn cancelled while a tool works: Claude Code interrupted, no model request', async () => {
-    const now = await cancelledWhileWorking((tools) => claudeAgent.chat({ tools }), claudeAgent.messages());
+    const now = await cancelledWhileWorking((tools) => claudeAgent.chat({ reuse, tools }), claudeAgent.messages());
     expect(now.failed).toBeInstanceOf(restate.CancelledError);
     expect(now.answer).toMatch(/^Ask me/);
     expect(now.parts[1]).toMatchObject([
@@ -252,7 +290,7 @@ describe('the Claude Code agent', () => {
   }, 60_000);
 
   it('goes on with a turn whose attempt ended while a tool worked: the next attempt resumes it', async () => {
-    const { failed, closed, answer } = await endedWhileWorking((tools) => claudeAgent.chat({ tools }));
+    const { failed, closed, answer } = await endedWhileWorking((tools) => claudeAgent.chat({ reuse, tools }));
     expect(failed).toBeDefined();
     expect(failed).not.toBeInstanceOf(restate.CancelledError);
     expect(closed).toEqual([]);
@@ -260,7 +298,7 @@ describe('the Claude Code agent', () => {
   }, 60_000);
 
   it('answers arguments that do not fit a tool with what is wrong, for the model to fix', async () => {
-    const { answer, ran } = await invalidArguments((tools) => claudeAgent.chat({ tools }));
+    const { answer, ran } = await invalidArguments((tools) => claudeAgent.chat({ reuse, tools }));
     expect(answer).toMatch(/error/i);
     expect(answer).toMatch(/amount/);
     expect(ran).toBe(false);
@@ -268,7 +306,7 @@ describe('the Claude Code agent', () => {
 
   it('publishes the conversation as a turn starts, once its reply is stored, once its result is, and as it ends', async () => {
     const { answer, parts, published, outputs } = await followedWhileWorking(
-      (tools) => claudeAgent.chat({ tools }),
+      (tools) => claudeAgent.chat({ reuse, tools }),
       claudeAgent.messages(),
     );
     expect(answer).toBe('Done: moved 5 from account 1 to account 2');
@@ -292,7 +330,7 @@ describe('the Claude Code agent', () => {
   }, 60_000);
 
   it('gives the conversation from the store: what was said, in order, with the tool calls', async () => {
-    const c = conversation(prompt, 'm');
+    const c = conversation(bankChat(reuse), 'm');
     await c.attempt('inv1', 'Please move 5 from 1 to 2');
     await c.attempt('inv2', 'audit the books');
     expect(await c.read(claudeAgent.messages(), {})).toEqual({
@@ -303,7 +341,7 @@ describe('the Claude Code agent', () => {
   }, 60_000);
 
   it('forgets the conversation on `clear`, the transcript too: a new session', async () => {
-    const c = conversation(prompt, 'clear');
+    const c = conversation(bankChat(reuse), 'clear');
     await c.attempt('inv1', 'Please move 5 from 1 to 2');
     const agent = claudeAgent.agent({ name: 'ClaudeCodeAgent', tools: bank('ClaudeCodeAgent') });
     const map = c.state as Map<string, Uint8Array>;
@@ -323,7 +361,7 @@ describe('the Claude Code agent', () => {
       return reply(text.startsWith('Your reply is not the answer') ? '{"n":1}' : 'one');
     };
     const c = conversation(
-      claudeAgent.chat({ output: z.object({ n: z.number() }) }) as unknown as PromptHandler,
+      claudeAgent.chat({ reuse, output: z.object({ n: z.number() }) }) as unknown as PromptHandler,
       'output',
     );
     expect(await c.attempt('inv1', 'How many?')).toEqual({ n: 1 });
@@ -334,15 +372,18 @@ describe('the Claude Code agent', () => {
   }, 60_000);
 
   it('gives the model its system prompt', async () => {
-    const c = conversation(claudeAgent.chat({ system: 'You are Ada.' }), 'ada');
+    const c = conversation(claudeAgent.chat({ reuse, system: 'You are Ada.' }), 'ada');
     await c.attempt('inv1', 'Who are you?');
     expect(JSON.stringify(script.requests.at(-1)!.body.system)).toContain('You are Ada.');
   }, 60_000);
 
   it('passes the model, without `anthropic/`, and none by default', async () => {
-    await conversation(claudeAgent.chat({ model: 'anthropic/claude-haiku-5-5' }), 'model').attempt('inv1', 'Hello');
+    await conversation(claudeAgent.chat({ reuse, model: 'anthropic/claude-haiku-5-5' }), 'model').attempt(
+      'inv1',
+      'Hello',
+    );
     expect(script.requests.at(-1)!.body.model).toBe('claude-haiku-5-5');
-    await conversation(claudeAgent.chat(), 'nomodel').attempt('inv1', 'Hello');
+    await conversation(claudeAgent.chat({ reuse }), 'nomodel').attempt('inv1', 'Hello');
     expect(script.requests.at(-1)!.body.model).toMatch(/^claude-/);
   }, 60_000);
 });
@@ -362,12 +403,12 @@ const reply = (text: string): Message =>
     usage: { input_tokens: 0, output_tokens: 0 },
   }) as Message;
 
-describe("the Claude Code agent's model provider", () => {
+describe.each(REUSES)("the Claude Code agent's model provider ($name)", ({ reuse }) => {
   it('fails a prompt its provider refuses (a wrong key) with 424 at once, and closes its turn', async () => {
     script.reply = () => {
       throw new HttpError(401, 'authentication_error', 'invalid x-api-key');
     };
-    const c = conversation(prompt, 'refused');
+    const c = conversation(bankChat(reuse), 'refused');
     const failed = await c.attempt('inv1', 'Hello').then(
       () => undefined,
       (error: unknown) => error,
@@ -384,7 +425,7 @@ describe("the Claude Code agent's model provider", () => {
     script.reply = () => {
       throw new HttpError(404, 'not_found_error', 'model: claude-nope');
     };
-    const failed = await conversation(prompt, 'nomodel')
+    const failed = await conversation(bankChat(reuse), 'nomodel')
       .attempt('inv1', 'Hello')
       .then(
         () => undefined,
@@ -399,7 +440,7 @@ describe("the Claude Code agent's model provider", () => {
       if (n++ < 2) throw new HttpError(529, 'overloaded_error', 'overloaded');
       return teller(request);
     };
-    expect(await conversation(prompt, 'outage').attempt('inv1', 'Hello')).toMatch(/^Ask me/);
+    expect(await conversation(bankChat(reuse), 'outage').attempt('inv1', 'Hello')).toMatch(/^Ask me/);
   }, 60_000);
 
   it('fails the attempt past the retries Claude Code makes, and the next attempt resumes the turn', async () => {
@@ -408,7 +449,10 @@ describe("the Claude Code agent's model provider", () => {
       if (down) throw new HttpError(500, 'api_error', 'boom');
       return teller(request);
     };
-    const c = conversation(claudeAgent.chat({ tools: bank('ClaudeCodeAgent'), retry: { maxRetries: 0 } }), 'past');
+    const c = conversation(
+      claudeAgent.chat({ reuse, tools: bank('ClaudeCodeAgent'), retry: { maxRetries: 0 } }),
+      'past',
+    );
     const failed = await c.attempt('inv1', 'Hello').then(
       () => undefined,
       (error: unknown) => error,
@@ -427,7 +471,7 @@ describe("the Claude Code agent's model provider", () => {
         stop_reason: 'refusal',
         stop_details: { type: 'refusal', category: 'cyber', explanation: 'no' },
       }) as never;
-    const failed = await conversation(prompt, 'declined')
+    const failed = await conversation(bankChat(reuse), 'declined')
       .attempt('inv1', 'Hello')
       .then(
         () => undefined,
@@ -447,7 +491,7 @@ describe("the Claude Code agent's model provider", () => {
       };
       return ask as never;
     };
-    const failed = await conversation(claudeAgent.chat({ tools: bank('ClaudeCodeAgent'), maxTurns: 2 }), 'turns')
+    const failed = await conversation(claudeAgent.chat({ reuse, tools: bank('ClaudeCodeAgent'), maxTurns: 2 }), 'turns')
       .attempt('inv1', 'audit, forever')
       .then(
         () => undefined,
@@ -458,7 +502,7 @@ describe("the Claude Code agent's model provider", () => {
   }, 60_000);
 });
 
-describe('the Claude Code agent, its tool calls', () => {
+describe.each(REUSES)('the Claude Code agent, its tool calls ($name)', ({ reuse }) => {
   it('runs a tool only once its call is stored: the turn has it as the tool starts', async () => {
     const seen: unknown[] = [];
     const transfer = tool({
@@ -471,7 +515,7 @@ describe('the Claude Code agent, its tool calls', () => {
         return 'moved 5 from account 1 to account 2';
       },
     });
-    const c = conversation(claudeAgent.chat({ tools: [transfer] }), 'gate');
+    const c = conversation(claudeAgent.chat({ reuse, tools: [transfer] }), 'gate');
     expect(await c.attempt('inv1', 'Please move 5 from 1 to 2')).toBe('Done: moved 5 from account 1 to account 2');
     expect(seen).toEqual([true]);
   }, 60_000);
@@ -491,7 +535,7 @@ describe('the Claude Code agent, its tool calls', () => {
     const fence = { closed: false };
     const first = sqlAttempt({ map, fence, key: 'killed', id: 'inv1' });
     void first
-      .end(() => handlerOf(claudeAgent.chat({ tools: [transfer] }))(first.ctx, 'Please move 5 from 1 to 2'))
+      .end(() => handlerOf(claudeAgent.chat({ reuse, tools: [transfer] }))(first.ctx, 'Please move 5 from 1 to 2'))
       .catch(() => {});
     await started.promise;
     const asked = script.requests.length;
@@ -504,15 +548,15 @@ describe('the Claude Code agent, its tool calls', () => {
 
   it('answers a message once after a crash at any of its state requests', async () => {
     expect(
-      await crashedAnywhere(prompt, claudeAgent.messages(), { stride: Number(process.env.CRASH_STRIDE ?? 5) }),
+      await crashedAnywhere(bankChat(reuse), claudeAgent.messages(), { stride: Number(process.env.CRASH_STRIDE ?? 5) }),
     ).toEqual([]);
   }, 600_000);
 });
 
-describe('the Claude Code agent, steered', () => {
+describe.each(REUSES)('the Claude Code agent, steered ($name)', ({ reuse }) => {
   it('takes a message steered while a tool runs at its next step: the model audits, the message stored once', async () => {
     const { answer, taken, said } = await steeredAtAStep(
-      (tools) => claudeAgent.chat({ tools }),
+      (tools) => claudeAgent.chat({ reuse, tools }),
       claudeAgent.messages(),
     );
     expect(answer).toBe('Done: the books are fine');
@@ -528,7 +572,7 @@ describe('the Claude Code agent, steered', () => {
 
   it('retries a turn that failed after it took the message, with the message, once', async () => {
     const { answer, failed, audits, taken, said } = await steeredAtAStep(
-      (tools) => claudeAgent.chat({ tools }),
+      (tools) => claudeAgent.chat({ reuse, tools }),
       claudeAgent.messages(),
       { failAudit: true },
     );
@@ -540,7 +584,7 @@ describe('the Claude Code agent, steered', () => {
   }, 60_000);
 
   it('takes no message steered once the tools are done: a turn of its own answers it', async () => {
-    const c = conversation(prompt, 'late');
+    const c = conversation(bankChat(reuse), 'late');
     const following = followingOf(c.state);
     script.reply = (request) => {
       const last = request.messages.at(-1)!;
@@ -576,11 +620,11 @@ const writes = (file: string) => (request: Parameters<typeof teller>[0]) => {
   } as never;
 };
 
-describe("the Claude Code agent's workspace and permissions", () => {
+describe.each(REUSES)("the Claude Code agent's workspace and permissions ($name)", ({ reuse }) => {
   it("runs Claude Code's own tools in the workspace without asking", async () => {
     const workspace = await mkdtemp(join(tmpdir(), 'ws-'));
     script.reply = writes(join(workspace, 'a.txt'));
-    const answer = await conversation(claudeAgent.chat({ workspace }), 'ws').attempt('inv1', 'Write it');
+    const answer = await conversation(claudeAgent.chat({ reuse, workspace }), 'ws').attempt('inv1', 'Write it');
     expect(answer).toMatch(/File created/);
     expect(existsSync(join(workspace, 'a.txt'))).toBe(true);
   }, 60_000);
@@ -589,7 +633,7 @@ describe("the Claude Code agent's workspace and permissions", () => {
     const workspace = await mkdtemp(join(tmpdir(), 'ws-'));
     const outside = join(await mkdtemp(join(tmpdir(), 'out-')), 'b.txt');
     script.reply = writes(outside);
-    const answer = await conversation(claudeAgent.chat({ workspace }), 'ws-out').attempt('inv1', 'Write it');
+    const answer = await conversation(claudeAgent.chat({ reuse, workspace }), 'ws-out').attempt('inv1', 'Write it');
     expect(existsSync(outside)).toBe(false);
     expect(answer).toMatch(/Done/);
   }, 60_000);
@@ -597,13 +641,13 @@ describe("the Claude Code agent's workspace and permissions", () => {
   it('with `approval`, runs a call once a person approved it, and never one denied', async () => {
     const workspace = await mkdtemp(join(tmpdir(), 'ws-'));
     script.reply = writes(join(workspace, 'c.txt'));
-    const c = conversation(claudeAgent.chat({ workspace, approval: true }), 'approved');
+    const c = conversation(claudeAgent.chat({ reuse, workspace, approval: true }), 'approved');
     c.signals.answer = () => 'approved';
     expect(await c.attempt('inv1', 'Write it')).toMatch(/File created/);
     expect(c.signals.waits).toMatchObject([{ name: claudeAgent.APPROVAL, input: { tool: 'Write' } }]);
     expect(existsSync(join(workspace, 'c.txt'))).toBe(true);
     script.reply = writes(join(workspace, 'd.txt'));
-    const d = conversation(claudeAgent.chat({ workspace, approval: true }), 'denied');
+    const d = conversation(claudeAgent.chat({ reuse, workspace, approval: true }), 'denied');
     d.signals.answer = () => 'no, not now';
     expect(await d.attempt('inv1', 'Write it')).toMatch(/denied tool \\"Write\\": no, not now/);
     expect(existsSync(join(workspace, 'd.txt'))).toBe(false);
@@ -613,7 +657,7 @@ describe("the Claude Code agent's workspace and permissions", () => {
     const workspace = await mkdtemp(join(tmpdir(), 'ws-'));
     const file = join(workspace, 'e.txt');
     script.reply = writes(file);
-    const c = conversation(claudeAgent.chat({ workspace, approval: true }), 'rejoin');
+    const c = conversation(claudeAgent.chat({ reuse, workspace, approval: true }), 'rejoin');
     const before: boolean[] = [];
     const asked = Promise.withResolvers<void>();
     c.signals.answer = async () => {
@@ -667,4 +711,72 @@ describe.skipIf(!tied)("Claude Code's process, tied to the handler's", () => {
     for (let i = 0; i < 100 && alive(pid); i++) await new Promise((resolve) => setTimeout(resolve, 20));
     expect(alive(pid)).toBe(false);
   }, 30_000);
+});
+
+describe("Claude Code's processes, kept between the turns of a key", () => {
+  it('answers the next turn of a key with the process it kept: none started', async () => {
+    const c = conversation(bankChat(undefined), 'kept');
+    const { started, reused } = { ...claudeAgent.processes };
+    expect(await c.attempt('inv1', 'Please move 5 from 1 to 2')).toBe('Done: moved 5 from account 1 to account 2');
+    expect(await c.attempt('inv2', 'audit the books')).toMatch(/^Done: .*"transfers":1/);
+    expect(claudeAgent.processes.started - started).toBe(1);
+    expect(claudeAgent.processes.reused - reused).toBe(1);
+    // The model saw the whole conversation, as from a resumed transcript.
+    expect(userTexts()).toEqual(['Please move 5 from 1 to 2', 'audit the books']);
+  }, 60_000);
+
+  it('starts a process for every turn with `reuse: false`', async () => {
+    const c = conversation(bankChat(false), 'unkept');
+    const { started, reused } = { ...claudeAgent.processes };
+    await c.attempt('inv1', 'Please move 5 from 1 to 2');
+    await c.attempt('inv2', 'audit the books');
+    expect(claudeAgent.processes.started - started).toBe(2);
+    expect(claudeAgent.processes.reused - reused).toBe(0);
+  }, 60_000);
+
+  it('never uses a kept process that another got ahead of (another replica): it resumes from the store', async () => {
+    const c = conversation(bankChat(undefined), 'split');
+    await c.attempt('inv1', 'Please move 5 from 1 to 2');
+    // Another replica (here, a process per turn, outside the pool) answers the next turn of the key.
+    const elsewhere = conversation(bankChat(false), 'split', { state: c.state, ledger: c.ledger });
+    await elsewhere.attempt('inv2', 'Please move 2 from 3 to 4');
+    // Back here: the kept process has not seen that turn, so it is not used.
+    const back = conversation(bankChat(undefined), 'split', { state: elsewhere.state, ledger: elsewhere.ledger });
+    const { started, reused } = { ...claudeAgent.processes };
+    expect(await back.attempt('inv3', 'audit the books')).toMatch(/^Done: .*"transfers":2/);
+    expect(claudeAgent.processes.reused - reused).toBe(0);
+    expect(claudeAgent.processes.started - started).toBe(1);
+    expect(userTexts()).toEqual(['Please move 5 from 1 to 2', 'Please move 2 from 3 to 4', 'audit the books']);
+  }, 60_000);
+
+  it('drops a process whose turn crashed: the next attempt resumes the turn in a process of its own', async () => {
+    const c = conversation(bankChat(undefined), 'dropped');
+    await c.attempt('inv1', 'Hello');
+    const { started, reused } = { ...claudeAgent.processes };
+    await c.crash('inv2', 'Please move 7 from 3 to 4');
+    expect(await c.attempt('inv2', 'Please move 7 from 3 to 4')).toBe('Done: moved 7 from account 3 to account 4');
+    // The crashed attempt took the kept process; its retry started one, to resume the turn.
+    expect(claudeAgent.processes.reused - reused).toBe(1);
+    expect(claudeAgent.processes.started - started).toBe(1);
+    expect(c.ledger.transfers.size).toBe(1);
+  }, 60_000);
+
+  it("answers a key's first turn with a spare started for it, then keeps it", async () => {
+    const chat = claudeAgent.chat({ tools: bank('ClaudeCodeAgent'), reuse: { spares: 1 } });
+    // The first turn of a first key starts a process, and a spare; the first turn of a next key takes it, once started.
+    await conversation(chat, 'spare-0').attempt('inv1', 'Hello');
+    let c = conversation(chat, 'spare-1');
+    const { spared } = claudeAgent.processes;
+    for (let i = 2; claudeAgent.processes.spared === spared && i < 100; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      c = conversation(chat, `spare-${i}`);
+      await c.attempt('inv1', 'Please move 5 from 1 to 2');
+    }
+    expect(claudeAgent.processes.spared - spared).toBe(1);
+    expect(c.ledger.transfers.size).toBe(1);
+    // Its next turn resumes the session the spare started, in the kept process.
+    const { reused } = claudeAgent.processes;
+    expect(await c.attempt('inv2', 'audit the books')).toMatch(/^Done: .*"transfers":1/);
+    expect(claudeAgent.processes.reused - reused).toBe(1);
+  }, 60_000);
 });

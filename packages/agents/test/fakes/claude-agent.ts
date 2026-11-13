@@ -69,9 +69,13 @@ export const script: {
 /** The teller's own reply, for a test's `reply` to fall back on. */
 export const teller = (request: Request) => tellerReply(request.messages);
 
-/** `message`, its tools named as Claude Code offered them (`transfer` as `mcp__restate__transfer`). */
+/** How many replies the teller made: each reply's id is its own, as the API's are. */
+let replies = 0;
+
+/** `message`, its tools named as Claude Code offered them (`transfer` as `mcp__restate__transfer`), with an id of its own. */
 const named = (message: Message, tools: { name: string }[] = []): Message => ({
   ...message,
+  id: `msg_teller_${++replies}`,
   content: message.content.map((c) =>
     c.type === 'tool_use'
       ? { ...c, name: tools.find((t) => t.name === c.name || t.name.endsWith(`__${c.name}`))?.name ?? c.name }
