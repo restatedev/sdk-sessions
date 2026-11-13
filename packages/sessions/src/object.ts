@@ -16,8 +16,8 @@
 //     },
 //   });
 import * as restate from '@restatedev/restate-sdk';
-import type { VirtualObjectDefinition } from '@restatedev/restate-sdk-core';
-import { type Rpc, rpcOf, type Send, sendOf } from './calls.ts';
+import type { Serde, VirtualObjectDefinition } from '@restatedev/restate-sdk-core';
+import { type CallOptions, type Rpc, rpcOf, type Send, sendOf, type Target } from './calls.ts';
 import type { DatabaseReader, Store } from './database.ts';
 import { ensureOf, ensuring, Schema, type Step } from './schema.ts';
 import { Link } from './link.ts';
@@ -371,10 +371,58 @@ export function sessionObject<
   return made;
 }
 
-/** The SDK's context behind `ctx`, a handler's with `explicitCancellation: true`. */
-function explicitOf(ctx: SessionContext, of: string) {
+/** The scope of `ctx`, a session object's handler's context. */
+function scopeOfHandler(ctx: SessionContext, of: string) {
   const scope = scopeOf(ctx);
   if (scope === undefined) throw new restate.TerminalError(`${of} takes a session object's ctx`);
+  return scope;
+}
+
+/**
+ * Call `target`, and resolve to the id of the call's invocation (`inv_1f…`),
+ * not waiting for its result: for a library that waits for it by
+ * {@link attach}. It is a call, not a send: a handler with
+ * `explicitCancellation` whose `cancelCalls` cancels the calls of its
+ * attempt cancels this one too, as a send's would not be.
+ *
+ * Its result is left as it comes. A call of a workflow's `run` whose run of
+ * that id started already fails ("the workflow method was already
+ * invoked"), whatever its idempotency key, but its invocation id is that
+ * run's: so a new attempt that calls again gets the id of the run an
+ * earlier one started, and its `cancelCalls` cancels that run.
+ */
+export async function start(ctx: SessionContext, target: Target & CallOptions): Promise<string> {
+  const { service, key, handler, input, inputSerde, idempotencyKey, headers } = target;
+  const called = scopeOfHandler(ctx, 'start').sdk.genericCall({
+    service,
+    method: handler,
+    key,
+    parameter: input,
+    inputSerde: inputSerde ?? restate.serde.json,
+    outputSerde: restate.serde.binary,
+    idempotencyKey,
+    headers,
+  });
+  return String(await called.invocationId);
+}
+
+/**
+ * The result of invocation `invocationId` (such as {@link start}'s), once it
+ * ends: its output, or its terminal error. Waiting for it cancels nothing
+ * when the attempt ends: the invocation is its own.
+ */
+export function attach<O = unknown>(
+  ctx: SessionContext,
+  invocationId: string,
+  outputSerde: Serde<O> = restate.serde.json as Serde<O>,
+): Promise<O> {
+  const { sdk } = scopeOfHandler(ctx, 'attach');
+  return sdk.invocation(restate.InvocationIdParser.fromString(invocationId)).attach(outputSerde);
+}
+
+/** The SDK's context behind `ctx`, a handler's with `explicitCancellation: true`. */
+function explicitOf(ctx: SessionContext, of: string) {
+  const scope = scopeOfHandler(ctx, of);
   if (!scope.explicitCancellation) {
     throw new restate.TerminalError(`${of} takes the ctx of a handler with explicitCancellation: true`);
   }

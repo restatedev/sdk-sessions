@@ -142,6 +142,8 @@ export function sqlAttempt(
     following.closed.push(turn);
     following.revision++;
   }
+  /** The results of the invocations calls started, by their id. */
+  const sent = new Map<string, Promise<unknown>>();
   const route = (c: Made) => {
     if (!c.service.endsWith(COMPANION_SUFFIX)) {
       if (options.route) return options.route(made(c));
@@ -160,11 +162,26 @@ export function sqlAttempt(
   const sdk = {
     key,
     request: () => ({ ...base.request(), target: { service, key, handler: 'chat' } }),
-    genericCall: async (c: Made) => route(c),
+    // A call's invocation: one per target and key, as a workflow's run is,
+    // whose result `attach` gets.
+    genericCall: (c: Made) => {
+      const id = `inv_${c.service}_${c.key ?? ''}`;
+      const result = (async () => route(c))();
+      result.catch(() => {});
+      if (!sent.has(id)) sent.set(id, result);
+      return Object.assign(result, { invocationId: Promise.resolve(id) });
+    },
     genericSend: (c: Made) => void route(c),
     cancellation: base.cancellation,
     cancelPreviousCalls: base.cancelPreviousCalls,
-    invocation: (id: string) => ({ cancel: () => options.cancel?.(id) }),
+    invocation: (id: string) => ({
+      cancel: () => options.cancel?.(id),
+      attach: async () => {
+        const result = sent.get(id);
+        if (result === undefined) throw new Error(`no invocation ${id} in this test`);
+        return result;
+      },
+    }),
   } as unknown as AttemptContext;
   // A chat handler's: with explicit cancellation. An object of its own is the test's; else one with a companion.
   const definition = options.object ?? withCompanion({ name: service });
