@@ -394,6 +394,11 @@ function explicitOf(ctx: SessionContext, of: string) {
  * got nothing for the inactivity timeout), a cancellation resolves this at
  * the handler's next await of Restate's, which suspends the invocation and
  * resumes it at once, or not at all if it awaits nothing more.
+ *
+ * So it is not a way to park a handler until it is cancelled. One that
+ * awaits this and nothing else is not suspended: its attempt stays open past
+ * the inactivity timeout, Restate aborts it at the abort timeout and retries
+ * it from the start, and so on until the cancellation comes.
  */
 export const cancelled = async (ctx: SessionContext): Promise<void> => {
   await explicitOf(ctx, 'cancelled').cancellation();
