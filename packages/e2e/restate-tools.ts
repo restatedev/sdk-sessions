@@ -184,10 +184,7 @@ try {
   // ingress refuses the companion's handlers (clients ask the agent's views).
   const services = ((await (await fetch(`${ADMIN}/services`)).json()) as { services: { name: string }[] }).services;
   const names = services.map((s) => s.name);
-  assert.ok(
-    names.includes('support.prebuilt.restate') && names.includes('auditor.prebuilt.restate'),
-    names.join(', '),
-  );
+  assert.ok(names.includes('support.prebuilt.restate') && names.includes('auditor.prebuilt.restate'), names.join(', '));
   assert.ok(!names.includes('signals'), names.join(', '));
   const companionKeys = await fetch(`${ADMIN}/query`, {
     method: 'POST',

@@ -456,9 +456,7 @@ describe('the companion of each agent', () => {
       'status',
       'notifications',
     ]);
-    expect(new Set(companions.map((m) => `${m.service}/${m.key}`))).toEqual(
-      new Set(['one.prebuilt.restate/alice']),
-    );
+    expect(new Set(companions.map((m) => `${m.service}/${m.key}`))).toEqual(new Set(['one.prebuilt.restate/alice']));
     expect(a.made.some((m) => m.service.startsWith('two'))).toBe(false);
     // The other agent's turn, at the same key: its own companion, which the first one's turn never called.
     expect(b.made).toEqual([]);
