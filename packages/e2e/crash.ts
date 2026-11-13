@@ -64,6 +64,7 @@ import type { Audit } from '@restatedev/sessions/test/ledger';
 import type { Order, Reservation } from '@restatedev/sessions/test/shop';
 import { seeded, seedFromEnv } from '@restatedev/sessions/test/random';
 import { RESTATE_SERVER as SERVER } from './restate-server.ts';
+import { assertNoneSuspendedOnCancellationAlone } from './suspensions.ts';
 
 const INGRESS = 'http://127.0.0.1:8080';
 const ADMIN = 'http://127.0.0.1:9070';
@@ -1031,6 +1032,8 @@ console.error(`ledger: ${JSON.stringify(audit)}`);
 PROCESSES.forEach((p, i) => console.error(`${p.name} process started ${starts[i]} times`));
 PROCESSES.forEach((p, i) => assert.ok(p.perMille === 0 || (starts[i] ?? 0) > 1, `no abort happened in ${p.name}`));
 
+// Whatever the turns and transfers waited for, none was suspended on its cancel signal alone.
+console.error(`suspensions: ${await assertNoneSuspendedOnCancellationAlone(ADMIN)}`);
 await Promise.all(services.map((s) => s.stop()));
 proxies.forEach((p) => p.close());
 server.kill('SIGKILL');

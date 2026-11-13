@@ -8,6 +8,7 @@
   "scripts": {
     "crash": "node crash.ts",
     "concurrency": "node concurrency.ts",
+    "suspension": "node suspension.ts",
     "versions": "node versions.ts",
     "tools": "node restate-tools.ts",
     "steering": "node steering.ts",
