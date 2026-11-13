@@ -22,6 +22,7 @@ import { mkdtempSync, openSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RESTATE_SERVER as SERVER } from './restate-server.ts';
+import { assertNoneSuspendedOnCancellationAlone } from './suspensions.ts';
 
 const INGRESS = 'http://127.0.0.1:8080';
 const ADMIN = 'http://127.0.0.1:9070';
@@ -68,7 +69,7 @@ const ended = new Map<string, number>();
  * `watch`; then await what `after` says.
  */
 const work =
-  (watch: boolean) =>
+  (watch: boolean, { reads = true } = {}) =>
   async (ctx: restate.SessionContext, { ms, after, pending, once }: Work): Promise<Outcome> => {
     const id = ctx.request.id;
     const n = (attempts.get(id) ?? 0) + 1;
@@ -76,7 +77,7 @@ const work =
     ctx.request.attemptCompletedSignal.addEventListener('abort', () => ended.set(id, (ended.get(id) ?? 0) + 1));
     const call = (tag: string, callMs: number) => ctx.rpc(helper, { idempotencyKey: `${id}:${tag}` }).slow(callMs);
     // The session's own read of its database first: from here on, the watch is all the handler awaits of Restate's.
-    await ctx.db.values('SELECT 1');
+    if (reads) await ctx.db.values('SELECT 1');
     const watched = watch ? cancelled(ctx).then(() => true) : new Promise<boolean>(() => {});
     if (pending !== undefined) void call('pending', pending).catch(() => {});
     let stopped = await Promise.race([watched, sleep(once && n > 1 ? 0 : ms).then(() => false)]);
@@ -94,6 +95,65 @@ const probe = restate.sessionObject({
     // Aborted by Restate half a second after its input closed.
     watchingAborted: { ...explicit, abortTimeout: 500, handler: work(true) },
     plainAborted: { ...explicit, abortTimeout: 500, handler: work(false) },
+  },
+});
+
+/** What a stepper does: `steps` steps of `ms` of work outside Restate, each committed. */
+interface Steps {
+  steps: number;
+  ms: number;
+}
+
+/**
+ * A handler as an agent's turn is one: steps of work outside Restate, each
+ * committed, and every attempt goes on from what is committed. With `watch`,
+ * its cancellation stops it between two steps.
+ */
+const steps =
+  (watch: boolean) =>
+  async (ctx: restate.SessionContext, { steps: wanted, ms }: Steps): Promise<Outcome & { steps: number }> => {
+    const id = ctx.request.id;
+    attempts.set(id, (attempts.get(id) ?? 0) + 1);
+    const watched = watch ? cancelled(ctx).then(() => true) : new Promise<boolean>(() => {});
+    for (;;) {
+      const done = (await ctx.db.get<{ n: number }>('SELECT count(*) AS n FROM steps'))!.n;
+      if (done >= wanted) return { stopped: false, attempts: attempts.get(id)!, steps: done };
+      if (await Promise.race([watched, sleep(ms).then(() => false)])) {
+        return { stopped: true, attempts: attempts.get(id)!, steps: done };
+      }
+      await ctx.db.execute('INSERT INTO steps VALUES (?)', [done]);
+    }
+  };
+
+// The inactivity timeouts the steppers run with (SUSPENSION_TIMEOUTS=20,150 for others): each step outlasts
+// its timeout, so every commit finds the input closed, and suspends the attempt. Not 0 (see `watchingZero`), nor
+// less than a round trip to Restate takes: Restate would close the input while it answers a statement's sync,
+// every attempt would be suspended at its first statement, and start over.
+const TIMEOUTS = (process.env.SUSPENSION_TIMEOUTS ?? `150,${INACTIVITY}`).split(',').map(Number);
+const stepper = restate.sessionObject({
+  name: 'Stepper',
+  schema: ['CREATE TABLE steps (i INTEGER PRIMARY KEY)'],
+  handlers: {
+    // Any invocation of a key makes its database: a request-response invocation needs it there (its head is
+    // sent with the invocation only once it exists; a lazy read of it would suspend every attempt).
+    warm: async (ctx: restate.SessionContext) => {
+      await ctx.db.values('SELECT 1');
+    },
+    // No inactivity timeout: a request-response invocation, its input closed from the start, which suspends at
+    // every await of Restate's. A session cannot use its database so (each statement awaits Restate, and a
+    // suspension is a restart: Restate's request-response deployments are not supported), but one that only
+    // works, and watches for its cancellation, awaits nothing: it must answer.
+    watchingZero: { ...explicit, inactivityTimeout: 0, handler: work(true, { reads: false }) },
+    plainZero: { ...explicit, inactivityTimeout: 0, handler: work(false, { reads: false }) },
+    ...Object.fromEntries(
+      TIMEOUTS.flatMap((timeout) => [
+        [`watching${timeout}`, { ...explicit, inactivityTimeout: timeout, handler: steps(true) }],
+        [`plain${timeout}`, { ...explicit, inactivityTimeout: timeout, handler: steps(false) }],
+      ]),
+    ),
+  },
+  views: {
+    count: async (ctx: restate.ViewContext) => (await ctx.db.get<{ n: number }>('SELECT count(*) AS n FROM steps'))!.n,
   },
 });
 
@@ -131,7 +191,7 @@ for (const deadline = Date.now() + 60_000; ; await sleep(200)) {
     break;
   if (Date.now() > deadline) throw new Error('restate-server did not start');
 }
-void (await restate.endpoint().bind(helper).bind(probe).listen(PORT));
+void (await restate.endpoint().bind(helper).bind(probe).bind(stepper).listen(PORT));
 for (const deadline = Date.now() + 60_000; ; await sleep(200)) {
   const registered = await fetch(`${ADMIN}/deployments`, {
     method: 'POST',
@@ -159,8 +219,12 @@ const statusOf = async (id: string) =>
 
 let keys = 0;
 /** A probe, started: its invocation id, and its outcome. */
-async function start(handler: string, body: Work) {
-  const r = await fetch(`${INGRESS}/Probe/k${keys++}/${handler}/send`, {
+const start = (handler: string, body: Work) => send(`Probe/k${keys++}/${handler}`, body);
+
+/** An invocation of `path`, started: its invocation id, and its outcome. */
+async function send<O extends Outcome = Outcome>(path: string, body: unknown) {
+  const handler = path;
+  const r = await fetch(`${INGRESS}/${path}/send`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
@@ -171,15 +235,21 @@ async function start(handler: string, body: Work) {
   return {
     id: invocationId,
     /** Its outcome and how long it took, or how it stands if it has none within `withinMs`. */
-    async outcome(withinMs = 15_000): Promise<Outcome & { ms: number }> {
+    async outcome(withinMs = 15_000): Promise<O & { ms: number }> {
       const attached = await fetch(`${INGRESS}/restate/invocation/${invocationId}/attach`, {
         signal: AbortSignal.timeout(withinMs),
       }).catch(() => undefined);
       if (!attached?.ok) {
         const where = `${await statusOf(invocationId)}, after ${attempts.get(invocationId)} attempts`;
-        throw new Error(`${handler}: no outcome within ${withinMs} ms: it is ${where}`);
+        const journal = await query<{ entry_type: string; name: string }>(
+          `SELECT entry_type, name FROM sys_journal WHERE id = '${invocationId}' ORDER BY index DESC LIMIT 8`,
+        );
+        const last = journal.toReversed().map((e) => `${e.entry_type}${e.name ? `(${e.name})` : ''}`);
+        throw new Error(
+          `${handler}: no outcome within ${withinMs} ms: it is ${where}; its journal ends ${last.join(', ')}`,
+        );
       }
-      return { ...((await attached.json()) as Outcome), ms: Date.now() - started };
+      return { ...((await attached.json()) as O), ms: Date.now() - started };
     },
     async cancel() {
       const cancel = await fetch(`${ADMIN}/invocations/${invocationId}/cancel`, { method: 'PATCH' });
@@ -210,6 +280,12 @@ function hold(point: Failpoint, when: (asked?: UnresolvedFuture) => boolean = ()
   };
 }
 
+/** The probes' and steppers' invocations that have not completed. */
+const unfinished = () =>
+  query<{ id: string; status: string }>(
+    `SELECT id, status FROM sys_invocation WHERE target_service_name IN ('Probe', 'Stepper') AND status != 'completed'`,
+  );
+
 let failed = 0;
 const only = process.argv[2];
 async function check(name: string, body: () => Promise<void>) {
@@ -221,6 +297,8 @@ async function check(name: string, body: () => Promise<void>) {
   } catch (e) {
     failed++;
     console.log(`FAIL ${name}: ${(e as Error).message.replaceAll('\n', ' | ')}`);
+    // What it left running would take the server from the checks that follow.
+    for (const { id } of await unfinished()) await fetch(`${ADMIN}/invocations/${id}/kill`, { method: 'PATCH' });
   }
 }
 
@@ -357,11 +435,114 @@ await check(
   },
 );
 
-const left = await query<{ id: string; status: string }>(
-  `SELECT id, status FROM sys_invocation WHERE target_service_name = 'Probe' AND status != 'completed'`,
+// --- Steps of work, each committed, under every inactivity timeout: zero forces a suspension at every await
+
+type Stepped = Outcome & { steps: number };
+/** A key with its database made, and a stepper started on it. */
+async function stepping(handler: string, body: Steps) {
+  const key = `s${keys++}`;
+  const warmed = await fetch(`${INGRESS}/Stepper/${key}/warm`, { method: 'POST' });
+  assert.ok(warmed.ok, `warm: ${warmed.status} ${await warmed.text()}`);
+  const s = await send<Stepped>(`Stepper/${key}/${handler}`, body);
+  const count = async () =>
+    (await (await fetch(`${INGRESS}/Stepper/${key}/count`, { method: 'POST' })).json()) as number;
+  return { ...s, count };
+}
+
+/** A request-response probe, on a key with its database made: its outcome. */
+async function zero(handler: string, ms: number) {
+  const key = `z${keys++}`;
+  assert.ok((await fetch(`${INGRESS}/Stepper/${key}/warm`, { method: 'POST' })).ok);
+  return (await send(`Stepper/${key}/${handler}`, { ms })).outcome();
+}
+
+await check(
+  'inactivity timeout 0, the input closed from the start: one attempt, with the watch as without',
+  async () => {
+    const [watching, plain] = await Promise.all([zero('watchingZero', 300), zero('plainZero', 300)]);
+    assert.deepEqual({ ...plain, ms: 0 }, { stopped: false, attempts: 1, ms: 0 });
+    assert.deepEqual({ ...watching, ms: 0 }, { stopped: false, attempts: 1, ms: 0 });
+  },
 );
+
+await check('inactivity timeout 0: 20 at once, all answer in one attempt', async () => {
+  const all = await Promise.all(
+    Array.from({ length: 20 }, (_, i) =>
+      zero(i % 4 === 0 ? 'plainZero' : 'watchingZero', Math.floor(Math.random() * 400)),
+    ),
+  );
+  for (const outcome of all) assert.deepEqual({ ...outcome, ms: 0 }, { stopped: false, attempts: 1, ms: 0 });
+});
+
+for (const timeout of TIMEOUTS) {
+  const ms = Math.max(2 * timeout, 30); // each step outlasts the timeout: the input closes during every one
+  await check(
+    `inactivity timeout ${timeout} ms: 4 steps, each past it, all committed once, with the watch as without`,
+    async () => {
+      const [watching, plain] = await Promise.all([
+        stepping(`watching${timeout}`, { steps: 4, ms }),
+        stepping(`plain${timeout}`, { steps: 4, ms }),
+      ]);
+      const [w, p] = await Promise.all([watching.outcome(60_000), plain.outcome(60_000)]);
+      assert.deepEqual({ stopped: w.stopped, steps: w.steps }, { stopped: false, steps: 4 });
+      assert.deepEqual({ stopped: p.stopped, steps: p.steps }, { stopped: false, steps: 4 });
+      assert.equal(await watching.count(), 4);
+      assert.equal(await plain.count(), 4);
+      // Each step's commit suspended it, its input closed, and it went on from there.
+      assert.ok(w.attempts > 1 && p.attempts > 1, `attempts: ${w.attempts} watching, ${p.attempts} plain`);
+    },
+  );
+
+  await check(
+    `inactivity timeout ${timeout} ms: a cancellation stops the steps, at the next attempt at the latest`,
+    async () => {
+      const s = await stepping(`watching${timeout}`, { steps: 50, ms });
+      await sleep(3 * ms);
+      await s.cancel();
+      const outcome = await s.outcome(60_000);
+      assert.equal(outcome.stopped, true);
+      assert.ok(outcome.steps < 50, `${outcome.steps} steps`);
+      assert.equal(await s.count(), outcome.steps);
+    },
+  );
+
+  await check(
+    `inactivity timeout ${timeout} ms: 24 steppers at random, some cancelled: all end, their steps committed once`,
+    async () => {
+      const all = await Promise.all(
+        Array.from({ length: 24 }, async (_, i) => {
+          const watch = i % 3 !== 0;
+          const body = {
+            steps: 1 + Math.floor(Math.random() * 4),
+            ms: Math.floor(Math.random() * 2.5 * Math.max(timeout, 12)),
+          };
+          const cancelAt = watch && i % 2 === 0 ? Math.floor(Math.random() * 4 * Math.max(timeout, 12)) : undefined;
+          const s = await stepping(`${watch ? 'watching' : 'plain'}${timeout}`, body);
+          if (cancelAt !== undefined) void sleep(cancelAt).then(() => s.cancel().catch(() => {}));
+          return { s, body, cancelAt };
+        }),
+      );
+      for (const { s, body, cancelAt } of all) {
+        const outcome = await s.outcome(60_000);
+        const said = JSON.stringify({ body, cancelAt, outcome });
+        // It stopped for a cancellation only; else it did all its steps. Either way, what it says is what is stored.
+        assert.ok(!outcome.stopped || cancelAt !== undefined, said);
+        assert.ok(outcome.stopped || outcome.steps === body.steps, said);
+        assert.equal(await s.count(), outcome.steps, said);
+      }
+    },
+  );
+}
+
+// --- What Restate saw
+
+await check('Restate suspended no invocation on its cancel signal alone', async () => {
+  const seen = await assertNoneSuspendedOnCancellationAlone(ADMIN);
+  assert.ok(seen > 0, 'no suspension at all');
+});
+
 await check('no invocation is left behind', async () => {
-  assert.deepEqual(left, []);
+  assert.deepEqual(await unfinished(), []);
 });
 
 console.log(failed === 0 ? 'all checks passed' : `${failed} checks failed`);

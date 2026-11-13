@@ -33,7 +33,16 @@ server, are in its `test/` directory (`pnpm test` at the root runs them all).
   suspended: one that works outside Restate past the inactivity timeout goes
   on, whether or not it watches for its cancellation, a cancellation reaches
   it while its input is open or at its next await, and the selector's loop is
-  held at its failpoints while the input closes (`pnpm --filter e2e suspension`).
+  held at its failpoints while the input closes. With no inactivity timeout
+  (a request-response invocation, its input closed from the start) it
+  answers too; and steps of work, each committed, end under timeouts shorter
+  than a step, each commit suspending the attempt (`SUSPENSION_TIMEOUTS=20,150`
+  for others) (`pnpm --filter e2e suspension`).
+- [`suspensions.ts`](suspensions.ts): what every suite here asks Restate at
+  its end: whether it suspended an invocation on its cancel signal alone,
+  which only a cancellation resumes. To force suspensions in a suite, give
+  the server a short inactivity timeout:
+  `RESTATE_WORKER__INVOKER__INACTIVITY_TIMEOUT=40ms pnpm --filter e2e steering`.
 - [`restate-tools.ts`](restate-tools.ts): Restate's own agent tools, on a
   scripted model (`pnpm --filter e2e tools`).
 - [`steering.ts`](steering.ts): a message steered to a turn (the `steer`

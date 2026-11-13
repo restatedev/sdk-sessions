@@ -34,6 +34,7 @@ import * as pi from '@restatedev/agents/pi';
 import { z } from 'zod';
 import { callTools, fakeProvider, say, textOf } from '@restatedev/agents/test/fakes/pi';
 import { RESTATE_SERVER as SERVER } from './restate-server.ts';
+import { assertNoneSuspendedOnCancellationAlone } from './suspensions.ts';
 
 const INGRESS = 'http://127.0.0.1:8080';
 const ADMIN = 'http://127.0.0.1:9070';
@@ -202,6 +203,8 @@ try {
     ['user', 'Skip Friday'],
     ['assistant', `Answered: (${CANCELLED})\n\nSkip Friday`],
   ]);
+  // Whatever its turns waited for, none was suspended on its cancel signal alone.
+  await assertNoneSuspendedOnCancellationAlone(ADMIN);
   console.log('ok');
 } finally {
   server.kill('SIGKILL');

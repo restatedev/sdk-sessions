@@ -41,6 +41,7 @@ import { z } from 'zod';
 import { Teller } from '@restatedev/agents/test/fakes/langgraph';
 import { callTools, fakeProvider, say, textOf } from '@restatedev/agents/test/fakes/pi';
 import { RESTATE_SERVER as SERVER } from './restate-server.ts';
+import { assertNoneSuspendedOnCancellationAlone } from './suspensions.ts';
 
 const INGRESS = 'http://127.0.0.1:8080';
 const ADMIN = 'http://127.0.0.1:9070';
@@ -468,6 +469,8 @@ try {
 
   // A handler's terminal error is the tool's answer, for the model.
   assert.equal(await post('support/dave/chat', 'Refund order 999'), 'Error: no order 999');
+  // Whatever its turns waited for, none was suspended on its cancel signal alone.
+  await assertNoneSuspendedOnCancellationAlone(ADMIN);
   console.log('ok');
 } finally {
   server.kill('SIGKILL');

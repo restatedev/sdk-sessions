@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { RESTATE_SERVER as SERVER } from './restate-server.ts';
+import { assertNoneSuspendedOnCancellationAlone } from './suspensions.ts';
 
 const INGRESS = 'http://127.0.0.1:8080';
 const ADMIN = 'http://127.0.0.1:9070';
@@ -515,6 +516,10 @@ await check('an SQL error that the handler fails with is terminal', async () => 
   const started = Date.now();
   await assert.rejects(call('Db/e/sqlError'), /no such table: missing/);
   assert.ok(Date.now() - started < 5000, 'retried'); // terminal: not retried
+});
+
+await check('Restate suspended no invocation on its cancel signal alone', async () => {
+  await assertNoneSuspendedOnCancellationAlone(ADMIN);
 });
 
 console.log(failed === 0 ? 'all passed' : `${failed} failed`);
