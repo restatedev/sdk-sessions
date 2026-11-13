@@ -183,6 +183,16 @@ describe('agent', () => {
     );
   });
 
+  it('refuses history bounds that are no positive integers, as it is defined', () => {
+    expect(() => agentlib.agent({ name: 'a', model: 'openai/gpt-6-sol', history: { retainMessages: 0 } })).toThrow(
+      'a: history.retainMessages must be a positive integer, not 0',
+    );
+    expect(() => agentlib.agent({ name: 'a', model: 'openai/gpt-6-sol', history: { maxChars: 1.5 } })).toThrow(
+      'a: history.maxChars must be a positive integer, not 1.5',
+    );
+    expect(() => agentlib.agent({ name: 'a', model: 'openai/gpt-6-sol', history: { maxMessages: 200 } })).not.toThrow();
+  });
+
   it('is a virtual object with the handlers and views of every agent, and its companion', () => {
     const assistant = agentlib.agent({ name: 'assistant', model: 'openai/gpt-6-sol' });
     expect(assistant.name).toBe('assistant');

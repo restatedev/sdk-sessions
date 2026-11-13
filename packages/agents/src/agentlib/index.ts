@@ -123,6 +123,16 @@ const providers: Record<string, () => Promise<(modelId: string) => Parameters<ty
   anthropic: async () => (await import('@ai-sdk/anthropic')).anthropic,
 };
 
+/** That agent `name`'s `history` bounds are positive integers (agentlib's `prepareCompaction` would refuse them). */
+function checkHistory(name: string, history: CompactionPolicy) {
+  for (const bound of ['maxMessages', 'maxChars', 'retainMessages'] as const) {
+    const value = history[bound];
+    if (value !== undefined && !(Number.isSafeInteger(value) && value > 0)) {
+      throw new Error(`${name}: history.${bound} must be a positive integer, not ${JSON.stringify(value)}`);
+    }
+  }
+}
+
 /** `model` as agentlib takes it, once its provider's package is loaded: see {@link Options.model}. */
 function modelOf(name: string, model: string | Model | undefined): () => Promise<Model> {
   if (typeof model === 'function') return () => Promise.resolve(model);
@@ -625,12 +635,16 @@ export function agent<P extends string, O = string>({
     );
   }
   const loadModel = modelOf(name, model);
+  // agentlib checks `history`'s bounds only as a turn compacts, with an error that is no terminal one: here.
+  if (history) checkHistory(name, history);
   // Each tool by its name, Restate's made agentlib's: two of one name fail here.
   const named = tools === undefined ? undefined : toolsOf(name, tools);
   let made: Promise<{ lib: LibAgent<AgentlibContext, O>; summarizer: Model }> | undefined;
   const make = async () => {
     const loaded = refusing(await loadModel());
-    return { lib: lib(loaded), summarizer: history === false || history?.model === undefined ? loaded : history.model };
+    // A summarizer of its own refuses as the agent's model does (424).
+    const summarizer = history === false || history?.model === undefined ? loaded : refusing(history.model);
+    return { lib: lib(loaded), summarizer };
   };
   const lib = (loaded: Model) =>
     agentlibAgent<AgentlibContext, O>({

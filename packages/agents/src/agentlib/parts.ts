@@ -1,7 +1,6 @@
 // The pure parts of the agentlib agent (index.ts): its messages as clients
 // read them, of agentlib's messages; which of a model's errors are its
-// provider's refusals; what approves a call; and the tools' schemas as
-// Anthropic takes them.
+// provider's refusals; and the tools' schemas as Anthropic takes them.
 import type { Message } from '@restatedev/agentlib';
 import { sdk as restate } from '@restatedev/sessions/internal';
 import type { ChatMessage, Part } from '../common.ts';
