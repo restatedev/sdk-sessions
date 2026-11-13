@@ -13,6 +13,7 @@ import {
   type Agent as LibAgent,
   type AgentOptions as LibOptions,
   type Conversation,
+  type ConversationCompactionStatus,
   type ConversationSnapshot,
   type JsonValue,
   type Message,
@@ -20,13 +21,15 @@ import {
   type ProgressEvent,
   type RunResult,
   type SteeringUpdate,
-  ConversationConflictError,
+  LazyStateConversation,
+  type CompactionPolicy,
   GuardrailError,
 } from '@restatedev/agentlib';
 import { channel, execute, internal, type Channel, type Future, type Operation } from '@restatedev/restate-sdk-gen';
 import type { aiModel as aiModelType } from '@restatedev/agentlib/provider';
 import { sdk as restate } from '@restatedev/sessions/internal';
 import {
+  approves,
   CANCELLED,
   CHECK_MODEL,
   ENDED,
@@ -53,18 +56,9 @@ import {
 } from '../companion.ts';
 import type { Status, Stopped, Synced, SyncRequest } from '../object.ts';
 import { type AgentlibContext, type AgentlibTool, type Tools, toolsOf } from './tools.ts';
+import { type Entry, outputOf, refused, render, type Rendered, steeringNote, withoutBounds } from './parts.ts';
 
 export type { AgentlibContext, AgentlibTool, Tools };
-import {
-  approves,
-  type Entry,
-  outputOf,
-  refused,
-  render,
-  type Rendered,
-  steeringNote,
-  withoutBounds,
-} from './parts.ts';
 
 const { adopt } = internal;
 
@@ -99,6 +93,16 @@ export interface Options<O = string> extends Omit<
    * { transfer: asyncTool(...) }]`, or `{ transfer: asyncTool(...) }`.
    */
   tools?: Tools;
+  /**
+   * How the conversation the model gets stays short from turn to turn: at a
+   * turn's start, once its messages since the last summary pass `maxMessages`
+   * (default 64) or `maxChars` (default 64 000), the earliest are summarized
+   * by `model` (by default the agent's), and the latest `retainMessages`
+   * (default 12) stay as they are, from a message of the user's on. The
+   * summary is kept, and the next turns build on it. `false` keeps the whole
+   * conversation. `messages` keeps every turn as it was said either way.
+   */
+  history?: false | (CompactionPolicy & { model?: Model });
 }
 
 /** An agent's name, and what it is beside its options. */
@@ -191,8 +195,6 @@ function* waitFor(ctx: restate.ObjectContext, what: string, name: string, input?
 
 /** What the agent keeps in its state, beside its messages: under `meta`. */
 interface Meta {
-  /** How many messages of agentlib its conversation has (in chunks of {@link CHUNK}, under `t/<n>`). */
-  count: number;
   /** How many messages, as clients read them, its answered turns have (under `c/<id>`): the next turn's first id. */
   chats: number;
   /** The last change's cursor: each message written takes the next. */
@@ -203,26 +205,52 @@ interface Meta {
   live?: { turn: string; prompt: string; from: number; n: number };
 }
 
-const CHUNK = 32;
 const META = 'meta';
-const chunkKey = (n: number) => `t/${n}`;
+/**
+ * Where the conversation the model gets is (agentlib's `LazyStateConversation`):
+ * its messages in chunks of 32 (`t/<n>`), and its count and summary (`t/meta`).
+ */
+const CONVERSATION = 't';
+const CONVERSATION_META = `${CONVERSATION}/meta`;
 const entryKey = (id: number) => `c/${id}`;
 /** The ids of the messages steered to the turns that took them, which their own `steered` turn leaves be. */
 const TAKEN = 'taken';
 
-const emptyMeta = (): Meta => ({ count: 0, chats: 0, cursor: 0 });
+const emptyMeta = (): Meta => ({ chats: 0, cursor: 0 });
 
 /**
  * The options of every agentlib agent, beside its own: an invocation starts
- * with `meta` and `taken` only, not the whole conversation (each message
+ * with `meta`, `taken` and the conversation's meta only, not the whole conversation (each message
  * is a key of its own), and reads the rest as it needs it; and retries as
  * every agent does, for weeks, soon after a failure and then twice as long
  * each time, up to 10 seconds apart (a provider's outage is asked again).
  */
 const OPTIONS = {
-  state: { preload: [META, TAKEN] },
+  state: { preload: [META, TAKEN, CONVERSATION_META] },
   retryPolicy: { initialInterval: 50, exponentiationFactor: 2, maxInterval: 10_000, maxAttempts: 100_000 },
 } satisfies restate.ObjectOptions;
+
+/**
+ * The conversation the model gets, in the state of the object of `ctx`
+ * (agentlib's own, its reads journaled): summarized as `compaction` says, if
+ * given (see {@link Options.history}).
+ */
+const conversationOf = (ctx: restate.ObjectContext, compaction?: { model: Model; policy?: CompactionPolicy }) =>
+  new LazyStateConversation({
+    stateKey: CONVERSATION,
+    metaKey: CONVERSATION_META,
+    store: {
+      *get<T>(key: string) {
+        return (yield* read<T>(ctx, key)) ?? undefined;
+      },
+      // A state write is the SDK's at once, and journaled: nothing to wait for.
+      // oxlint-disable-next-line require-yield
+      *set(key: string, value: unknown) {
+        ctx.set(key, value);
+      },
+    },
+    ...(compaction ? { compaction } : {}),
+  });
 
 /**
  * The turn being answered, as clients read it: its messages, kept in the
@@ -235,19 +263,23 @@ class Turn implements Conversation {
   /** The index of each step's reply among {@link entries}, by step. */
   private readonly replies = new Map<number, number>();
   private step = 0;
-  /** The conversation's messages of agentlib, once loaded: its last chunk is all that a save changes. */
-  private loaded?: Message[];
+  /** The conversation's version, once loaded (and after each append): see {@link unsaved}. */
+  private version?: number;
+  /** The conversation that summarizes, for the run (see {@link compact}): set once the agent's model is. */
+  compactor?: LazyStateConversation;
   /** This turn's messages of agentlib that the run saved, so far. */
   private saved: Message[] = [];
 
   private readonly ctx: restate.ObjectContext;
   private readonly meta: Meta;
   readonly live: NonNullable<Meta['live']>;
+  private readonly conversation: LazyStateConversation;
 
   private constructor(ctx: restate.ObjectContext, meta: Meta, live: NonNullable<Meta['live']>) {
     this.ctx = ctx;
     this.meta = meta;
     this.live = live;
+    this.conversation = conversationOf(ctx);
   }
 
   /**
@@ -338,44 +370,15 @@ class Turn implements Conversation {
     return [i, part];
   }
 
-  /** The conversation's messages of agentlib: its chunks. */
-  private async messages(): Promise<Message[]> {
-    if (this.loaded) return this.loaded;
-    const loaded: Message[] = [];
-    for (let n = 0; n * CHUNK < this.meta.count; n++) {
-      const chunk = await this.ctx.get<Message[]>(chunkKey(n));
-      if (!chunk) throw new ConversationConflictError(`the conversation lacks its chunk ${n}`);
-      loaded.push(...chunk);
-    }
-    return (this.loaded = loaded);
-  }
-
-  /** Add `messages` (of agentlib) to the conversation, in its chunks. */
-  private store(messages: readonly Message[]) {
-    const all = this.loaded!;
-    const from = all.length;
-    all.push(...messages);
-    for (let n = Math.floor(from / CHUNK); n * CHUNK < all.length; n++) {
-      this.ctx.set(chunkKey(n), all.slice(n * CHUNK, (n + 1) * CHUNK));
-    }
-    this.meta.count = all.length;
-    this.ctx.set(META, this.meta);
-  }
-
   *load(): Operation<ConversationSnapshot> {
-    return { messages: [...(yield* this.loadOp())], version: this.meta.count };
+    const snapshot = yield* this.conversation.load();
+    this.version = snapshot.version;
+    return snapshot;
   }
 
-  /** {@link messages}, as an operation of the run. */
-  private *loadOp(): Operation<Message[]> {
-    if (this.loaded) return this.loaded;
-    const loaded: Message[] = [];
-    for (let n = 0; n * CHUNK < this.meta.count; n++) {
-      const chunk = yield* read<Message[]>(this.ctx, chunkKey(n));
-      if (!chunk) throw new ConversationConflictError(`the conversation lacks its chunk ${n}`);
-      loaded.push(...chunk);
-    }
-    return (this.loaded = loaded);
+  /** Summarize the earliest of the conversation, as the agent's `history` says, at the run's start. */
+  *compact(): Operation<ConversationCompactionStatus> {
+    return this.compactor ? yield* this.compactor.compact() : 'skipped';
   }
 
   /**
@@ -384,13 +387,23 @@ class Turn implements Conversation {
    * on (with their replies' text, and the answer), each changed.
    */
   *append(messages: readonly Message[], expectedVersion: number): Operation<number> {
-    yield* this.loadOp();
-    if (expectedVersion !== this.meta.count)
-      throw new ConversationConflictError('the conversation changed since it was loaded');
-    this.store(messages);
+    this.version = yield* this.conversation.append(messages, expectedVersion);
     this.saved.push(...messages);
     this.rewrite(render(this.saved));
-    return this.meta.count;
+    return this.version;
+  }
+
+  /** Add `messages` to the conversation, outside the run (a turn that ends without its save). */
+  private async store(messages: Message[]) {
+    const conversation = this.conversation;
+    const known = this.version;
+    this.version = await execute(
+      this.ctx,
+      (function* () {
+        const version = known ?? (yield* conversation.load()).version;
+        return yield* conversation.append(messages, version);
+      })(),
+    );
   }
 
   /**
@@ -411,7 +424,6 @@ class Turn implements Conversation {
    * `text`.
    */
   private async unsaved(text: string) {
-    await this.messages();
     const steered = this.entries
       .slice(1)
       .filter((e) => e.role === 'user')
@@ -419,7 +431,7 @@ class Turn implements Conversation {
         role: 'user',
         content: steeringNote(e.parts.map((p) => (p.type === 'text' ? p.text : '')).join('')),
       }));
-    this.store([{ role: 'user', content: this.live.prompt }, ...steered, { role: 'assistant', content: text }]);
+    await this.store([{ role: 'user', content: this.live.prompt }, ...steered, { role: 'assistant', content: text }]);
     this.rewrite([...this.entries, { role: 'assistant', parts: [{ type: 'text', text }], answer: true }]);
   }
 
@@ -591,6 +603,7 @@ export function agent<P extends string, O = string>({
   model,
   system,
   tools,
+  history,
   ...options
 }: Options<O> & Definition<P>) {
   // agentlib's terminal errors must be the SDK's own, which the turn tells from a retry: one copy of the SDK.
@@ -603,12 +616,16 @@ export function agent<P extends string, O = string>({
   const loadModel = modelOf(name, model);
   // Each tool by its name, Restate's made agentlib's: two of one name fail here.
   const named = tools === undefined ? undefined : toolsOf(name, tools);
-  let made: Promise<LibAgent<AgentlibContext, O>> | undefined;
-  const make = async () =>
+  let made: Promise<{ lib: LibAgent<AgentlibContext, O>; summarizer: Model }> | undefined;
+  const make = async () => {
+    const loaded = refusing(await loadModel());
+    return { lib: lib(loaded), summarizer: history === false || history?.model === undefined ? loaded : history.model };
+  };
+  const lib = (loaded: Model) =>
     agentlibAgent<AgentlibContext, O>({
       ...options,
       name,
-      model: refusing(await loadModel()),
+      model: loaded,
       ...(system === undefined ? {} : { instructions: system }),
       ...(tools === undefined ? {} : { tools: named }),
       *onHumanApproval(request, { context }) {
@@ -629,9 +646,14 @@ export function agent<P extends string, O = string>({
       await companion.start({ invocationId, since, steers: !background, ...(background ? {} : { publishes: true }) }),
     );
     const turn = await Turn.start(ctx, text);
-    let lib: LibAgent<AgentlibContext, O>;
+    let agentlib: LibAgent<AgentlibContext, O>;
     try {
-      lib = await (made ??= make());
+      const { lib: ready, summarizer } = await (made ??= make());
+      agentlib = ready;
+      if (history !== false) {
+        const { model: _model, ...policy } = history ?? {};
+        turn.compactor = conversationOf(ctx, { model: summarizer, policy });
+      }
     } catch (error) {
       made = undefined;
       const unusable =
@@ -644,7 +666,7 @@ export function agent<P extends string, O = string>({
     try {
       result = await execute(
         ctx,
-        lib.run(text, {
+        agentlib.run(text, {
           name,
           context: { ctx },
           conversation: turn,
@@ -706,7 +728,7 @@ export function agent<P extends string, O = string>({
         const meta = (await ctx.get<Meta>(META)) ?? emptyMeta();
         const next = meta.chats + (meta.live?.n ?? 0);
         ctx.clearAll();
-        ctx.set(META, { count: 0, chats: next, cursor: meta.cursor + 1, first: next } satisfies Meta);
+        ctx.set(META, { chats: next, cursor: meta.cursor + 1, first: next } satisfies Meta);
         await companionAt(ctx).reset();
       }),
 

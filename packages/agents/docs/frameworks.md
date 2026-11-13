@@ -853,12 +853,18 @@ in a session object: it is the one integration on the classic Restate SDK.
   does (each model call, a `run`; each tool's I/O; its calls and signals)
   and replays it after a crash, a suspension or a deployment: jobs 2 and 3
   are Restate's own, and the integration stores nothing for them.
-- **The conversation**: agentlib's `Conversation`, in the object's state:
-  its messages in chunks of 32 (`t/<n>`), loaded at each turn's start, and
-  appended when the run saves its turn (at its end). Beside them, the
+- **The conversation**: agentlib's `Conversation`, in the object's state,
+  agentlib's `LazyStateConversation` on a store of the invocation's state:
+  its messages in chunks of 32 (`t/<n>`), loaded since its summary at each
+  turn's start, and appended when the run saves its turn (at its end); a
+  turn that ends without its save appends its message and a note itself.
+  At a turn's start, past `history`'s bounds (64 messages or 64 000
+  characters, by default), its `compact` summarizes the earliest with the
+  agent's model, keeping the latest 12, and keeps the summary (`t/meta`):
+  the model's input, and what a turn loads and journals, stay bounded. Beside them, the
   messages as clients read them, one key each (`c/<id>`), with the cursor
   of their last change, and `meta` (the counts, the cursor, the turn being
-  answered). An invocation preloads `meta` and `taken` alone: a view such
+  answered). An invocation preloads `meta`, `taken` and `t/meta` alone: a view such
   as `status` is not sent the conversation. The turn being answered is written from the run's progress
   events (a tool call's start and end, a steered message) as they come,
   then rewritten from the messages the run saves, under the same ids, each

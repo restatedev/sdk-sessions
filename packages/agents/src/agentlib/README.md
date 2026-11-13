@@ -50,6 +50,7 @@ npm install @restatedev/agents @restatedev/agentlib@0.1.0 @restatedev/restate-sd
 | `model`       | `openai/model-id` or `anthropic/model-id` (with `@ai-sdk/openai` or `@ai-sdk/anthropic`), or else `MODEL`, or else `openai/gpt-6-sol`; or a model of agentlib (`aiModel` of `@restatedev/agentlib/provider` for any provider of the AI SDK, `journaledModel` for one of your own)        |
 | `system`      | The instructions (the system prompt): a text, or agentlib's function of the run's context that gives one                                                                                                                                                                                 |
 | `tools`       | The tools of `@restatedev/agents` (`tool()`, `call`, `send`, `workflow`, `signal`, `subagent`), as every agent takes them, and agentlib's own (`asyncTool`, `serviceTool`, `agentTool`, `handoff`, MCP's...) by the name the model calls them: `[weather, { transfer: asyncTool(...) }]` |
+| `history`     | How the conversation the model gets stays short from turn to turn: `{ maxMessages, maxChars, retainMessages, model }`, or `false` ([A long conversation](#a-long-conversation))                                                                                                          |
 | `output`      | A zod schema: the answer as data, which `chat` answers with                                                                                                                                                                                                                              |
 | `description` | What it is, for the UI, and for a parent's model: `subagent(agent)` tells it                                                                                                                                                                                                             |
 | `background`  | It works unwatched (a subagent, say): its turn tells its companion at its end only, and takes no steered messages                                                                                                                                                                        |
@@ -161,22 +162,40 @@ Anthropic for strict tools, which it refuses with bounded numbers (agentlib's
 own `read_tool_result` has them): an `anthropic/…` model is sent the tools'
 schemas without their numbers' bounds, which the tools still check.
 
+## A long conversation
+
+The model gets the conversation as agentlib's `LazyStateConversation` keeps
+it: at a turn's start, once its messages since the last summary pass 64
+(or 64 000 characters), the earliest are summarized by the agent's model,
+and the latest 12 stay as they are, from a message of the user's on. The
+summary is kept, and the turns after build on it, so the model's input
+stays bounded, and so does what each turn loads. `history` sets it:
+
+```ts
+agentlib.agent({ name: 'assistant', history: { maxMessages: 200, maxChars: 200_000, retainMessages: 40 } });
+agentlib.agent({ name: 'assistant', history: false }); // the whole conversation, every turn
+```
+
+`history`'s `model` summarizes with another model than the agent's (a
+cheaper one, say). `messages` keeps every turn as it was said, whatever
+the model gets. Within a turn, agentlib's own `compaction` and
+`contextWindow` keep a long run within the model's window.
+
 ## State
 
-The conversation is in the object's state: agentlib's messages in chunks
-of 32 (`t/<n>`), which each turn loads, and the messages as clients read
-them, one key each (`c/<id>`), beside `meta`. An invocation starts with
-`meta` and `taken` alone, and reads the rest as it needs it: `messages`, a
-page; `chat`, the chunks. Each read is journaled with what it read, as any
-state read of a journaled handler is: a turn's journal has the
-conversation it loaded.
+The conversation is in the object's state: the model's, in chunks of 32
+(`t/<n>`) with its count and summary (`t/meta`), and the messages as
+clients read them, one key each (`c/<id>`), beside `meta`. An invocation
+starts with `meta`, `taken` and `t/meta` alone, and reads the rest as it
+needs it: `messages`, a page; `chat`, the messages since the summary. Each
+read is journaled with what it read, as any state read of a journaled
+handler is: a turn's journal has the conversation it loaded.
 
 ## Not here
 
 - **`window`, `budget`, `summarize`, `schema`** (the conversation of turns,
-  and tables of your own): there is no SQL database. A long conversation
-  is agentlib's to keep within the model's window: `compaction` and
-  `contextWindow`.
+  and tables of your own): there is no SQL database; `history` keeps a
+  long conversation short ([A long conversation](#a-long-conversation)).
 - **`ctx.db`, `ctx.rpc` and `ctx.send` in a `tool()`**: see [Tools](#tools).
 - **A killed turn** (out of retries, or killed by an operator) is closed by
   the next message, `Ended: …`, not by the companion as it finds it gone.

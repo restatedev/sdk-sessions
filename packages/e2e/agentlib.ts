@@ -130,13 +130,24 @@ function script(messages: readonly Message[]): ModelResponse {
     noted?.role === 'user' && noted.content.startsWith('{')
       ? ` [steered: ${(JSON.parse(noted.content) as { message: string }).message}]`
       : '';
-  return { type: 'final', text: `Answered: ${text}${ended}${kept}` };
+  // The conversation summarized before the turn (see `history`): the summary comes first.
+  const first = messages[0];
+  const summary =
+    first?.role === 'user' && first.content.includes('"conversation-summary"')
+      ? ` [summary: ${(JSON.parse(first.content) as { summary: string }).summary}]`
+      : '';
+  return { type: 'final', text: `Answered: ${text}${ended}${kept}${summary}` };
 }
 
 /** The scripted model, journaled as agentlib's models are; each ask, logged to MODEL_LOG if set. */
 const model = journaledModel(
   async (request) => {
     if (process.env.MODEL_LOG) appendFileSync(process.env.MODEL_LOG, `${request.messages.length}\n`);
+    // Asked to summarize the earliest of a conversation (`history`): how many messages it got.
+    if (request.instructions?.startsWith('Summarize')) {
+      const { messages } = JSON.parse((request.messages[0] as { content: string }).content) as { messages: unknown[] };
+      return { type: 'final', text: `${messages.length} messages` };
+    }
     return script(request.messages);
   },
   { name: 'Ask model', retry: { maxAttempts: 1 } },
@@ -238,6 +249,9 @@ const clerk = agentlib.agent({
   ],
 });
 
+// A conversation kept short: past 4 messages, the earliest are summarized, and the latest 2 stay.
+const chatty = agentlib.agent({ name: 'chatty', model, history: { maxMessages: 4, retainMessages: 2 } });
+
 const napper = agentlib.agent({
   name: 'napper',
   model,
@@ -284,7 +298,7 @@ if (process.argv[2] === 'serve') {
     }));
   try {
     await restate.serve({
-      services: served([planner, boss, helper, lead, clerk, orders, ledger, refund]),
+      services: served([planner, boss, helper, lead, clerk, chatty, orders, ledger, refund]),
       port: PORT,
     });
     serveChild();
@@ -547,6 +561,13 @@ if (process.argv[2] === 'serve') {
     const [role, note] = (await conversation('clerk/rita')).at(-1)!;
     assert.equal(role, 'assistant');
     assert.match(note!, /^Failed: the tool remember: not in an agentlib agent: ctx\.db/);
+
+    // The conversation kept short: the fourth turn's model gets a summary of the first two turns, and the
+    // third as it was; `messages` keeps every turn.
+    for (const n of [1, 2, 3]) assert.equal(await post('chatty/sven/chat', `Hi ${n}`), `Answered: Hi ${n}`);
+    assert.equal(await post('chatty/sven/chat', 'Hi 4'), 'Answered: Hi 4 [summary: 4 messages]');
+    assert.equal(await post('chatty/sven/chat', 'Hi 5'), 'Answered: Hi 5 [summary: 4 messages]');
+    assert.equal(((await post('chatty/sven/messages')) as Messages).messages.length, 10);
 
     // Cleared: the conversation starts over, its ids going on.
     await post('planner/erin/chat', 'Hi');

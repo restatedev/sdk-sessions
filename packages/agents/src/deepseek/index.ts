@@ -75,6 +75,7 @@ import {
   RETURNED_UNRECORDED,
   stopSignalOf,
   toolCallStarted,
+  approves,
 } from '../common.ts';
 import { answerOnce, type Items, type Parsed, type Run, type Turn } from '../conversation.ts';
 import { tookSteers } from '../steering.ts';
@@ -286,21 +287,8 @@ export const APPROVAL = 'approval';
 /** Which tool calls wait for a person's approval: the names of their tools, or a function of a call that says whether it does. */
 export type Approval = readonly string[] | ((call: { name: string; args: unknown }) => boolean);
 
-/** The texts that approve a tool call, whatever their case. */
-const APPROVED: ReadonlySet<string> = new Set(['approved', 'approve', 'yes', 'ok', 'allow', 'allowed']);
-
-/**
- * What the value of an {@link APPROVAL} signal decides about its tool call:
- * `true`, `{ "approved": true }`, or a text such as "approved" or "yes"
- * approves it once; anything else rejects it, so a value that does not say
- * "approved" never runs the tool.
- */
-const decided = (value: unknown): ApprovalOutcome =>
-  value === true ||
-  (typeof value === 'string' && APPROVED.has(value.trim().toLowerCase())) ||
-  (typeof value === 'object' && value !== null && (value as { approved?: unknown }).approved === true)
-    ? 'allowed-once'
-    : 'rejected';
+/** What the value of an {@link APPROVAL} signal decides about its tool call (see `approves`): approved once, or rejected. */
+const decided = (value: unknown): ApprovalOutcome => (approves(value) ? 'allowed-once' : 'rejected');
 
 /**
  * Have the harness of the agent of `agentCtx` ask for an approval before

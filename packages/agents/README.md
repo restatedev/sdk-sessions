@@ -146,7 +146,8 @@ key/value state. It has every agent's handlers and views, and their
 companion, and takes the tools of `@restatedev/agents` below beside
 agentlib's own (`asyncTool`, `serviceTool`, `agentTool`, MCP's...), though a
 `tool()` of its own has no `ctx.db`; and neither `schema`, `window` nor
-`budget`, which are the SQL database's ([its README](src/agentlib/README.md)).
+`budget`, which are the SQL database's: `history` keeps its conversation
+short ([its README](src/agentlib/README.md)).
 
 Every agent takes these too, beside its framework's options:
 
@@ -160,7 +161,8 @@ Every agent takes these too, beside its framework's options:
 
 `window` and `budget` bound what Claude's and LangGraph's model is sent
 ([what the model gets](docs/conversation.md)); pi, the DeepSeek Harness and
-OpenCode keep their own history, and compact it themselves. An object holds one
+OpenCode keep their own history, and compact it themselves; agentlib's
+`history` summarizes its own. An object holds one
 framework's conversation: its turns are that framework's messages.
 
 ## Calling an agent

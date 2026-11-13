@@ -96,6 +96,7 @@ import {
   RETURNED_UNRECORDED,
   stopSignalOf,
   toolCallStarted,
+  approves,
 } from '../common.ts';
 import { answerOnce, invocationOf, type Call, type Items, type Parsed, STEPS, type Turn } from '../conversation.ts';
 import { conversationView } from '../messages.ts';
@@ -797,27 +798,21 @@ function toolsPlugin(
 /** The signal that an OpenCode tool call waits for, to the agent, when OpenCode asks for a permission (`approval`). */
 export const APPROVAL = 'approval';
 
-/** The texts that approve an ask, whatever their case. */
-const APPROVED: ReadonlySet<string> = new Set(['approved', 'approve', 'yes', 'ok', 'allow', 'allowed']);
-
 /**
- * What the value of an {@link APPROVAL} signal decides: `true`,
- * `{ "approved": true }`, or a text such as "approved" or "yes" allows;
- * anything else denies, with the reason it gives, if any (a text, or
+ * What the value of an {@link APPROVAL} signal decides (see `approves`):
+ * it allows, or denies with the reason it gives, if any (a text, or
  * `{ "reason": "..." }`).
  */
 function decided(value: unknown): { allowed: true } | { allowed: false; reason?: string } {
-  if (value === true) return { allowed: true };
-  if (typeof value === 'string') {
-    const text = value.trim();
-    return APPROVED.has(text.toLowerCase()) ? { allowed: true } : { allowed: false, ...(text ? { reason: text } : {}) };
-  }
-  if (typeof value === 'object' && value !== null) {
-    const { approved, reason } = value as { approved?: unknown; reason?: unknown };
-    if (approved === true) return { allowed: true };
-    return { allowed: false, ...(typeof reason === 'string' && reason.trim() ? { reason: reason.trim() } : {}) };
-  }
-  return { allowed: false };
+  if (approves(value)) return { allowed: true };
+  const given =
+    typeof value === 'string'
+      ? value
+      : typeof value === 'object' && value !== null
+        ? (value as { reason?: unknown }).reason
+        : undefined;
+  const reason = typeof given === 'string' ? given.trim() : '';
+  return { allowed: false, ...(reason ? { reason } : {}) };
 }
 
 /**

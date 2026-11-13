@@ -113,10 +113,3 @@ export const refused = (error: unknown): error is restate.TerminalError =>
   error instanceof restate.TerminalError &&
   error.constructor === restate.TerminalError &&
   ((error.code >= 400 && error.code < 500) || /API key/i.test(error.message));
-
-/** A value of `signal` that approves a call: `true`, `{ approved: true }`, or a text such as `approved` or `yes`. */
-const APPROVED: ReadonlySet<string> = new Set(['approved', 'approve', 'yes', 'ok', 'allow', 'allowed']);
-export const approves = (value: unknown) =>
-  value === true ||
-  (typeof value === 'string' && APPROVED.has(value.trim().toLowerCase())) ||
-  (typeof value === 'object' && value !== null && (value as { approved?: unknown }).approved === true);
