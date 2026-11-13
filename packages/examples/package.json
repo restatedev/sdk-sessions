@@ -9,6 +9,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@ai-sdk/openai": "4.0.13",
     "@earendil-works/pi-ai": "1.5.2",
     "@earendil-works/pi-durable": "1.5.2",
     "@earendil-works/pi-schema": "1.5.2",
@@ -16,6 +17,7 @@
     "@langchain/openai": "1.8.4",
     "@modelcontextprotocol/client": "2.0.0",
     "@modelcontextprotocol/server": "2.0.0",
+    "@restatedev/agentlib": "0.1.0",
     "@restatedev/agents": "workspace:*",
     "@restatedev/restate-sdk": "1.18.2",
     "@restatedev/restate-sdk-clients": "1.18.2",

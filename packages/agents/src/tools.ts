@@ -17,6 +17,7 @@ import { callOf } from './calls.ts';
 import { companionHere, NoCompanion } from './companion.ts';
 
 const TOOL = Symbol.for('restate-agents.tool');
+const SPEC = Symbol.for('restate-agents.tool-spec');
 
 /** A tool call: the agent's context, and the id of the model's call. */
 export interface ToolCall {
@@ -51,6 +52,31 @@ export interface Tool {
   run(args: unknown, call: ToolCall): Promise<string>;
 }
 
+/**
+ * What a tool does, beside its `run` (which takes a session object's
+ * context): for a framework whose agent is no session object (agentlib's,
+ * on the classic SDK), which makes the same calls its own way. Restate's
+ * tools say which call; a `tool()`, its `run`.
+ */
+export type ToolSpec =
+  | { kind: 'run'; run: (input: never, context: ToolContext) => unknown }
+  | { kind: 'call'; target: Target; handler: string; options: TargetOptions<z.ZodObject | undefined> }
+  | {
+      kind: 'send';
+      target: Target;
+      handler: string;
+      options: TargetOptions<z.ZodObject | undefined> & { delay?: restate.Duration };
+    }
+  | { kind: 'workflow'; target: Target; options: TargetOptions<z.ZodObject | undefined> }
+  | { kind: 'signal'; name: string; shown: boolean }
+  | { kind: 'subagent'; agent: string; handler: string };
+
+/** `t`, saying what it does: see {@link ToolSpec}. */
+const withSpec = (t: Tool, spec: ToolSpec): Tool => Object.defineProperty(t, SPEC, { value: spec });
+
+/** What tool `t` does: see {@link ToolSpec}. */
+export const specOf = (t: Tool): ToolSpec => (t as Tool & { [SPEC]: ToolSpec })[SPEC];
+
 /** The JSON schema of `t`'s input, which a framework offers the model. */
 export const jsonSchemaOf = (t: Tool) => z.toJSONSchema(t.input) as Record<string, unknown>;
 
@@ -58,7 +84,7 @@ export const jsonSchemaOf = (t: Tool) => z.toJSONSchema(t.input) as Record<strin
 export const isTool = (value: unknown): value is Tool => typeof value === 'object' && value !== null && TOOL in value;
 
 /** A result as text: a string as it is, nothing as "done", anything else as JSON. */
-const text = (value: unknown) =>
+export const text = (value: unknown) =>
   typeof value === 'string' ? value : value === null || value === undefined ? 'done' : JSON.stringify(value);
 
 /**
@@ -79,6 +105,14 @@ const text = (value: unknown) =>
  * `run` never sees.
  */
 export const tool = <S extends z.ZodObject>(options: {
+  name: string;
+  description: string;
+  input: S;
+  run: (input: z.infer<S>, context: ToolContext) => unknown;
+}): Tool => withSpec(ownTool(options), { kind: 'run', run: options.run });
+
+/** {@link tool}, without its spec: Restate's tools give their own. */
+const ownTool = <S extends z.ZodObject>(options: {
   name: string;
   description: string;
   input: S;
@@ -142,12 +176,12 @@ async function once<T>(
 }
 
 /** A service, virtual object or workflow, as its definition (`restate.service(...)` and so on), of handlers `M`. */
-type Target<M = unknown> =
+export type Target<M = unknown> =
   | restate.ServiceDefinition<string, M>
   | restate.VirtualObjectDefinition<string, M>
   | restate.WorkflowDefinition<string, M>;
 /** Whether a target is keyed: a virtual object (key) or a workflow (id). */
-const keyed = (target: Target) => 'object' in target || 'workflow' in target;
+export const keyed = (target: Target) => 'object' in target || 'workflow' in target;
 
 /**
  * Call `method` of `service`, with JSON in and out, once per tool call (see
@@ -187,7 +221,7 @@ export const runWorkflow = async (
   { service, key, input }: { service: string; key: string; input: unknown },
 ): Promise<unknown> => attach(ctx, await start(ctx, { service, handler: 'run', key, input }));
 
-interface TargetOptions<S extends z.ZodObject | undefined> {
+export interface TargetOptions<S extends z.ZodObject | undefined> {
   /** The tool's name, for the model; by default the handler's, such as `orders_status`. */
   name?: string;
   /** What it does, for the model. */
@@ -238,20 +272,23 @@ export const call = <M, S extends z.ZodObject | undefined = undefined>(
   handler: keyof M & string,
   options: TargetOptions<S>,
 ): Tool =>
-  tool({
-    name: options.name ?? `${target.name}_${handler}`,
-    description: options.description,
-    input: inputOf(target, options),
-    run: async (input, context) =>
-      once(`${target.name}/${handler}`, input, context, async (c) =>
-        invoke(c, {
-          service: target.name,
-          method: handler,
-          workflow: 'workflow' in target,
-          ...(await split(target, options, input, c.ctx)),
-        }),
-      ),
-  });
+  withSpec(
+    ownTool({
+      name: options.name ?? `${target.name}_${handler}`,
+      description: options.description,
+      input: inputOf(target, options),
+      run: async (input, context) =>
+        once(`${target.name}/${handler}`, input, context, async (c) =>
+          invoke(c, {
+            service: target.name,
+            method: handler,
+            workflow: 'workflow' in target,
+            ...(await split(target, options, input, c.ctx)),
+          }),
+        ),
+    }),
+    { kind: 'call', target: target as Target, handler, options },
+  );
 
 /**
  * A tool that sends to `handler` of `target`, without waiting for it: a
@@ -262,17 +299,24 @@ export const send = <M, S extends z.ZodObject | undefined = undefined>(
   handler: keyof M & string,
   options: TargetOptions<S> & { delay?: restate.Duration },
 ): Tool =>
-  tool({
-    name: options.name ?? `${target.name}_${handler}`,
-    description: options.description,
-    input: inputOf(target, options),
-    run: async (input, context) =>
-      once(`${target.name}/${handler}`, input, context, async ({ ctx, idempotencyKey }) => {
-        const { key, parameter } = await split(target, options, input, ctx);
-        ctx.send({ service: target.name, handler, key, input: parameter, delay: options.delay, idempotencyKey });
-        return `sent to ${target.name}${key === undefined ? '' : `/${key}`}/${handler}`;
-      }),
-  });
+  withSpec(
+    ownTool({
+      name: options.name ?? `${target.name}_${handler}`,
+      description: options.description,
+      input: inputOf(target, options),
+      run: async (input, context) =>
+        once(`${target.name}/${handler}`, input, context, async ({ ctx, idempotencyKey }) => {
+          const { key, parameter } = await split(target, options, input, ctx);
+          ctx.send({ service: target.name, handler, key, input: parameter, delay: options.delay, idempotencyKey });
+          return sentTo(target.name, key, handler);
+        }),
+    }),
+    { kind: 'send', target: target as Target, handler, options },
+  );
+
+/** What a send tool answers: where it sent. */
+export const sentTo = (service: string, key: string | undefined, handler: string) =>
+  `sent to ${service}${key === undefined ? '' : `/${key}`}/${handler}`;
 
 /**
  * A tool that runs the workflow `target` (its `run` handler) to the end, and
@@ -286,19 +330,22 @@ export const workflow = <S extends z.ZodObject | undefined = undefined>(
   target: restate.WorkflowDefinition<string, { run: unknown }>,
   options: TargetOptions<S>,
 ): Tool =>
-  tool({
-    name: options.name ?? target.name,
-    description: options.description,
-    input: z.object(options.input?.shape ?? {}),
-    run: async (input, context) =>
-      once(target.name, input, context, async (c) =>
-        runWorkflow(c.ctx, {
-          service: target.name,
-          key: options.key === undefined ? `${c.ctx.key}-${c.callId}` : await configured(options.key, c.ctx),
-          input: options.input ? input : undefined,
-        }),
-      ),
-  });
+  withSpec(
+    ownTool({
+      name: options.name ?? target.name,
+      description: options.description,
+      input: z.object(options.input?.shape ?? {}),
+      run: async (input, context) =>
+        once(target.name, input, context, async (c) =>
+          runWorkflow(c.ctx, {
+            service: target.name,
+            key: options.key === undefined ? `${c.ctx.key}-${c.callId}` : await configured(options.key, c.ctx),
+            input: options.input ? input : undefined,
+          }),
+        ),
+    }),
+    { kind: 'workflow', target: target as Target, options },
+  );
 
 /** An object with a `chat` handler; another object needs subagent's `handler`. */
 type WithChat<M> = M extends { chat: unknown }
@@ -332,10 +379,19 @@ export function subagent<M>(
     handler,
   }: { description?: string; name?: string; handler?: keyof M & string } = {},
 ): Tool {
-  return tool({
+  return withSpec(subagentTool(agent.name, toolName, description, handler ?? 'chat'), {
+    kind: 'subagent',
+    agent: agent.name,
+    handler: handler ?? 'chat',
+  });
+}
+
+/** {@link subagent}'s tool, without its spec. */
+function subagentTool(agentName: string, toolName: string, description: string | undefined, handler: string): Tool {
+  return ownTool({
     name: toolName,
     description:
-      `Hand a task to the ${agent.name} agent${description ? ` (${description})` : ''}, and get its answer. ` +
+      `Hand a task to the ${agentName} agent${description ? ` (${description})` : ''}, and get its answer. ` +
       'Tasks of different names run at once; the same name continues the same task.',
     input: z.object({
       name: z
@@ -345,8 +401,8 @@ export function subagent<M>(
       task: z.string().describe('The task in full: the agent sees nothing else'),
     }),
     run: async ({ name, task }, context) =>
-      once(agent.name, { name, task }, context, (c) =>
-        invoke(c, { service: agent.name, key: `${c.ctx.key}.${name}`, method: handler ?? 'chat', parameter: task }),
+      once(agentName, { name, task }, context, (c) =>
+        invoke(c, { service: agentName, key: `${c.ctx.key}.${name}`, method: handler, parameter: task }),
       ),
   });
 }
@@ -375,12 +431,15 @@ export function subagent<M>(
  * for the next wait for its name.
  */
 export const signal = (name: string, options: { description: string; input?: z.ZodObject; name?: string }): Tool =>
-  tool({
-    name: options.name ?? `wait_for_${name}`,
-    description: options.description,
-    input: z.object(options.input?.shape ?? {}),
-    run: async (input, context) => wait(context, name, input, { shown: options.input !== undefined }),
-  });
+  withSpec(
+    ownTool({
+      name: options.name ?? `wait_for_${name}`,
+      description: options.description,
+      input: z.object(options.input?.shape ?? {}),
+      run: async (input, context) => wait(context, name, input, { shown: options.input !== undefined }),
+    }),
+    { kind: 'signal', name, shown: options.input !== undefined },
+  );
 
 /**
  * Wait for signal `name` as tool call `toolCall`, once however often it runs;

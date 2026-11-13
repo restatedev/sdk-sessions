@@ -1,7 +1,7 @@
 {
   "name": "@restatedev/agents",
   "version": "0.7.0",
-  "description": "Agent frameworks in Restate virtual objects, their state in the object's SQL database: pi, OpenCode, LangGraph, Claude (Anthropic SDK) and DeepSeek Harness",
+  "description": "Agent frameworks in Restate virtual objects, their state in the object's SQL database: pi, OpenCode, LangGraph, Claude (Anthropic SDK) and DeepSeek Harness; and agentlib, journaled",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -16,6 +16,7 @@
   "sideEffects": false,
   "exports": {
     ".": "./src/index.ts",
+    "./agentlib": "./src/agentlib/index.ts",
     "./claude": "./src/claude/index.ts",
     "./client": "./src/client.ts",
     "./deepseek": "./src/deepseek/index.ts",
@@ -31,6 +32,10 @@
       ".": {
         "types": "./dist/index.d.ts",
         "default": "./dist/index.js"
+      },
+      "./agentlib": {
+        "types": "./dist/agentlib/index.d.ts",
+        "default": "./dist/agentlib/index.js"
       },
       "./claude": {
         "types": "./dist/claude/index.d.ts",
@@ -77,6 +82,8 @@
     "@standard-schema/spec": "1.1.0"
   },
   "devDependencies": {
+    "@ai-sdk/anthropic": "4.0.14",
+    "@ai-sdk/openai": "4.0.13",
     "@ai-sdk/provider": "3.0.8",
     "@anthropic-ai/sdk": "1.8.0",
     "@deepseek-ai/cordis": "4.1.0",
@@ -128,12 +135,16 @@
     "@opencode/plugin": "2.2.7",
     "@opencode/sdk": "2.2.7",
     "@opencode/server": "2.2.7",
+    "@restatedev/agentlib": "0.1.0",
     "@restatedev/restate-sdk": "1.18.2",
+    "@restatedev/restate-sdk-gen": "1.18.2",
     "@restatedev/sessions": "workspace:*",
     "effect": "4.1.0",
     "zod": "4.6.7"
   },
   "peerDependencies": {
+    "@ai-sdk/anthropic": "^4.0.14",
+    "@ai-sdk/openai": "^4.0.13",
     "@anthropic-ai/sdk": "^1.8.0",
     "@deepseek-ai/cordis": "~4.1.0",
     "@deepseek-ai/dsh-agent": "0.2.2-rc.2",
@@ -166,11 +177,19 @@
     "@opencode/plugin": "2.2.7",
     "@opencode/sdk": "2.2.7",
     "@opencode/server": "2.2.7",
+    "@restatedev/agentlib": "~0.1.0",
+    "@restatedev/restate-sdk-gen": "1.18.2",
     "@restatedev/sessions": "workspace:^",
     "effect": "4.1.0",
     "zod": "^4.6.7"
   },
   "peerDependenciesMeta": {
+    "@ai-sdk/anthropic": {
+      "optional": true
+    },
+    "@ai-sdk/openai": {
+      "optional": true
+    },
     "@anthropic-ai/sdk": {
       "optional": true
     },
@@ -265,6 +284,12 @@
       "optional": true
     },
     "@opencode/server": {
+      "optional": true
+    },
+    "@restatedev/agentlib": {
+      "optional": true
+    },
+    "@restatedev/restate-sdk-gen": {
       "optional": true
     },
     "effect": {

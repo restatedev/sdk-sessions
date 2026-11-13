@@ -14,13 +14,16 @@
     "steering": "node steering.ts",
     "bench": "node bench.ts",
     "serve": "node serve.ts",
-    "packaging": "node packaging.ts"
+    "packaging": "node packaging.ts",
+    "agentlib": "node agentlib.ts"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "1.5.2",
+    "@restatedev/agentlib": "0.1.0",
     "@restatedev/agents": "workspace:*",
     "@restatedev/restate-sdk": "1.18.2",
     "@restatedev/restate-sdk-clients": "1.18.2",
+    "@restatedev/restate-sdk-gen": "1.18.2",
     "@restatedev/sessions": "workspace:*",
     "zod": "4.6.7"
   },

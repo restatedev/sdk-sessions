@@ -86,6 +86,21 @@ export const providerOf = (model: string): [provider: string, id: string] => {
  */
 export const REFUSED = 424;
 
+/** The texts that approve a tool call that waits for a person's approval, whatever their case. */
+const APPROVED: ReadonlySet<string> = new Set(['approved', 'approve', 'yes', 'ok', 'allow', 'allowed']);
+
+/**
+ * Whether `value`, a signal's that a tool call waits for to run (an
+ * approval), approves it: `true`, `{ "approved": true }`, or a text such as
+ * "approved" or "yes", whatever its case. Anything else denies it, so a
+ * value that does not say "approved" never runs the tool. Every framework's
+ * approvals take it (DeepSeek's, OpenCode's, agentlib's).
+ */
+export const approves = (value: unknown): boolean =>
+  value === true ||
+  (typeof value === 'string' && APPROVED.has(value.trim().toLowerCase())) ||
+  (typeof value === 'object' && value !== null && (value as { approved?: unknown }).approved === true);
+
 /** What to check when a model's provider refuses a request. */
 export const CHECK_MODEL = "check the agent's model (its `model` option, or MODEL) and its provider's API key";
 
