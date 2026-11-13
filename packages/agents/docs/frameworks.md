@@ -63,14 +63,15 @@ joins it at a step: after a reply's tool results, before the next model
 request. Each integration puts the messages in that request, in place, and
 stores them once in the turn:
 
-|                                | Where it takes them                                                                                                    | How                                                                                                                                                                                                                                                                                                                                                                                        |
-| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Claude                         | before the turn's first request, and after each round's results (`takeSteers`)                                         | the runner leaves the history to its caller once the messages are taken: its next request is `history()`, which has them after the results. Not after a paused reply, which goes back as the last message                                                                                                                                                                                  |
-| LangGraph, built-in agent      | in the model node, before each request (`takeSteers`)                                                                  | they go in the request and stay in the run's state, with the id `steer:<id>` (`items.steered`)                                                                                                                                                                                                                                                                                             |
-| LangGraph, a graph of your own | none: each is a turn of its own                                                                                        | the graph keeps its own state, which the turn cannot add to in place                                                                                                                                                                                                                                                                                                                       |
-| pi                             | as a round of tool calls is done (pi-durable's `afterTools` hook)                                                      | each waiting message is submitted to pi's inbox (`whenBusy: 'steer'`, keyed `steer:<id>`, an entry of kind `restate.steer`), which pi places after the round's results (`steeringMode: 'all'`); the copy of pi's commit into the turn stores it, with `taken`                                                                                                                              |
-| DeepSeek                       | at the step after it hears of it: a publish once a reply with tool calls, or a result, is stored                       | each waiting message goes to the harness's step inbox (`agent.steer`, a user message `steer:<id>`), which the harness places at its next step; the copy of its flush into the turn stores it, with `taken`. A message sent while a tool runs is heard of as its result is stored, which is as the next model request goes out: it joins at the step after that request's, in the same turn |
-| OpenCode                       | as a tool call of a round returns (the tool's `execute.after` hook, which OpenCode awaits before it stores the result) | each waiting message is submitted to OpenCode (`delivery: 'steer'`, id `msg_steer_<id>`, with its steer id in `metadata.steer`), which places it at the round's next step, after the round's results; the call's result is copied as the tool returned it first, so that the copy's publish lists the message in time; the copy of what OpenCode placed stores it, with `taken`            |
+|                                | Where it takes them                                                                                                    | How                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Claude                         | before the turn's first request, and after each round's results (`takeSteers`)                                         | the runner leaves the history to its caller once the messages are taken: its next request is `history()`, which has them after the results. Not after a paused reply, which goes back as the last message                                                                                                                                                                                                                                                                                       |
+| LangGraph, built-in agent      | in the model node, before each request (`takeSteers`)                                                                  | they go in the request and stay in the run's state, with the id `steer:<id>` (`items.steered`)                                                                                                                                                                                                                                                                                                                                                                                                  |
+| LangGraph, a graph of your own | none: each is a turn of its own                                                                                        | the graph keeps its own state, which the turn cannot add to in place                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| pi                             | as a round of tool calls is done (pi-durable's `afterTools` hook)                                                      | each waiting message is submitted to pi's inbox (`whenBusy: 'steer'`, keyed `steer:<id>`, an entry of kind `restate.steer`), which pi places after the round's results (`steeringMode: 'all'`); the copy of pi's commit into the turn stores it, with `taken`                                                                                                                                                                                                                                   |
+| DeepSeek                       | at the step after it hears of it: a publish once a reply with tool calls, or a result, is stored                       | each waiting message goes to the harness's step inbox (`agent.steer`, a user message `steer:<id>`), which the harness places at its next step; the copy of its flush into the turn stores it, with `taken`. A message sent while a tool runs is heard of as its result is stored, which is as the next model request goes out: it joins at the step after that request's, in the same turn                                                                                                      |
+| OpenCode                       | as a tool call of a round returns (the tool's `execute.after` hook, which OpenCode awaits before it stores the result) | each waiting message is submitted to OpenCode (`delivery: 'steer'`, id `msg_steer_<id>`, with its steer id in `metadata.steer`), which places it at the round's next step, after the round's results; the call's result is copied as the tool returned it first, so that the copy's publish lists the message in time; the copy of what OpenCode placed stores it, with `taken`                                                                                                                 |
+| Claude Code                    | as a tool call returns (the `PostToolUse` hook, which Claude Code awaits before it goes on)                            | the call's result is copied as the tool returned it and published; each waiting message is then streamed to Claude Code (`priority: 'next'`, its uuid made from its steer id), and the hook waits until Claude Code queued it (its transcript's `queue-operation`): Claude Code places it at its next step, after the round's results, as a system message; the copy of the transcript's `queued_command` stores it, with `taken`. A message never given while a tool runs is a turn of its own |
 
 `langgraph.chat` with options that a function gives decides per message,
 as its turn starts, from the options it gives (once per attempt): a graph of
@@ -838,3 +839,87 @@ and its ask never settles. An ask of no tool call is denied.
   attempt killed at a turn's end (the stored final reply answers, once);
   `test/opencode-spike.test.ts`, `db.ts` alone; the e2e crash test's
   `OpenCodeAgent`, kills included.
+
+## Claude Code
+
+`@anthropic-ai/claude-agent-sdk` 0.3.322 (Claude Code 2.1.322), pinned
+exactly, an optional peer. [`src/claude-agent/`](../src/claude-agent). Not
+the `claude` integration: that one is the Anthropic SDK's tool runner in the
+handler's process; this one runs Claude Code, Anthropic's coding agent, as a
+process of its own. The research behind it (spikes against the real
+process, on a scripted Messages API) is in the design note of this branch's
+first phase; what it found that the code rests on is below.
+
+### The library
+
+- **A process**: the SDK starts Claude Code's native binary (from the
+  package for the platform, ~350 MB) and talks to it over stdin and stdout.
+  Its loop, its tools, its permissions and its compaction are its own. Our
+  tools are an in-process MCP server (`createSdkMcpServer`), whose handlers
+  run in the handler's process, with its `ctx`; hooks and `canUseTool` too.
+- **Its history is its transcript**, a JSONL file in `CLAUDE_CONFIG_DIR`,
+  which it resumes from (`resume`). The SDK's `sessionStore` (alpha) mirrors
+  each line to an adapter as it is written (`sessionStoreFlush: 'eager'`:
+  each frame), and `load`s it back before a resumed process starts, into a
+  temporary directory.
+- **It runs a tool before the mirror has its call**, while the reply still
+  streams; but it awaits a `PreToolUse` hook before every tool.
+- **A process left alone finishes its turn**: closing its input gives it a
+  2 s grace before SIGTERM, in which it asks the model again; one whose
+  parent died does too (its tools, whose hooks fail, do not run).
+- **Resuming an interrupted turn** without a new prompt is an environment
+  variable of Anthropic's own runner, `CLAUDE_CODE_RESUME_INTERRUPTED_TURN`:
+  read from the environment, gated by no flag itself; but how the turn is
+  rescued reads remote flags where its environment does not say (the
+  oldest turn it rescues: `CLAUDE_CODE_RESUME_INTERRUPTED_TURN_MAX_AGE_MS`,
+  which the integration sets; how cut-off calls are shown: never reached,
+  as the integration gives each a result first).
+
+### As built: framework-owned history, in `ctx.db`
+
+- **The transcript is a table of `ctx.db`**
+  (`restate_agents_claude_agent_entries`, a row per line, by subpath and
+  uuid), and the session's id another (`restate_agents_claude_agent`). The
+  store's `append` runs in the handler's process: it stores the lines and
+  copies what is new of the turn (each reply, by its API message's id; each
+  result of the turn's calls; each message steered to it, by the uuid it
+  was given) in one transaction. So the copy never lags, and no second
+  database is needed (OpenCode needs one: it boots only on its own).
+- **A tool runs only once its call is stored**: the `PreToolUse` hook waits
+  until the call is committed (and published).
+- **A retried attempt**: a stored final reply is the answer; a prompt whose
+  line is not in the transcript (its uuid is made from the prompt's id) is
+  submitted; one whose is, is resumed: each call the transcript cut off
+  gets a result, stored in the transcript (a line chained after its last)
+  and in the turn before the process starts (a tool of ours is run again,
+  by its call id; one of Claude Code's own gets Claude Code's "interrupted"
+  note), and Claude Code goes on with the turn without a prompt.
+- **A dead turn** is closed in the conversation alone: the next prompt
+  resumes the transcript, whose open calls Claude Code closes itself, with
+  the note in front (`(Ended: … These calls did happen: …)`).
+- **Stop** interrupts Claude Code (`interrupt()`: no model request, its
+  own record of the stop in the transcript), and the turn closes cancelled.
+  An attempt that ends kills the process (SIGKILL; on Linux it is also tied
+  to the handler's process, `setpriv --pdeathsig`).
+- **Errors**: a request refused for good (a wrong key, an unknown model) is
+  424 at the first retry Claude Code would make; an outage is Claude Code's
+  to retry (`CLAUDE_CODE_MAX_RETRIES`), then the attempt fails and the next
+  resumes the turn; a refusal (after Claude Code's own fallback model) and
+  `maxTurns` end the turn.
+
+### Left
+
+- **Claude Code's subagents and background work** (its `Agent`,
+  `Workflow`, background shells): left out, as OpenCode's.
+- **Risks**: an undocumented resume, a transcript format of Claude Code's
+  own, an alpha store, all pinned to the exact version, with a test per
+  seam; a process per attempt (~0.4 s, ~200 MB).
+- **Tests** (`test/claude-agent.test.ts`, on the teller served over HTTP):
+  answered once, crashes in a tool call (twice in a row too) and at any
+  state request, a killed turn closed by the next message and by `settle`
+  (with the calls that did happen), the final reply after a crash at the
+  turn's end, stops, an ended attempt (no model request after it),
+  publishes, the views, `clear`, asking again, the system prompt and model,
+  refusals, outages, a declined reply, `maxTurns`, steering, the workspace
+  and its permissions (approved, denied, through a crash), and the process
+  dying with its parent; the e2e crash test's `ClaudeCodeAgent`.

@@ -1,7 +1,7 @@
 # @restatedev/agents
 
-Durable agents on Restate: an agent of one of five frameworks (pi,
-LangGraph, Claude, the DeepSeek Harness, OpenCode) in a Restate virtual
+Durable agents on Restate: an agent of one of six frameworks (pi,
+LangGraph, Claude, Claude Code, the DeepSeek Harness, OpenCode) in a Restate virtual
 object, its conversation in the object's own SQL database. A crash, a restart or a
 person who takes a day to approve changes nothing: each message is answered
 once, and each tool call is made once.
@@ -79,13 +79,14 @@ the handler `chat` (a message in, the answer out), and the views
 `notifications` and `watch` (to follow it), and `signal` and `pending`
 ([Signals](#signals)).
 
-| Import                                                    | Framework                       | Choose it when                                                                                |
-| --------------------------------------------------------- | ------------------------------- | --------------------------------------------------------------------------------------------- |
-| [`@restatedev/agents/pi`](src/pi/README.md)               | pi-durable                      | You want the default: any provider, coding tools on request, and its Harness (compact, reset) |
-| [`@restatedev/agents/langgraph`](src/langgraph/README.md) | LangGraph                       | You use LangChain: its tools, a chat model of your own, or a graph of your own                |
-| [`@restatedev/agents/claude`](src/claude/README.md)       | the Anthropic SDK's tool runner | You want Claude with nothing in between: the lightest, the API's own messages                 |
-| [`@restatedev/agents/deepseek`](src/deepseek/README.md)   | DeepSeek Harness                | You want DeepSeek's harness: DeepSeek's models, or any pi-ai knows                            |
-| [`@restatedev/agents/opencode`](src/opencode/README.md)   | OpenCode                        | You want OpenCode's agent: its own coding tools in a workspace, any provider it serves        |
+| Import                                                          | Framework                          | Choose it when                                                                                      |
+| --------------------------------------------------------------- | ---------------------------------- | --------------------------------------------------------------------------------------------------- |
+| [`@restatedev/agents/pi`](src/pi/README.md)                     | pi-durable                         | You want the default: any provider, coding tools on request, and its Harness (compact, reset)       |
+| [`@restatedev/agents/langgraph`](src/langgraph/README.md)       | LangGraph                          | You use LangChain: its tools, a chat model of your own, or a graph of your own                      |
+| [`@restatedev/agents/claude`](src/claude/README.md)             | the Anthropic SDK's tool runner    | You want Claude with nothing in between: the lightest, the API's own messages                       |
+| [`@restatedev/agents/claude-agent`](src/claude-agent/README.md) | Claude Code (the Claude Agent SDK) | You want Claude Code's agent: its own loop and coding tools in a workspace, as a process of its own |
+| [`@restatedev/agents/deepseek`](src/deepseek/README.md)         | DeepSeek Harness                   | You want DeepSeek's harness: DeepSeek's models, or any pi-ai knows                                  |
+| [`@restatedev/agents/opencode`](src/opencode/README.md)         | OpenCode                           | You want OpenCode's agent: its own coding tools in a workspace, any provider it serves              |
 
 Each framework's packages are optional peer dependencies of
 @restatedev/agents: a project installs @restatedev/agents, whose required peers
@@ -96,6 +97,7 @@ install with it, and the packages of the frameworks it imports, so that
 ```sh
 npm install @restatedev/agents @earendil-works/pi-durable @earendil-works/pi-ai @earendil-works/chord   # pi
 npm install @restatedev/agents @anthropic-ai/sdk                                                        # Claude
+npm install @restatedev/agents @anthropic-ai/claude-agent-sdk@0.3.322                                    # Claude Code
 npm install @restatedev/agents @langchain/core @langchain/langgraph @langchain/langgraph-checkpoint \
   @langchain/openai                       # LangGraph, and the provider of its models: or @langchain/anthropic
 npm install @restatedev/agents @earendil-works/pi-ai @deepseek-ai/cordis \
@@ -113,10 +115,31 @@ their tarballs, with pi alone. In this repository the frameworks' packages
 are @restatedev/agents' development dependencies, so every example runs as it is.
 
 Every framework takes `model`, `system`, `tools` and `output` (a
-[structured answer](#structured-answers)); pi and OpenCode take a
+[structured answer](#structured-answers)); pi, Claude Code and OpenCode take a
 `workspace` too, a directory for their coding tools. `system` is the whole
-system prompt for Claude and LangGraph, and is added to the framework's own
-(which tells the model about its tools) for pi, DeepSeek and OpenCode.
+system prompt for Claude and LangGraph (and for Claude Code without a
+workspace), and is added to the framework's own (which tells the model about
+its tools) for pi, DeepSeek, OpenCode, and Claude Code with a workspace.
+
+**Claude and Claude Code are two integrations.** `claude` is the Anthropic
+SDK's tool runner, in the handler's own process: the loop is a few lines,
+the model's history is the conversation of turns, and the tools are only
+yours. `claude-agent` runs Claude Code, through the Claude Agent SDK, as a
+process of its own for each attempt: Claude Code's loop, its own history
+(its transcript, kept in the object's database), and, with a `workspace`,
+its own coding tools (read, write, edit, bash, glob, grep). Choose `claude`
+for an agent of your tools; `claude-agent` for Claude Code's agent.
+
+**Claude Code** runs as a process of its own (Claude Code's native binary,
+from the SDK's package for the platform), which the handler starts for each
+attempt. Its transcript is mirrored, line by line, into the object's
+database, and copied into the turn in the same transaction; a tool runs
+only once its call is stored. A crashed attempt's turn is resumed, each
+call it cut off given a result first (a tool of yours made again under the
+same call id, so its Restate calls are made once); a killed invocation's
+turn is closed without Claude Code, and the next prompt tells the model how
+it ended. With `approval: true`, Claude Code's own tools wait for a
+person's approval ([its README](src/claude-agent/README.md)).
 
 **OpenCode** runs embedded in the handler, on Node 24 (its sources do not
 load on Node 22), and keeps its own history in a database of the key's own,
@@ -143,8 +166,8 @@ Every agent takes these too, beside its framework's options:
 | `budget`      | How many tokens of the turns before the window its model sees, as their messages and answers (default 32 000); `summarize` summarizes the rest   |
 
 `window` and `budget` bound what Claude's and LangGraph's model is sent
-([what the model gets](docs/conversation.md)); pi, the DeepSeek Harness and
-OpenCode keep their own history, and compact it themselves. An object holds one
+([what the model gets](docs/conversation.md)); pi, the DeepSeek Harness,
+Claude Code and OpenCode keep their own history, and compact it themselves. An object holds one
 framework's conversation: its turns are that framework's messages.
 
 ## Calling an agent
@@ -232,8 +255,8 @@ curl localhost:8080/assistant/alice/steer -H 'idempotency-key: 7f3c…' -d 'Skip
 step, or `turn: null` if it is answered as a turn of its own; `status`
 lists the messages the turn holds and has not taken yet (`steering`). A
 turn takes at most 16. Claude and LangGraph's built-in agent take them
-before each model request that follows a round of tool calls; pi, DeepSeek
-and OpenCode through their own inboxes; a LangGraph graph of your own, and a
+before each model request that follows a round of tool calls; pi, DeepSeek,
+Claude Code and OpenCode through their own inboxes; a LangGraph graph of your own, and a
 background agent, take none ([Steering a turn](docs/turns.md#steering-a-turn)).
 To change course outright, stop the turn (`stop`) and send the message that
 replaces it.
@@ -506,7 +529,9 @@ A DeepSeek agent's tool calls that need a person's approval (its `approval`
 option) wait the same way, for the signal `approval`: see
 [its README](src/deepseek/README.md#approvals). So do an OpenCode agent's
 with `approval: true`, those its permission rules ask about: see
-[its README](src/opencode/README.md#permissions).
+[its README](src/opencode/README.md#permissions); and a Claude Code agent's
+calls of Claude Code's own tools, with `approval: true`: see
+[its README](src/claude-agent/README.md#permissions).
 
 A wait ends with its agent's invocation: a cancelled or killed one leaves `pending`.
 The waits are kept by the agent's companion, `<agent>.prebuilt.restate`
@@ -631,7 +656,8 @@ pi.agent({ name: 'assistant', model: 'anthropic/claude-sonnet-5-5' }); // with A
 pi, the DeepSeek Harness and OpenCode take any provider they know (the
 DeepSeek Harness, pi-ai's; OpenCode, its own providers'); LangGraph OpenAI's
 and Anthropic's models (and any LangChain chat model, as `model`); Claude
-Anthropic's.
+Anthropic's. Claude Code takes a Claude model id (`anthropic/` before it is
+left out), or, with neither `model` nor `MODEL`, Claude Code's own default.
 
 A wrong model fails at once: a model that is not `provider/model-id`, or
 another provider's for an agent of one provider's models, when the agent is

@@ -1,7 +1,7 @@
 {
   "name": "@restatedev/agents",
   "version": "0.6.0",
-  "description": "Agent frameworks in Restate virtual objects, their state in the object's SQL database: pi, OpenCode, LangGraph, Claude (Anthropic SDK) and DeepSeek Harness",
+  "description": "Agent frameworks in Restate virtual objects, their state in the object's SQL database: pi, OpenCode, LangGraph, Claude (Anthropic SDK), Claude Code (Claude Agent SDK) and DeepSeek Harness",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -17,6 +17,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./claude": "./src/claude/index.ts",
+    "./claude-agent": "./src/claude-agent/index.ts",
     "./client": "./src/client.ts",
     "./deepseek": "./src/deepseek/index.ts",
     "./langgraph": "./src/langgraph/index.ts",
@@ -35,6 +36,10 @@
       "./claude": {
         "types": "./dist/claude/index.d.ts",
         "default": "./dist/claude/index.js"
+      },
+      "./claude-agent": {
+        "types": "./dist/claude-agent/index.d.ts",
+        "default": "./dist/claude-agent/index.js"
       },
       "./client": {
         "types": "./dist/client.d.ts",
@@ -78,6 +83,7 @@
   },
   "devDependencies": {
     "@ai-sdk/provider": "3.0.8",
+    "@anthropic-ai/claude-agent-sdk": "0.3.322",
     "@anthropic-ai/sdk": "0.133.0",
     "@deepseek-ai/cordis": "4.0.5",
     "@deepseek-ai/cordis-plugin-loader": "1.0.6",
@@ -132,6 +138,7 @@
     "zod": "4.6.5"
   },
   "peerDependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.322",
     "@anthropic-ai/sdk": "^0.133.0",
     "@deepseek-ai/cordis": "~4.0.5",
     "@deepseek-ai/dsh-agent": "0.2.1-rc.2",
@@ -168,6 +175,9 @@
     "zod": "^4.6.5"
   },
   "peerDependenciesMeta": {
+    "@anthropic-ai/claude-agent-sdk": {
+      "optional": true
+    },
     "@anthropic-ai/sdk": {
       "optional": true
     },

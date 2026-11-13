@@ -12,16 +12,17 @@ that put them together. New to it all? Begin with
 
 ### Basic
 
-| File                                 | What                                                                                                                                       |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| [`chat.ts`](basic/chat.ts)           | **Start here.** A durable chat agent on pi, with a tool: `pi.agent({ name: 'pi_assistant', tools: [weather] })`                            |
-| [`langgraph.ts`](basic/langgraph.ts) | The same agent on LangGraph                                                                                                                |
-| [`claude.ts`](basic/claude.ts)       | The same agent on Claude (the Anthropic SDK's tool runner; `ANTHROPIC_API_KEY`)                                                            |
-| [`deepseek.ts`](basic/deepseek.ts)   | The same agent on the DeepSeek Harness (`DEEPSEEK_API_KEY`)                                                                                |
-| [`opencode.ts`](basic/opencode.ts)   | The same agent on OpenCode, embedded in the handler                                                                                        |
-| [`models.ts`](basic/models.ts)       | Models you set up yourself: LangGraph on `ChatOpenAI`s of your own (a gateway, no retries of its own; a high temperature)                  |
-| [`memory.ts`](basic/memory.ts)       | An assistant that remembers facts about you in its own SQL table, through its tools (`ctx.db`), with a view of your own beside the agent's |
-| [`notes.ts`](basic/notes.ts)         | SQL in a virtual object, with `ctx.db`, and no agent                                                                                       |
+| File                                       | What                                                                                                                                       |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| [`chat.ts`](basic/chat.ts)                 | **Start here.** A durable chat agent on pi, with a tool: `pi.agent({ name: 'pi_assistant', tools: [weather] })`                            |
+| [`langgraph.ts`](basic/langgraph.ts)       | The same agent on LangGraph                                                                                                                |
+| [`claude.ts`](basic/claude.ts)             | The same agent on Claude (the Anthropic SDK's tool runner; `ANTHROPIC_API_KEY`)                                                            |
+| [`claude-agent.ts`](basic/claude-agent.ts) | The same agent on Claude Code (the Claude Agent SDK, a process of its own), with a workspace for Claude Code's own tools                   |
+| [`deepseek.ts`](basic/deepseek.ts)         | The same agent on the DeepSeek Harness (`DEEPSEEK_API_KEY`)                                                                                |
+| [`opencode.ts`](basic/opencode.ts)         | The same agent on OpenCode, embedded in the handler                                                                                        |
+| [`models.ts`](basic/models.ts)             | Models you set up yourself: LangGraph on `ChatOpenAI`s of your own (a gateway, no retries of its own; a high temperature)                  |
+| [`memory.ts`](basic/memory.ts)             | An assistant that remembers facts about you in its own SQL table, through its tools (`ctx.db`), with a view of your own beside the agent's |
+| [`notes.ts`](basic/notes.ts)               | SQL in a virtual object, with `ctx.db`, and no agent                                                                                       |
 
 ### Intermediate
 

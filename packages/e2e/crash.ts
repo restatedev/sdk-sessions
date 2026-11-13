@@ -12,18 +12,21 @@
 // processes so often that a write of the warehouse, the key every order of a
 // SKU goes through, could not finish. Each kind of agent runs in its own: the pi, LangGraph and DeepSeek Harness agents
 // (AGENT_ABORT_PER_MILLE, default 3: a pi or DeepSeek Harness prompt makes
-// some hundreds of state requests), the Claude agents (the same), and the
+// some hundreds of state requests), the Claude agents (the same), the Claude
+// Code agents (the same; each attempt starts Claude Code, a process of its
+// own, whose model is the teller served here, over HTTP), and the
 // OpenCode agents (OPENCODE_ABORT_PER_MILLE, default AGENT_ABORT_PER_MILLE;
 // Node 24, as OpenCode needs).
 // The agents get the same prompts. Each request is resent until answered,
-// some twice. Some of the OpenCode agents' prompts are killed instead
+// some twice. Some of the OpenCode and Claude Code agents' prompts are killed instead
 // (Restate's kill of their invocation): at a random moment, once their
 // transfer call shows in the conversation, or once the ledger answered it. A
 // killed turn is closed (by the next prompt), never finished, and its money
 // moves at most once.
 //
-// The agents' models are the scripted tellers (@restatedev/agents/test/fakes/fakes.ts, and for
-// OpenCode ./opencode-teller.ts), which need no API key: "move 5 from 1 to 2" makes a transfer.
+// The agents' models are the scripted tellers (@restatedev/agents/test/fakes/fakes.ts, for
+// OpenCode ./opencode-teller.ts, and for Claude Code @restatedev/agents/test/fakes/claude-agent.ts),
+// which need no API key: "move 5 from 1 to 2" makes a transfer.
 //
 // Checks: the warehouses' books balance and agree with every order; every
 // transfer between accounts is on both of its keys or on neither, and the
@@ -63,6 +66,7 @@ import type { Move, Statement } from '@restatedev/sessions/test/bank';
 import type { Audit } from '@restatedev/sessions/test/ledger';
 import type { Order, Reservation } from '@restatedev/sessions/test/shop';
 import { seeded, seedFromEnv } from '@restatedev/sessions/test/random';
+import { startTeller, tellerEnv } from '@restatedev/agents/test/fakes/claude-agent';
 import { RESTATE_SERVER as SERVER } from './restate-server.ts';
 import { assertNoneSuspendedOnCancellationAlone } from './suspensions.ts';
 
@@ -93,6 +97,8 @@ const pair = (name: string, groups: string[], ports: [number, number], proxy: nu
   { name, groups, port: ports[0], perMille: PER_MILLE, behind: proxy },
   { name: `${name}-small`, groups, port: ports[1], perMille: PER_MILLE, behind: proxy, env: SMALL_CACHE },
 ];
+/** The Claude Code agent's model: the teller, over HTTP, served by this process. */
+const TELLER = await startTeller();
 const PROCESSES: Process[] = [
   ...pair('shop', ['ledger', 'shop'], [9180, 9181], SHOP_PROXY),
   ...pair('bank', ['bank'], [9184, 9185], BANK_PROXY),
@@ -104,6 +110,9 @@ const PROCESSES: Process[] = [
   // then failed). At the agents' rate, an attempt survives five times as often.
   { name: 'claude', groups: ['claude'], port: 9187, perMille: AGENT_PER_MILLE },
   { name: 'deepseek', groups: ['deepseek'], port: 9188, perMille: AGENT_PER_MILLE },
+  // Claude Code runs as a process of the agent's, which reaches its model, the
+  // teller, over HTTP: the teller is served here, and outlives every restart.
+  { name: 'claude-agent', groups: ['claude-agent'], port: 9191, perMille: AGENT_PER_MILLE, env: tellerEnv(TELLER) },
   // OpenCode's model is a plugin's: its process swaps the module that boots
   // OpenCode for one that gives every boot the teller.
   {
@@ -115,12 +124,12 @@ const PROCESSES: Process[] = [
     imports: [fileURLToPath(new URL('opencode-teller.ts', import.meta.url))],
   },
 ];
-// The agents: the pi one, the LangGraph one, the Claude one, the DeepSeek
-// Harness one and the OpenCode one, with the same prompts.
-const AGENTS = ['Agent', 'GraphAgent', 'ClaudeAgent', 'DeepSeekAgent', 'OpenCodeAgent'];
+// The agents: the pi one, the LangGraph one, the Claude one, the Claude Code
+// one, the DeepSeek Harness one and the OpenCode one, with the same prompts.
+const AGENTS = ['Agent', 'GraphAgent', 'ClaudeAgent', 'ClaudeCodeAgent', 'DeepSeekAgent', 'OpenCodeAgent'];
 // The agents some of whose prompts are killed, and which: one of each three,
 // never one sent twice nor the audit. Each kill is checked in their conversation.
-const KILLED = new Set(['OpenCodeAgent']);
+const KILLED = new Set(['OpenCodeAgent', 'ClaudeCodeAgent']);
 const killedPrompt = (name: string, p: number) => KILLED.has(name) && p % 3 === 2;
 const FAKES = fileURLToPath(import.meta.resolve('@restatedev/agents/test/fakes/fakes'));
 const EXPIRY_MS = 1500;
