@@ -22,7 +22,7 @@
 // answered as a turn of its own. So each message is answered once.
 import type * as restate from '@restatedev/sessions';
 import type { Transaction } from '@restatedev/sessions';
-import { inboxOf, stopSignalOf } from './common.ts';
+import { type AgentContext, inboxOf, stopSignalOf } from './common.ts';
 import type { Conversation } from './conversation.ts';
 import { companionHere } from './companion.ts';
 
@@ -62,7 +62,7 @@ export async function takeSteers<I>(ctx: restate.SessionContext, conversation: C
  * stored, and once. A framework that places steered messages itself (pi,
  * DeepSeek) calls it as it copies them into the turn.
  */
-export function tookSteers(ctx: restate.SessionContext, tx: Transaction, ids: string[]) {
+export function tookSteers(ctx: AgentContext, tx: Transaction, ids: string[]) {
   if (ids.length === 0) return;
   tx.send(companionHere(ctx, 'steering'), ctx.key, { idempotencyKey: `taken:${ids[0]}` }).taken(ids);
 }

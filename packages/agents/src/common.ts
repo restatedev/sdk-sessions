@@ -9,6 +9,32 @@ import { flushHeld, settleCalls } from './calls.ts';
 import { companionHere, type Published, type Steer } from './companion.ts';
 
 /**
+ * The context of an agent's handler: a session context, from an object that
+ * has a companion.
+ *
+ * The agent's own surface takes it: the handlers and views of
+ * `sessionObject()` and of a framework's `agent()`, a `chat` handler's
+ * answer, and what only an agent does with a context ({@link chatTurn},
+ * {@link publish}). The layer a handler belongs to is then in its
+ * signature, where the person writing it reads it, rather than found out in
+ * the middle of a turn, after a model round-trip, looking like a tool
+ * failure.
+ *
+ * It is a signpost, not a fence: it adds nothing to a session context, so
+ * the two are the same type to the compiler, and `NoCompanion` stays the
+ * guard that stops a wait from an object without a companion.
+ */
+export interface AgentContext extends restate.SessionContext {}
+
+/**
+ * The context of an agent's view: a view context, from an object that has a
+ * companion. What {@link AgentContext} is to a handler, for the views that
+ * read what the agent is doing, or tell its companion to (`status`,
+ * `pending`, `signal`, `steer`, `watch`).
+ */
+export interface AgentViewContext extends restate.ViewContext {}
+
+/**
  * A value, or a function of the invocation's context that gives it: the
  * same for every message, or each user's (from the object's database, say).
  *
@@ -331,7 +357,7 @@ export const inboxOf = (ctx: restate.SessionContext) => INBOX.get(ctx);
  * `settle` publish, on an object with a companion: one without fails with a
  * terminal error (`NoCompanion`), rather than call a companion nobody serves.
  */
-export const publish = async (ctx: restate.SessionContext) => {
+export const publish = async (ctx: AgentContext) => {
   const companion = companionOfAgent(ctx, 'a publish');
   await flushHeld(ctx);
   const published = await companion.publish();
@@ -426,14 +452,14 @@ export const aborted = (signal: AbortSignal) =>
   });
 
 /** A `chat` handler's answer to a message: a framework's prompt, say. */
-export type Chat<A = unknown> = (ctx: restate.SessionContext, message: string) => Promise<A>;
+export type Chat<A = unknown> = (ctx: AgentContext, message: string) => Promise<A>;
 
 /**
  * Whether a `chat` handler's turns take steered messages: for every message,
  * or for each, as the invocation's context says (a framework's options that
  * a function gives, say).
  */
-export type Steers = boolean | ((ctx: restate.SessionContext) => boolean | Promise<boolean>);
+export type Steers = boolean | ((ctx: AgentContext) => boolean | Promise<boolean>);
 
 /** What makes a `chat` handler (`chatHandler`): its answer, and whether it takes steered messages. */
 const CHAT = new Link<{ answer: Chat; steers: Steers }>('restate-agents.chat');
@@ -472,7 +498,7 @@ export const chatHandler = <A = string>(answer: Chat<A>, { steers = false }: { s
       input: messageSerde,
       accept: '*/*',
       explicitCancellation: true,
-      handler: (ctx: restate.SessionContext, text: string): Promise<A> => chatTurn(ctx, text, answer, steers),
+      handler: (ctx: AgentContext, text: string): Promise<A> => chatTurn(ctx, text, answer, steers),
     },
     { answer, steers },
   );
@@ -484,7 +510,7 @@ export const chatHandler = <A = string>(answer: Chat<A>, { steers = false }: { s
  * in the background).
  */
 export async function chatTurn<A>(
-  ctx: restate.SessionContext,
+  ctx: AgentContext,
   text: string,
   answer: Chat<A>,
   steers: Steers = false,

@@ -3,6 +3,8 @@
 // any of them, and the tools that are Restate itself.
 
 export {
+  type AgentContext,
+  type AgentViewContext,
   CANCELLED,
   chatHandler,
   type ChatMessage,
