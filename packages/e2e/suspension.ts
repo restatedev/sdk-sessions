@@ -336,7 +336,7 @@ await check('a watching handler that awaits a long call is suspended on it, unti
   const p = await start('watching', { ms: 0, after: 'longCall' });
   await sleep(2 * INACTIVITY);
   assert.equal(await statusOf(p.id), 'suspended');
-  const on = (await suspensions(ADMIN)).filter((s) => s.id === p.id).at(-1);
+  const on = (await suspensions(ADMIN)).findLast((s) => s.id === p.id);
   assert.deepEqual(on?.awaited.map((leaf) => Object.keys(leaf)[0]).toSorted(), ['CompletionId', 'SignalIndex']);
   const outcome = await p.outcome();
   assert.deepEqual({ ...outcome, ms: 0 }, { stopped: false, attempts: 2, ms: 0 });
