@@ -189,6 +189,7 @@ interface Line extends SessionStoreEntry {
   parentUuid?: string | null;
   isSidechain?: boolean;
   isApiErrorMessage?: boolean;
+  isMeta?: boolean;
   message?: {
     id?: string;
     role?: string;
@@ -262,15 +263,20 @@ type Ending = { kind: 'resume' } | { kind: 'answered'; lines: Line[] } | { kind:
  * (`end_turn`, its text empty too) was answered; one that ends with a reply
  * cut off or declined, or with Claude Code's error of a request refused for
  * good, failed, as it did; one that ends with a message of the user (the
- * prompt, the results of its calls, Claude Code's own nudge) or with an
- * outage's error goes on (Claude Code resumes it). Decided here, not by
+ * prompt, the results of its calls) or with an outage's error goes on
+ * (Claude Code resumes it). Claude Code's own notes after a reply (to go
+ * on, to its fallback model) are not the user's: the reply decides. Decided here, not by
  * Claude Code: a resume of a turn that ended has nothing to go on with, and
  * would wait for a prompt that never comes.
  */
 function endingOf(lines: Line[], ask: string, model: string | undefined): Ending {
   const from = lines.findIndex((l) => l.uuid === ask);
   if (from < 0) return { kind: 'resume' };
-  const said = lines.slice(from).filter((l) => !l.isSidechain && (l.type === 'user' || l.type === 'assistant'));
+  // Claude Code's own notes to the model (`isMeta`: to go on past the output limit, a refusal's to its fallback
+  // model, "Continue from where you left off.") say nothing of how the turn ended: what came before them does.
+  const said = lines
+    .slice(from)
+    .filter((l) => !l.isSidechain && (l.type === 'assistant' || (l.type === 'user' && l.isMeta !== true)));
   const last = said.at(-1);
   if (last?.type !== 'assistant') return { kind: 'resume' };
   const text = blocksOf(last)

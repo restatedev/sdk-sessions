@@ -818,6 +818,15 @@ describe("Claude Code's processes, kept between the turns of a key", () => {
   }, 60_000);
 });
 
+/**
+ * `answer`, slow for Claude Code's own asks after it (to go on past the output limit, or the fallback model's
+ * after a refusal): its note to the model reaches the transcript on its own, and a crash can come right after.
+ */
+const slowAfter = (answer: () => Message) => async (request: Parameters<typeof teller>[0]) => {
+  if (request.body.messages.length > 2) await new Promise((resolve) => setTimeout(resolve, 1_000));
+  return answer();
+};
+
 /** The teller, but the transfer's reply and the final reply share an API message id (as the old teller's could). */
 const sameIds = (request: Parameters<typeof teller>[0]) => ({ ...teller(request), id: 'msg_keep_same' });
 
@@ -839,18 +848,20 @@ describe.each(REUSES)('the Claude Code agent, its turn ended in the transcript (
   }, 600_000);
 
   it('fails a turn cut off at the output limit, after a crash right after it, as it would have', async () => {
-    script.reply = () => replyOf([{ type: 'text', text: 'cut' }], 'max_tokens');
-    const outcomes = await crashedAtTheEnd(bankChat(reuse), 'Hello');
+    script.reply = slowAfter(() => replyOf([{ type: 'text', text: 'cut' }], 'max_tokens'));
+    const outcomes = await crashedAtTheEnd(bankChat(reuse), 'Hello', { last: 20 });
     expect(outcomes.filter((o) => !/failed: .*cut off/.test(o))).toEqual([]);
   }, 600_000);
 
   it('fails a turn the model declined, after a crash right after it, as it would have', async () => {
-    script.reply = () =>
-      ({
-        ...replyOf([{ type: 'text', text: 'I can' }], 'refusal'),
-        stop_details: { type: 'refusal', category: 'cyber', explanation: 'no' },
-      }) as Message;
-    const outcomes = await crashedAtTheEnd(bankChat(reuse), 'Hello');
+    script.reply = slowAfter(
+      () =>
+        ({
+          ...replyOf([{ type: 'text', text: 'I can' }], 'refusal'),
+          stop_details: { type: 'refusal', category: 'cyber', explanation: 'no' },
+        }) as Message,
+    );
+    const outcomes = await crashedAtTheEnd(bankChat(reuse), 'Hello', { last: 20 });
     expect(outcomes.filter((o) => !/failed: .*declined/.test(o))).toEqual([]);
   }, 600_000);
 
