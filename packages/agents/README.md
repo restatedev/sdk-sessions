@@ -432,7 +432,9 @@ whatever its idempotency key. Restate's `workflow` tool (and `call` of a
 workflow's `run`) calls it without a key, and waits for the run by the
 call's invocation id: run again, the refused call's invocation id is the
 run's. A tool of your own that runs a workflow does the same (`start` and
-`attach` of `@restatedev/sessions/internal`). The DeepSeek Harness and OpenCode tell
+`attach` of `@restatedev/sessions/internal`), with a workflow id that a run
+again gets too (made of the agent's key and the `callId`, as `workflow`'s
+is). The DeepSeek Harness and OpenCode tell
 the model that a cut-off tool call was interrupted instead, and the model
 makes it again as a new tool call: Restate's tools then make the same call,
 if the input is the same (so a wait for an approval outlasts a restart), and
