@@ -385,6 +385,13 @@ function explicitOf(ctx: SessionContext, of: string) {
  * Resolves when Restate cancels the invocation of `ctx`, a handler's with
  * `explicitCancellation: true`, whose awaits are left as they are: for a
  * library that stops its own work then (a model's request, say).
+ *
+ * It watches for the cancellation, and holds nothing: awaited alone, it does
+ * not suspend the invocation (see selector.ts). The cancel signal comes while
+ * Restate keeps the invocation's input open. Once Restate closed it (the
+ * handler sent and got nothing for the inactivity timeout), a cancellation
+ * resolves this at the handler's next await of Restate's, which suspends the
+ * invocation and resumes it at once, or not at all if it awaits nothing more.
  */
 export const cancelled = async (ctx: SessionContext): Promise<void> => {
   await explicitOf(ctx, 'cancelled').cancellation();

@@ -10,7 +10,7 @@ export type { ObjectConfig, SqlHost } from './session.ts';
 export { Link } from './link.ts';
 export { ScopeKey } from './scope.ts';
 export { open, type Connection, type Store, type ConnectionTransaction } from './database.ts';
-export { PromiseSelector } from './selector.ts';
+export { failpoints, hookSelector, PromiseSelector, type Failpoint } from './selector.ts';
 export { needing, served } from './serve.ts';
 export {
   cancelCalls,

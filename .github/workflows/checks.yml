@@ -40,6 +40,7 @@ jobs:
       # promise selector (which pins the SDK), Restate's agent tools, steering,
       # and the agents and sessions through crashes.
       - run: pnpm --filter e2e concurrency
+      - run: pnpm --filter e2e suspension
       - run: pnpm --filter e2e versions
       - run: pnpm --filter e2e tools
       - run: pnpm --filter e2e steering

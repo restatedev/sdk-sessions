@@ -52,6 +52,12 @@ export interface Selectable {
 
 /** What the selector needs of the invocation. */
 export interface SelectorDriver {
+  /**
+   * Asks the VM for progress on `future`. With nothing ready, the VM tells
+   * Restate what the handler waits for; and once the input closed, it
+   * suspends the invocation on it (a throw), unless a run of the future is
+   * executing.
+   */
   doProgress(future: UnresolvedFuture): DoProgressResult;
   /** Writes out what the VM has buffered. */
   flushOutput(): Promise<void>;
@@ -59,46 +65,57 @@ export interface SelectorDriver {
   awaitExternalProgress(): Promise<void>;
   /** Signals external progress. */
   wake(): void;
-  /** Whether the input closed: nothing more comes from the server in this attempt. */
+  /** Whether the input closed: nothing more comes from Restate in this attempt. */
   inputClosed(): boolean;
   executeRun(handle: number): void;
-  completeEphemeral(completionId: number): Promise<void>;
   /** The attempt cannot go on: suspension, or an error. */
   onError(e: unknown): void;
 }
+
+/**
+ * The points of the loop where a test steps in: `pass`, as a pass starts,
+ * and `wait`, between a check that found nothing and the wait for progress.
+ */
+export type Failpoint = 'pass' | 'wait';
+
+/**
+ * For tests: what every selector's loop awaits at each of its failpoints, to
+ * hold it there while something else happens (the input closes, a signal
+ * comes). At `wait`, it gets what the check asked for. Empty otherwise, and
+ * the loop then awaits nothing there.
+ */
+export const failpoints = new Map<Failpoint, (asked?: UnresolvedFuture) => unknown>();
 
 /**
  * One loop that drives every pending promise of an invocation, so that the
  * invocation has a single await point however many promises user code awaits
  * at once, with its own combinators or none.
  *
- * A promise is registered once and stays until it settles. The loop settles
- * whatever is ready, then asks the VM for progress on the first of all the
- * pending promises to complete: so a suspension waits for any of them, a
- * pending run starts whichever promise is awaited first, and a cancellation
- * reaches all of them. Registering wakes the loop, so a promise registered
- * while it waits is part of the next await point. An ephemeral command (a
- * state get left out of the journal) is registered by its completion id: the
- * VM reports its notification ahead of any future, and the loop goes on while
- * one is in flight, even with no promise pending. The loop runs while
- * something is pending, and is the only one waiting for external progress.
+ * A promise is registered once and stays until it settles. Each pass of the
+ * loop settles what is ready, then asks the VM for progress on the first of
+ * all the pending promises to complete: so a suspension waits for any of
+ * them, a pending run starts whichever promise is awaited first, and a
+ * cancellation reaches all of them. Registering wakes the loop, so a promise
+ * registered while it waits is part of the next pass. The loop runs while
+ * there is something to ask the VM for, and is the only one waiting for
+ * external progress.
  *
- * A handler with explicit cancellation may await its cancellation alone
- * (`cancelled(ctx)`), while it works outside Restate: a model's request, say.
- * It waits for nothing then, so the invocation must not suspend: once the
- * input closed (Restate's inactivity timeout), a check on the cancellation
- * alone would suspend it in the middle of that work, with a cancellation as
- * the only thing to resume it. The loop asks for it while input may come, so
- * that a cancellation reaches the handler as it works, and stops asking when
- * the input closed, until something else is awaited.
+ * To ask is to say that the handler waits: the VM reports what for, and
+ * suspends the invocation on it once the input closed (Restate's inactivity
+ * timeout). That holds for every promise but one. A handler with explicit
+ * cancellation awaits its cancellation (`cancelled(ctx)`) to stop work it
+ * does outside Restate, a model's request, say: it watches for it, and does
+ * not wait for it. Suspended on the cancellation alone, the invocation would
+ * end its attempt in the middle of that work, with a cancellation as the only
+ * thing to resume it. So the loop asks for the cancellation alone only while
+ * the input is open, which is when a cancel signal can come, and not once it
+ * closed: see `awaited`.
  */
 export class PromiseSelector {
   private readonly pending = new Set<Selectable>();
-  // The completion ids of the ephemeral commands in flight.
-  private readonly ephemeral = new Set<number>();
   private running = false;
   private closed = false;
-  // Between the VM's WaitExternalProgress and the next external progress.
+  // Between a check that found nothing and the next external progress.
   private waiting = false;
 
   private readonly driver: SelectorDriver;
@@ -110,17 +127,6 @@ export class PromiseSelector {
   register(promise: Selectable): void {
     if (this.closed || this.pending.has(promise)) return;
     this.pending.add(promise);
-    this.start();
-  }
-
-  /** An ephemeral command's completion id, until its notification is ready. */
-  registerEphemeral(completionId: number): void {
-    if (this.closed) return;
-    this.ephemeral.add(completionId);
-    this.start();
-  }
-
-  private start(): void {
     if (this.running) {
       this.wake();
     } else {
@@ -134,13 +140,12 @@ export class PromiseSelector {
     if (this.closed) return;
     this.closed = true;
     this.pending.clear();
-    this.ephemeral.clear();
     if (this.running) this.wake();
   }
 
   // Only a waiting loop needs waking, once: any other picks up the change on
   // its next pass. (Waking it otherwise would buffer a signal per promise, and
-  // as many needless passes.)
+  // as many needless passes, each of which tells Restate what is awaited.)
   private wake(): void {
     if (!this.waiting) return;
     this.waiting = false;
@@ -149,53 +154,59 @@ export class PromiseSelector {
 
   /** The promises still pending, for tests. */
   get size(): number {
-    return this.pending.size + this.ephemeral.size;
+    return this.pending.size;
+  }
+
+  /**
+   * What to ask the VM for: the first of the pending promises to complete.
+   * Undefined when there is nothing to ask for: nothing is pending, or
+   * only the invocation's cancellation, with the input closed. That one
+   * stays pending, and is asked for again with whatever is awaited next,
+   * which also finds a cancel signal that came as the input closed.
+   */
+  private awaited(): UnresolvedFuture | undefined {
+    const futures: UnresolvedFuture[] = [];
+    let watching = true; // for the cancellation, and waiting for nothing
+    for (const promise of this.pending) {
+      const future = promise.unresolvedFuture();
+      if (future === null) {
+        this.pending.delete(promise);
+      } else {
+        futures.push(future);
+        watching &&= cancellationAlone(future);
+      }
+    }
+    if (futures.length === 0) return undefined;
+    if (watching && this.driver.inputClosed()) return undefined;
+    return futures.length === 1 ? futures[0] : { FirstCompleted: futures };
   }
 
   private async loop(): Promise<void> {
     try {
       await this.driver.flushOutput();
       for (;;) {
+        if (failpoints.size > 0) await failpoints.get('pass')?.();
         // Settle what is ready.
         for (const promise of this.pending) {
           await promise.tryComplete();
         }
-        // Let what that settled run, and register what it awaits next, so
-        // that one check covers them (a combinator also flags itself
-        // completed in a .finally, a tick late). An optimization: what is
-        // registered later wakes the loop anyway.
+        // A turn of the event loop, before every check. What was settled
+        // runs, and registers what it awaits next, so that one check covers
+        // that too (a combinator also flags itself completed in a .finally,
+        // a tick late). And the SDK has said so if the input closed: it does
+        // within microtasks of signalling the progress that woke this loop.
         await setImmediate();
-
-        const futures: UnresolvedFuture[] = [];
-        // Whether something is awaited beside the invocation's cancellation.
-        let waits = this.ephemeral.size > 0;
-        for (const promise of this.pending) {
-          const future = promise.unresolvedFuture();
-          if (future === null) {
-            this.pending.delete(promise);
-          } else {
-            futures.push(future);
-            waits ||= !cancellationAlone(future);
-          }
-        }
-        if (futures.length === 0 && this.ephemeral.size === 0) return;
-        // Only the cancellation, and no input to bring it: asking would
-        // suspend the invocation on it. The next registration starts a loop
-        // that asks for it along with what is awaited then, which also finds
-        // a cancellation that came as the input closed. (The SDK notes the
-        // closed input some microtasks after it signals: the turn above let
-        // them run.)
-        if (!waits && this.driver.inputClosed()) return;
-
-        // With only ephemeral commands in flight, no future: the VM reports
-        // their notifications, or waits for input.
-        const result = this.driver.doProgress(futures.length === 1 ? futures[0]! : { FirstCompleted: futures });
+        // From here to the end of the pass, or to `waiting`, in one turn:
+        // what is registered after the check finds the loop gone, and starts
+        // another, or finds it waiting, and wakes it.
+        const future = this.awaited();
+        if (future === undefined) return;
+        const result = this.driver.doProgress(future);
         if (result === 'AnyCompleted') {
           continue;
         } else if (result === 'WaitExternalProgress') {
-          // From here, in the same turn as the check: what is registered
-          // after it is not part of it.
           this.waiting = true;
+          if (failpoints.size > 0) await failpoints.get('wait')?.(future);
           await this.driver.flushOutput();
           await this.driver.awaitExternalProgress();
           this.waiting = false;
@@ -203,21 +214,18 @@ export class PromiseSelector {
           // Reaches every pending promise; what is awaited after it is not cancelled.
           for (const promise of this.pending) promise.tryCancel();
           this.pending.clear();
-        } else if ('EphemeralNotificationReady' in result) {
-          this.ephemeral.delete(result.EphemeralNotificationReady);
-          await this.driver.completeEphemeral(result.EphemeralNotificationReady);
-        } else {
+        } else if ('ExecuteRun' in result) {
+          // It starts in the turn the next pass takes before its check.
           this.driver.executeRun(result.ExecuteRun);
-          // Let the run start, then come back.
-          await setImmediate();
+        } else {
+          // An ephemeral command's notification: a handler with SQL makes none.
+          throw new Error(`@restatedev/sessions: unexpected progress from the VM: ${JSON.stringify(result)}`);
         }
       }
     } catch (e) {
       this.close();
       this.driver.onError(e);
     } finally {
-      // Decided with nothing pending, in the same turn: a registration from
-      // here on starts a new loop.
       this.running = false;
     }
   }
@@ -226,14 +234,10 @@ export class PromiseSelector {
 /** The SDK's promises executor, as far as the hook needs it: its fields are private in its types. */
 interface Executor {
   doProgress(promise: Selectable): Promise<void>;
-  coreVm: {
-    do_progress(future: UnresolvedFuture): DoProgressResult;
-    take_ephemeral_notification(completionId: number): unknown;
-  };
+  coreVm: { do_progress(future: UnresolvedFuture): DoProgressResult };
   outputPump: { awaitNextProgress(): Promise<void> };
   externalProgressChannel: { awaitNext(): Promise<void>; signal(): void };
   runClosuresTracker: { executeRun(handle: number): void };
-  ephemeralRequestTracker: { complete(completionId: number, value: unknown): Promise<void> };
   errorCallback: (e: unknown) => void;
 }
 
@@ -242,14 +246,7 @@ interface InputPump {
   runDone: PromiseLike<unknown>;
 }
 
-const FIELDS = [
-  'coreVm',
-  'outputPump',
-  'externalProgressChannel',
-  'runClosuresTracker',
-  'ephemeralRequestTracker',
-  'errorCallback',
-] as const;
+const FIELDS = ['coreVm', 'outputPump', 'externalProgressChannel', 'runClosuresTracker', 'errorCallback'] as const;
 
 /**
  * Drive every promise that the invocation of `ctx` (the SDK's context, not a
@@ -267,7 +264,7 @@ export function hookSelector(ctx: object): () => void {
         `(${missing.join(', ') || 'coreVm.do_progress'}): use the @restatedev/restate-sdk that @restatedev/sessions pins`,
     );
   }
-  const { coreVm, outputPump, externalProgressChannel, runClosuresTracker, ephemeralRequestTracker } = executor;
+  const { coreVm, outputPump, externalProgressChannel, runClosuresTracker } = executor;
   let inputClosed = false;
   void (async () => {
     await inputPump!.runDone;
@@ -280,8 +277,6 @@ export function hookSelector(ctx: object): () => void {
     wake: () => externalProgressChannel.signal(),
     inputClosed: () => inputClosed,
     executeRun: (handle) => runClosuresTracker.executeRun(handle),
-    completeEphemeral: (completionId) =>
-      ephemeralRequestTracker.complete(completionId, coreVm.take_ephemeral_notification(completionId)),
     onError: (e) => executor.errorCallback(e),
   });
   // An own property, over the class's method: removing it gives the method back.

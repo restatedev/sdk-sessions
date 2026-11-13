@@ -29,6 +29,11 @@ server, are in its `test/` directory (`pnpm test` at the root runs them all).
   forward keep the database working (`pnpm --filter e2e versions`).
 - [`concurrency.ts`](concurrency.ts): the context without journal replay
   (`pnpm --filter e2e concurrency`).
+- [`suspension.ts`](suspension.ts): when a session object's handler is
+  suspended: one that works outside Restate past the inactivity timeout goes
+  on, whether or not it watches for its cancellation, a cancellation reaches
+  it while its input is open or at its next await, and the selector's loop is
+  held at its failpoints while the input closes (`pnpm --filter e2e suspension`).
 - [`restate-tools.ts`](restate-tools.ts): Restate's own agent tools, on a
   scripted model (`pnpm --filter e2e tools`).
 - [`steering.ts`](steering.ts): a message steered to a turn (the `steer`

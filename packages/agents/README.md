@@ -195,6 +195,14 @@ approval, a sub-agent's task, a workflow) are cancelled with it. `chat`
 uses Restate's explicit cancellation for this (`explicitCancellation: true`,
 with `cancelled(ctx)` and `cancelCalls(ctx)` of `@restatedev/sessions/internal`).
 
+A cancellation reaches the turn's work at once while Restate keeps the
+turn's input open. Restate closes it once the turn has sent and received
+nothing for the inactivity timeout (a minute by default: a long model
+request, or a slow tool). The turn works on, and a cancellation then reaches
+it at its next step, when it next commits or calls. For turns whose steps
+take longer, raise Restate's inactivity timeout (the server's
+`worker.invoker.inactivity-timeout`).
+
 An attempt that ends before its turn does, while its process lives on
 (Restate suspended it, gave up on it, or lost its connection), stops its
 work too, a model's request included: it can store nothing more, and the
