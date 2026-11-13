@@ -886,7 +886,16 @@ first phase; what it found that the code rests on is below.
   was given) in one transaction. So the copy never lags, and no second
   database is needed (OpenCode needs one: it boots only on its own).
 - **A tool runs only once its call is stored**: the `PreToolUse` hook waits
-  until the call is committed (and published).
+  until the call is committed (and published). Claude Code writes a reply's
+  lines once the reply ended (all of them, with its stop reason: spiked with
+  a reply streamed over seconds), so the wait lasts as long as the reply
+  streams; it fails only once Claude Code shows no progress (streamed events,
+  `includePartialMessages`) for a minute.
+- **A retried turn decides from its transcript how it ended**: a final
+  reply, a reply cut off or declined, a refusal for good answer or fail as
+  they did, without Claude Code; the user's message, or an outage's error,
+  is resumed; half a reply (its text's lines without its calls') is
+  removed first.
 - **A retried attempt**: a stored final reply is the answer; a prompt whose
   line is not in the transcript (its uuid is made from the prompt's id) is
   submitted; one whose is, is resumed: each call the transcript cut off

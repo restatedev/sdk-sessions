@@ -82,8 +82,18 @@ read (`messages`). The two never disagree after a crash. So:
   nothing to go on with. Otherwise (the turn's messages end with the user's:
   its prompt, its calls' results; or with an outage's error), Claude Code
   goes on with the turn ("Continue from where you left off."), without a
-  new prompt. A resumed Claude Code that writes nothing to its transcript
-  for a minute (it writes as it sends its request) fails the attempt.
+  new prompt. A resumed Claude Code that writes no message to its
+  transcript for a minute (it writes one as it sends its request) fails the
+  attempt.
+- **A reply is copied whole.** Claude Code writes a reply's lines once the
+  reply ended, with its stop reason, and runs a call as soon as its block
+  streamed: the call waits for its line, however long the reply streams on
+  (the wait fails the attempt only once Claude Code shows no progress, no
+  streamed event, for a minute). Should a reply's text reach the store
+  apart from its calls, it is held for them, and copied with them; should a
+  crash come between, the half reply is removed from the transcript (none
+  of it was copied, none of its calls ran), and the turn resumes before
+  it.
 - **A tool's error fails the attempt**, and Restate retries it, resuming
   the turn; a `restate.TerminalError` of a `tool()` is its answer to the
   model.

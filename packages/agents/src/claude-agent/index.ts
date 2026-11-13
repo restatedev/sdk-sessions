@@ -99,6 +99,7 @@ import { type Definition, sessionObject } from '../object.ts';
 import { type Answer, withChecked } from '../output.ts';
 import { jsonSchemaOf, type Tool as AnyTool, waitFor } from '../tools.ts';
 import { spawnTied } from './process.ts';
+import { tuning } from './tuning.ts';
 
 // The items: Claude Code's transcript, as the conversation keeps it.
 
@@ -299,6 +300,31 @@ function endingOf(lines: Line[], ask: string, model: string | undefined): Ending
   return failure ? { kind: 'failed', error: failure } : { kind: 'resume' };
 }
 
+/**
+ * The first line of the reply the transcript `lines` end with, if it is
+ * incomplete: its text's lines stored, its calls' never (its stop reason is
+ * `tool_use`, and it has none). Claude Code writes a reply's lines once it
+ * ended, together; should they reach the store apart and a crash come
+ * between, the transcript ends with half a reply, which Claude Code does
+ * not go on from. None of it was copied into the turn, and no call of it ran
+ * (each waits for its line): it is removed, and the turn resumes before it.
+ */
+function incompleteOf(lines: Line[], ask: string): Line | undefined {
+  const from = lines.findIndex((l) => l.uuid === ask);
+  if (from < 0) return undefined;
+  const said = lines
+    .slice(from)
+    .filter((l) => !l.isSidechain && (l.type === 'assistant' || (l.type === 'user' && l.isMeta !== true)));
+  const last = said.at(-1);
+  if (last?.type !== 'assistant' || last.isApiErrorMessage || last.message?.stop_reason !== 'tool_use')
+    return undefined;
+  let first = said.length - 1;
+  while (first > 0 && said[first - 1]!.type === 'assistant' && said[first - 1]!.message?.id === last.message?.id)
+    first--;
+  const reply = said.slice(first);
+  return reply.some((l) => blocksOf(l).some((b) => b.type === 'tool_use')) ? undefined : reply[0];
+}
+
 /** The end of the transcript `lines`, as a short text: what a resume that did not go on found. */
 const tailOf = (lines: Line[]) =>
   lines
@@ -353,10 +379,22 @@ function cutOff(lines: Line[], ask: string): { calls: Block[]; last?: Line; last
  * subagent's lines.
  */
 function newItems(
-  lines: Line[],
+  written: Line[],
   turn: Turn<Item>,
   steers: ReadonlyMap<string, string>,
+  partial: Map<string, Line[]> = new Map(),
 ): { item: Item; reply?: boolean; steer?: string }[] {
+  // A reply's lines held from an earlier batch (its text, its calls still to come) go before its first line here.
+  const lines: Line[] = [];
+  for (const line of written) {
+    const id = line.type === 'assistant' ? line.message?.id : undefined;
+    const before = id === undefined ? undefined : partial.get(id);
+    if (before) {
+      lines.push(...before);
+      partial.delete(id!);
+    }
+    lines.push(line);
+  }
   const have = new Set(turn.items.flatMap((e) => (e.item.from ? [e.item.from] : [])));
   const named = new Map(
     turn.items.flatMap((e) => (e.item.type === 'assistant' ? (e.item.calls ?? []).map((c) => [c.id, c.name]) : [])),
@@ -366,7 +404,7 @@ function newItems(
   // The replies: Claude Code writes a line per content block of an API message, one after another. A reply is
   // copied once, by its message's id and its first line's uuid (the API's ids are unique, but a reply must not
   // be left out for an id the turn has: it would be stored in the transcript, and missing in the turn).
-  const replies = new Map<string, { text: string[]; calls: Call[]; stop?: string | null }>();
+  const replies = new Map<string, { id: string; lines: Line[]; text: string[]; calls: Call[]; stop?: string | null }>();
   const order: (string | Item | { steer: string; text: string; from: string })[] = [];
   let current: { id: string; key: string } | undefined;
   for (const line of lines) {
@@ -376,10 +414,11 @@ function newItems(
     if (line.type === 'assistant' && message?.id && !line.isApiErrorMessage && message.model !== '<synthetic>') {
       if (current?.id !== message.id) {
         current = { id: message.id, key: `${message.id}/${line.uuid ?? ''}` };
-        replies.set(current.key, { text: [], calls: [] });
+        replies.set(current.key, { id: message.id, lines: [], text: [], calls: [] });
         order.push(current.key);
       }
       const reply = replies.get(current.key)!;
+      reply.lines.push(line);
       for (const block of blocksOf(line)) {
         if (block.type === 'text' && block.text) reply.text.push(block.text);
         if (block.type === 'tool_use' && block.id) {
@@ -416,6 +455,12 @@ function newItems(
       const reply = replies.get(entry)!;
       if (have.has(entry)) continue;
       const text = reply.text.join('');
+      // A reply whose calls are still to come (Claude Code wrote its text's line in a batch of its own: never
+      // seen, but the store does not rely on it) is held for them: copied whole, its text with its calls.
+      if (reply.calls.length === 0 && reply.stop === 'tool_use') {
+        partial.set(reply.id, reply.lines);
+        continue;
+      }
       // A reply that ends the turn is one of its text, empty too; one cut off, refused or failed is none.
       if (reply.calls.length === 0 && reply.stop !== 'end_turn') continue;
       copied.push({ item: { type: 'assistant', text, calls: reply.calls, from: entry }, reply: true });
@@ -560,23 +605,6 @@ const refused = (why: string, model: string | undefined) =>
     `the model's provider refused the request (${why}${model ? `, model ${model}` : ''}): ${CHECK_MODEL}`,
     { errorCode: REFUSED },
   );
-
-/** How long a tool waits for its call to be committed before the attempt fails. */
-const GATE_MS = 60_000;
-
-/**
- * Timings, and how a steered message is given: for tests (a shorter wait, a
- * message Claude Code takes late), not options.
- *
- * - `idleMs`: how long a resumed Claude Code may write nothing to its
- *   transcript (it writes as it sends the turn's request) before the attempt
- *   fails;
- * - `queueMs`: how long a tool call's end waits for Claude Code to queue a
- *   message steered to the turn;
- * - `steerPriority`: how a steered message is given (`'next'`: at the next
- *   step; `'later'`, for tests: after the turn).
- */
-export const tuning = { idleMs: 60_000, queueMs: 2_000, steerPriority: 'next' as 'next' | 'later' };
 
 /** How long a stop waits for Claude Code to end its turn before the process is killed. */
 const STOP_MS = 5_000;
@@ -736,7 +764,8 @@ class Claude {
       }
       return;
     }
-    await run.append(subpath, entries);
+    if (tuning.lineByLine) for (const entry of entries) await run.append(subpath, [entry]);
+    else await run.append(subpath, entries);
     const last = subpath === '' ? entries.findLast((e) => e.uuid) : undefined;
     if (last) this.lastUuid = last.uuid;
   }
@@ -905,6 +934,8 @@ function sdkOptionsOf(
     persistSession: true,
     sessionStore: claude.store,
     sessionStoreFlush: 'eager',
+    // Each streamed event is progress (see `gateMs` of tuning.ts): a reply's lines are written once it ends.
+    includePartialMessages: true,
     ...(model ? { model } : {}),
     ...(workspace
       ? {
@@ -993,8 +1024,12 @@ class Run {
   #apiError: string | undefined;
   /** The end of the transcript a resumed turn found, for its error should it not go on. */
   tail = '';
-  /** Told of each line of the transcript Claude Code writes: a resumed turn went on. */
+  /** Told of each message line of the transcript Claude Code writes: a resumed turn went on. */
   #wrote: (() => void) | undefined;
+  /** When Claude Code last showed progress: a message, a streamed event, a line of its transcript. */
+  #progress = Date.now();
+  /** The lines of a reply whose calls are still to come, by its API message's id: see {@link newItems}. */
+  readonly #partial = new Map<string, Line[]>();
   /** Whether Claude Code began a turn of its own after this one (a message given, not taken): nothing more of it is stored. */
   #foreign = false;
 
@@ -1023,7 +1058,10 @@ class Run {
 
   /** Store `entries`, lines of the transcript at `subpath`, and copy what is new of the turn, in one transaction. */
   async append(subpath: string, written: Line[]) {
-    this.#wrote?.();
+    this.#progress = Date.now();
+    // A resumed turn went on once Claude Code writes a message (it writes the turn's next as it sends its request);
+    // metadata it may write as it starts says nothing.
+    if (written.some((l) => l.uuid && (l.type === 'user' || l.type === 'assistant'))) this.#wrote?.();
     // A turn of Claude Code's own after this one (a message given to the turn, which Claude Code took after it)
     // is nobody's: none of it is stored, and the process is killed.
     if (this.#foreign) return;
@@ -1062,7 +1100,7 @@ class Run {
           await tx.execute(`INSERT OR IGNORE INTO ${SESSION} (row, session) VALUES (0, ?)`, [session]);
         }
         if (subpath !== '' || this.#stopping || !turn.writable) return;
-        const copied = newItems(fresh, turn, this.#steers);
+        const copied = newItems(fresh, turn, this.#steers, this.#partial);
         if (copied.length === 0 || !(await turn.copyIn(tx, copied))) return;
         tookSteers(
           this.ctx,
@@ -1107,23 +1145,35 @@ class Run {
     return [...this.#steers.values()].some((id) => !held.has(id));
   }
 
-  /** Wait until tool call `id` is committed: a tool runs only once its call is stored. */
+  /**
+   * Wait until tool call `id` is committed: a tool runs only once its call is
+   * stored. Claude Code writes a reply's lines once the reply ends, which may
+   * be long after its call began (a long reply, a large input streamed): the
+   * wait fails the attempt only once Claude Code shows no progress for
+   * `gateMs`.
+   */
   async #gate(id: string) {
     if (this.#committed.has(id)) return;
     const committed = new Promise<void>((resolve) => this.#gates.set(id, resolve));
     let timer: NodeJS.Timeout | undefined;
-    const late = new Promise<never>((_, reject) => {
-      timer = setTimeout(
-        () => reject(new Error(`tool call ${id}: its call was not stored within ${GATE_MS / 1000} s`)),
-        GATE_MS,
-      );
+    const stalled = new Promise<never>((_, reject) => {
+      timer = setInterval(() => {
+        if (Date.now() - this.#progress > tuning.gateMs) {
+          reject(
+            new Error(
+              `tool call ${id}: its call was not stored, and Claude Code made no progress for ${tuning.gateMs / 1000} s`,
+            ),
+          );
+        }
+      }, 1_000);
+      timer.unref();
     });
     try {
-      await Promise.race([committed, late, this.#failed.promise]);
+      await Promise.race([committed, stalled, this.#failed.promise]);
     } catch (error) {
       await this.fail(error);
     } finally {
-      clearTimeout(timer);
+      clearInterval(timer);
     }
   }
 
@@ -1262,6 +1312,7 @@ class Run {
       for (;;) {
         const { value: message, done } = await claude.next();
         if (done) break;
+        this.#progress = Date.now();
         if (message.type === 'assistant') {
           busy();
           if (message.error && !message.parent_tool_use_id) this.#apiError = message.error;
@@ -1484,7 +1535,7 @@ const runOf = (ctx: restate.SessionContext, options: Options) => async (conversa
   const turn = conversation.turn;
   // A stored final reply is the answer: the model is not asked for it again.
   const stored = turn.finalReply();
-  if (stored !== undefined) return stored;
+  if (stored !== undefined && tuning.readEnding) return stored;
   const ask = turn.latestAsk();
   const again = ask !== turn.prompt;
   const askUuid = uuidOf(`${again ? 'again' : 'prompt'}:${turn.id}`);
@@ -1513,10 +1564,17 @@ const runOf = (ctx: restate.SessionContext, options: Options) => async (conversa
     const fresh = known === undefined && !resumes;
     const session = known ?? uuidOf(`session:${turn.id}`);
     if (interrupted) {
+      const incomplete = incompleteOf(await linesOf(ctx.db), askUuid);
+      if (incomplete?.uuid) {
+        const at = await ctx.db.get<{ seq: number }>(`SELECT seq FROM ${ENTRIES} WHERE subpath = '' AND uuid = ?`, [
+          incomplete.uuid,
+        ]);
+        if (at) await ctx.db.execute(`DELETE FROM ${ENTRIES} WHERE subpath = '' AND seq >= ?`, [at.seq]);
+      }
       await run.closeCutOff(session, askUuid);
       const lines = await linesOf(ctx.db);
       // A turn that ended in the transcript is answered, or fails, as it did: Claude Code is not started.
-      const ending = endingOf(lines, askUuid, model);
+      const ending: Ending = tuning.readEnding ? endingOf(lines, askUuid, model) : { kind: 'resume' };
       if (ending.kind === 'failed') throw ending.error;
       if (ending.kind === 'answered') return await run.answerFrom(ending.lines);
       run.tail = tailOf(lines);

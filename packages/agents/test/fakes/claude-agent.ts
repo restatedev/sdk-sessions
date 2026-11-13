@@ -64,7 +64,13 @@ export function conversationOf(messages: MessageParam[]): MessageParam[] {
 export const script: {
   reply: (request: Request) => Message | Promise<Message>;
   requests: Request[];
-} = { reply: ({ messages }) => tellerReply(messages), requests: [] };
+  /**
+   * How slowly a reply streams, as a model's does (ms; 0: at once): a pause
+   * after each block, between a text's pieces (three), and before the
+   * reply's end.
+   */
+  slow: number;
+} = { reply: ({ messages }) => tellerReply(messages), requests: [], slow: 0 };
 
 /** The teller's own reply, for a test's `reply` to fall back on. */
 export const teller = (request: Request) => tellerReply(request.messages);
@@ -87,15 +93,22 @@ const named = (message: Message, tools: { name: string }[] = []): Message => ({
 /** An event of a stream (SSE). */
 const event = (type: string, data: object) => `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
 
-/** `message` as the API streams it (SSE). */
-function* events(message: Message): Generator<string> {
+/** `message` as the API streams it (SSE): its events, and the pauses between them (`slow`, ms). */
+function* events(message: Message, slow = 0): Generator<string | number> {
   yield event('message_start', {
     message: { ...message, content: [], stop_reason: null, usage: { input_tokens: 1, output_tokens: 0 } },
   });
   for (const [index, block] of message.content.entries()) {
     if (block.type === 'text') {
       yield event('content_block_start', { index, content_block: { type: 'text', text: '' } });
-      yield event('content_block_delta', { index, delta: { type: 'text_delta', text: block.text } });
+      const pieces =
+        slow > 0
+          ? [0, 1, 2].map((i) => block.text.slice((i * block.text.length) / 3, ((i + 1) * block.text.length) / 3))
+          : [block.text];
+      for (const piece of pieces) {
+        yield event('content_block_delta', { index, delta: { type: 'text_delta', text: piece } });
+        if (slow > 0) yield slow / 3;
+      }
     } else if (block.type === 'tool_use') {
       yield event('content_block_start', {
         index,
@@ -107,7 +120,9 @@ function* events(message: Message): Generator<string> {
       });
     }
     yield event('content_block_stop', { index });
+    if (slow > 0) yield slow;
   }
+  if (slow > 0) yield slow;
   yield event('message_delta', {
     delta: {
       stop_reason: message.stop_reason,
@@ -160,7 +175,10 @@ async function answer(req: IncomingMessage, res: ServerResponse) {
     return;
   }
   res.writeHead(200, { 'content-type': 'text/event-stream' });
-  for (const sent of events(message)) res.write(sent);
+  for (const sent of events(message, script.slow)) {
+    if (typeof sent === 'number') await new Promise((resolve) => setTimeout(resolve, sent));
+    else res.write(sent);
+  }
   res.end();
 }
 

@@ -22,6 +22,7 @@ import { CANCELLED, ENDED, REFUSED, RETURNED_UNRECORDED } from '../src/common.ts
 import { STEPS } from '../src/conversation.ts';
 import { bank } from './bank.ts';
 import { tied } from '../src/claude-agent/process.ts';
+import { tuning } from '../src/claude-agent/tuning.ts';
 import type Anthropic from '@anthropic-ai/sdk';
 import { HttpError, script, startTeller, teller, tellerEnv } from './fakes/claude-agent.ts';
 import {
@@ -49,6 +50,7 @@ beforeAll(async () => {
 beforeEach(() => {
   script.requests.length = 0;
   script.reply = teller;
+  script.slow = 0;
 });
 
 /** The texts of the user's messages of the model's latest request, in order (Claude Code's own left out). */
@@ -889,8 +891,8 @@ describe.each(REUSES)('the Claude Code agent, its turn ended in the transcript (
 
 describe.each(REUSES)('the Claude Code agent, slow and late ($name)', ({ reuse }) => {
   it('goes on with a resumed turn whose model takes longer than the idle check: it wrote its transcript', async () => {
-    const { idleMs } = claudeAgent.tuning;
-    claudeAgent.tuning.idleMs = 1_000;
+    const { idleMs } = tuning;
+    tuning.idleMs = 1_000;
     try {
       const c = conversation(bankChat(reuse), 'slow');
       await c.crash('inv1', 'Please move 7 from 3 to 4');
@@ -901,14 +903,14 @@ describe.each(REUSES)('the Claude Code agent, slow and late ($name)', ({ reuse }
       };
       expect(await c.attempt('inv1', 'Please move 7 from 3 to 4')).toBe('Done: moved 7 from account 3 to account 4');
     } finally {
-      claudeAgent.tuning.idleMs = idleMs;
+      tuning.idleMs = idleMs;
     }
   }, 60_000);
 
   it('stores nothing of a turn Claude Code starts with a message it did not take, and keeps no such process', async () => {
-    const { steerPriority } = claudeAgent.tuning;
+    const { steerPriority } = tuning;
     // Given so that Claude Code takes it only after the turn: as a message it did not queue in time would be.
-    claudeAgent.tuning.steerPriority = 'later';
+    tuning.steerPriority = 'later';
     try {
       const c = conversation(bankChat(reuse), 'late-given');
       const following = followingOf(c.state);
@@ -942,13 +944,13 @@ describe.each(REUSES)('the Claude Code agent, slow and late ($name)', ({ reuse }
       expect(claudeAgent.processes.dropped - dropped).toBeLessThanOrEqual(1);
       void given;
     } finally {
-      claudeAgent.tuning.steerPriority = steerPriority;
+      tuning.steerPriority = steerPriority;
     }
   }, 60_000);
 
   it('drops the turn Claude Code begins with a message it did not take while the run still holds it', async () => {
-    const { steerPriority } = claudeAgent.tuning;
-    claudeAgent.tuning.steerPriority = 'later';
+    const { steerPriority } = tuning;
+    tuning.steerPriority = 'later';
     try {
       const c = conversation(bankChat(reuse), 'late-begun');
       const following = followingOf(c.state);
@@ -980,7 +982,60 @@ describe.each(REUSES)('the Claude Code agent, slow and late ($name)', ({ reuse }
       expect(await c.attempt('inv2', 'Hello')).toMatch(/^Ask me/);
       expect(userTexts().some((t) => t.includes('audit'))).toBe(false);
     } finally {
-      claudeAgent.tuning.steerPriority = steerPriority;
+      tuning.steerPriority = steerPriority;
     }
   }, 60_000);
+});
+
+describe.each(REUSES)('the Claude Code agent, its replies streamed slowly ($name)', ({ reuse }) => {
+  it('copies a reply streamed slowly whole, its text with its call, also when its lines are stored one by one', async () => {
+    script.slow = 600;
+    for (const lineByLine of [false, true]) {
+      tuning.lineByLine = lineByLine;
+      try {
+        const c = conversation(bankChat(reuse), `slow-${lineByLine}`);
+        expect(await c.attempt('inv1', 'Please move 5 from 1 to 2')).toBe('Done: moved 5 from account 1 to account 2');
+        const { messages } = await c.read(claudeAgent.messages(), {});
+        expect(messages[1]!.parts).toMatchObject([
+          { type: 'text', text: 'On it.' },
+          { type: 'tool', name: 'transfer', output: 'moved 5 from account 1 to account 2' },
+        ]);
+      } finally {
+        tuning.lineByLine = false;
+      }
+    }
+  }, 120_000);
+
+  for (const lineByLine of [false, true]) {
+    it(`answers once after a crash at any state request of a slowly streamed turn${lineByLine ? ', its lines stored one by one' : ''}`, async () => {
+      script.slow = 300;
+      tuning.lineByLine = lineByLine;
+      try {
+        expect(
+          await crashedAnywhere(bankChat(reuse), claudeAgent.messages(), {
+            stride: Number(process.env.CRASH_STRIDE ?? 1),
+          }),
+        ).toEqual([]);
+      } finally {
+        tuning.lineByLine = false;
+      }
+    }, 900_000);
+  }
+});
+
+describe("the Claude Code agent's idle check", () => {
+  it('fails an attempt whose resumed Claude Code does not go on (the hang, rebuilt with the ending not read)', async () => {
+    const { idleMs, readEnding } = tuning;
+    tuning.idleMs = 2_000;
+    tuning.readEnding = false;
+    try {
+      // A crash once the final reply is stored, before the answer is: Claude Code is resumed on a turn that ended.
+      const outcomes = await crashedAtTheEnd(bankChat(false), 'Hello', { last: 8, within: 15_000 });
+      expect(outcomes.some((o) => /did not go on within 2 s/.test(o))).toBe(true);
+      expect(outcomes.some((o) => o.endsWith('no answer'))).toBe(false);
+    } finally {
+      tuning.idleMs = idleMs;
+      tuning.readEnding = readEnding;
+    }
+  }, 600_000);
 });
