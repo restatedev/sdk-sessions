@@ -16,7 +16,7 @@ import * as clients from '@restatedev/restate-sdk-clients';
 import type { VirtualObjectDefinition } from '@restatedev/restate-sdk-core';
 import type { Answering, ChatMessage, Messages, MessagesRequest, Part } from './common.ts';
 import type { Status, Stopped, Synced, SyncRequest } from './object.ts';
-import type { Notifications, Resolved, Signal, Steered, Steering, Waiting, Watch } from './signals.ts';
+import type { Notifications, Resolved, Signal, Steered, Steering, Waiting, Watch } from './companion.ts';
 
 export type {
   Answering,

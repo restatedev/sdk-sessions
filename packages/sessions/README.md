@@ -61,10 +61,12 @@ your session object can call.
 
 `restate.serve(...services)` serves them, session objects and the SDK's
 alike, on `PORT` (9080 by default), with what they need beside them (such
-as @restatedev/agents' `signals`, which each agent brings with it).
-`RESTATE_SERVE_ONLY=a,b` serves only the services it names: one program,
-deployed in parts. For anything else (another port, HTTP/1.1, a
-Lambda handler), the SDK's `restate.endpoint()` is there as ever.
+as the companion each @restatedev/agents agent brings with it).
+`RESTATE_SERVE_ONLY=a,b` serves only the services it names, each with what
+it needs: one program, deployed in parts. For anything else (another port,
+HTTP/1.1, a Lambda handler), the SDK's `restate.endpoint()` is there as
+ever: bind it what `restate.served([...services])` lists, the services with
+what they need.
 
 ### The contexts
 

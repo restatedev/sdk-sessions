@@ -1,6 +1,7 @@
 // The call records (calls.ts): a tool call's Restate calls made once, a
 // framework's own waits (`waitFor`), and what a stopped turn reports of its
 // calls (`outcomes`). As the Python SDK's tests of `_calls.py`.
+import { withCompanion } from '../src/companion.ts';
 import { type AttemptContext, contextOf } from '@restatedev/sessions/internal';
 import { memoryDatabase } from '@restatedev/sessions/test/support';
 import { describe, expect, it } from 'vitest';
@@ -24,7 +25,10 @@ function attempt(state: Map<string, Uint8Array>, id = 'inv1', answer: (method: s
     },
     genericSend: () => {},
   };
-  const ctx = contextOf(sdk as unknown as AttemptContext, memoryDatabase(state));
+  // An object with a companion, as `sessionObject()` makes one.
+  const ctx = contextOf(sdk as unknown as AttemptContext, memoryDatabase(state), {
+    definition: withCompanion({ name: 'waiter' }),
+  });
   return { ctx, made };
 }
 
@@ -46,7 +50,7 @@ describe('call records', () => {
     const lookup = call(lookups, 'lookup', { description: 'Look it up', input: z.object({ about: z.string() }) });
     await lookup.run({ about: 'x' }, { ctx, callId: 'c1' });
     expect(made.map((m) => [m.service, m.method, m.idempotencyKey])).toEqual([
-      ['signals', 'wait', 'inv1:c1'],
+      ['waiter.prebuilt.restate', 'wait', 'inv1:c1'],
       ['lookups', 'lookup', 'inv1:c1'],
     ]);
     expect((await records(state)).map((c) => [c.tool, c.ids, c.approval])).toEqual([
@@ -81,7 +85,7 @@ describe('waitFor', () => {
     expect(await waitFor(first.ctx, 'call-1', 'approval', { refund: 5 })).toBe('approved');
     expect(first.made).toEqual([
       {
-        service: 'signals',
+        service: 'waiter.prebuilt.restate',
         method: 'wait',
         parameter: { id: 'inv1:call-1', name: 'approval', input: { refund: 5 } },
         idempotencyKey: 'inv1:call-1',

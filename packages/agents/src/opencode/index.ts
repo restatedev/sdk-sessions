@@ -94,7 +94,6 @@ import {
   refusal,
   REFUSED,
   RETURNED_UNRECORDED,
-  stepped,
   stopSignalOf,
   toolCallStarted,
 } from '../common.ts';
@@ -943,7 +942,7 @@ export const withOpenCode = async <T>(
   const copy = (own?: Returned, steersOnly = false) => {
     const next = copying.then(async () => {
       if (!turn || (stopping && !steersOnly) || fence.closed) return undefined;
-      if (await copyInto(ctx, await host(), turn, own, steersOnly)) await stepped(ctx);
+      if (await copyInto(ctx, await host(), turn, own, steersOnly)) await turn.stepsCommitted();
       return undefined;
     });
     copying = next.catch(() => {});

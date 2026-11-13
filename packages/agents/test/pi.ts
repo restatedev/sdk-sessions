@@ -10,7 +10,7 @@
 // Environment: PORT (default 9080), MODEL with its provider's API key,
 // and ABORT_PER_MILLE (see ../faults.ts).
 import type * as restate from '@restatedev/sessions';
-import { sessionObject, signals } from '@restatedev/agents';
+import { sessionObject } from '@restatedev/agents';
 import { Type } from '@earendil-works/pi-ai';
 import { defineTool, type ToolRegistration } from '@earendil-works/pi-durable';
 import { serveIfMain } from '@restatedev/sessions/test/faults';
@@ -63,4 +63,4 @@ export const prompt = pi.chat((ctx) => ({ tools: tools(ctx) }));
 
 export const agent = sessionObject({ name: 'Agent', handlers: { chat: prompt }, views: { messages: pi.messages() } });
 
-serveIfMain(import.meta, [agent, ledger, signals]);
+serveIfMain(import.meta, [agent, ledger]);

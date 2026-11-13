@@ -23,8 +23,8 @@ import {
   CANCELLED,
   chatHandler,
   sessionObject,
+  served,
   signal,
-  signals,
   type Messages,
   type Status,
   type Waiting,
@@ -85,7 +85,7 @@ const server = spawn(SERVER, ['--base-dir', dir], {
   stdio: 'ignore',
 });
 try {
-  await restate.serve({ services: [planner, plain, signals], port: PORT });
+  await restate.serve({ services: served([planner, plain]), port: PORT });
   for (
     let i = 0;
     !(await fetch(`${ADMIN}/health`).then(

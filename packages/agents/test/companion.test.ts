@@ -1,10 +1,13 @@
-// The agents' companion (`signals`): the turn it keeps from `start` to
-// `close`, which `status` reads (and the `stop` view, through `status`), and
-// watches (`awaitTurn`). Its handlers run on a fake context, which keeps the
-// state and records what they send to the companion itself.
+// An agent's companion (`<agent>.prebuilt.restate`, keyed as the agent):
+// the turn it keeps from `start` to `close`, which `status` reads (and the
+// `stop` view, through `status`), and watches (`awaitTurn`). Its handlers run
+// on a fake context, which keeps the state and records what they send to the
+// companion itself. And what makes one: each agent its own, served with it.
 import * as restate from '@restatedev/restate-sdk';
-import { signals } from '@restatedev/agents';
-import { STEERS } from '../src/signals.ts';
+import { chatHandler, COMPANION_SUFFIX, companionOf, served, sessionObject } from '@restatedev/agents';
+import { companionFor, STEERS } from '../src/companion.ts';
+import { invoke } from '@restatedev/sessions/internal';
+import { fakeContext, type Made } from '@restatedev/sessions/test/support';
 import { describe, expect, it, vi } from 'vitest';
 
 // The fake context's promises are plain ones: race them as such.
@@ -53,7 +56,7 @@ function companion(ends: Record<string, Promise<unknown>> = {}, { watched = fals
   /** What it sent to others (an agent's `settle`, or `steered`). */
   const sent: { service: string; method: string; key?: string; parameter: unknown; idempotencyKey?: string }[] = [];
   const ctx = {
-    key: 'assistant:alice',
+    key: 'alice',
     get: async (name: string) => structuredClone(state.get(name)),
     set: (name: string, value: unknown) => void state.set(name, structuredClone(value)),
     clear: (name: string) => {
@@ -81,8 +84,10 @@ function companion(ends: Record<string, Promise<unknown>> = {}, { watched = fals
       idempotencyKey?: string;
     }) => void sent.push({ service, method, key, parameter, idempotencyKey }),
   };
-  const handlers = (signals as unknown as { object: Record<string, (ctx: unknown, input?: unknown) => unknown> })
-    .object;
+  // The companion of agent `assistant`, at its key `alice`.
+  const handlers = (
+    companionFor('assistant') as unknown as { object: Record<string, (ctx: unknown, input?: unknown) => unknown> }
+  ).object;
   const run = <T>(name: string, input?: unknown) => handlers[name]!(ctx, input) as Promise<T>;
   return { run, own, rejected, sent, state, cleared };
 }
@@ -132,12 +137,12 @@ describe("an agent's companion", () => {
 
   it('has a turn whose invocation is gone settled by its agent, if the agent said it settles', async () => {
     const c = companion();
-    // An agent of another SDK does not say it settles its turns: it is sent nothing.
+    // An agent that does not say it settles its turns (none on the conversation of turns): it is sent nothing.
     await c.run('start', turn(A));
     await c.run('ended', A);
     expect(await answering(c)).toBeNull();
     expect(c.sent).toEqual([]);
-    // The status shows the turn as every SDK's companion does, with no field of this one's own.
+    // The status shows the turn without what only the companion reads.
     await c.run('start', { ...turn(B), settles: true });
     expect((await c.run<{ answering: object }>('status')).answering).toEqual(turn(B));
     await c.run('ended', B);
@@ -246,7 +251,7 @@ describe("an agent's companion, steering", () => {
   it('holds nothing for a turn that takes no steered messages, nor with no turn: each is a turn of its own', async () => {
     const c = companion();
     expect(await c.run('steer', { id: 's1', text: 'hi' })).toEqual({ id: 's1', turn: null });
-    // Of another SDK, or of a framework that takes none: it does not say it steers.
+    // Of a framework that takes none: it does not say it steers.
     await c.run('start', turn(A));
     expect(await c.run('steer', { id: 's2', text: 'hi' })).toEqual({ id: 's2', turn: null });
     expect((await published(c)).steering).toBeUndefined();
@@ -351,7 +356,7 @@ describe("an agent's companion, publishing a turn's start", () => {
     expect(started.steering).toEqual([{ id: 's1', text: 'use Celsius' }]);
   });
 
-  it('publishes nothing for a turn that does not say so (of another SDK, or in the background), and returns nothing', async () => {
+  it('publishes nothing for a turn that does not say so (in the background), and returns nothing', async () => {
     const c = companion();
     const before = await revision(c);
     expect(await c.run('start', turn(A))).toBeUndefined();
@@ -367,5 +372,95 @@ describe("an agent's companion, publishing a turn's start", () => {
     expect(c.cleared.filter((name) => name === 'watching')).toHaveLength(1);
     await published(c);
     expect(c.cleared.filter((name) => name === 'watching')).toHaveLength(1);
+  });
+});
+
+/** The services an endpoint of `services` serves, by name (as `serve` and `served` give them). */
+const names = (services: { name: string }[], only?: string) => served(services, only).map((s) => s.name);
+
+/** An agent named `name`, whose `chat` answers `ok`. */
+const agentNamed = (name: string) =>
+  sessionObject({ name, handlers: { chat: chatHandler(async () => 'ok') }, views: {} });
+
+/** What a companion answers each call of its agent, plainly. */
+const answer = (call: Made) =>
+  call.method === 'status'
+    ? { answering: null, waiting: [] }
+    : call.method === 'steer'
+      ? { id: 'inv_view', turn: null }
+      : call.method === 'resolve'
+        ? { resolved: null }
+        : call.method === 'pending'
+          ? []
+          : { revision: 1 };
+
+describe('the companion of each agent', () => {
+  const one = agentNamed('one');
+  const two = agentNamed('two');
+
+  it('is its own, named `<agent>.prebuilt.restate`, and served with it: an endpoint serves no `signals`', () => {
+    expect(COMPANION_SUFFIX).toBe('.prebuilt.restate');
+    expect(companionOf(one).name).toBe('one.prebuilt.restate');
+    expect(companionOf(two).name).toBe('two.prebuilt.restate');
+    expect(companionOf(one)).not.toBe(companionOf(two));
+    expect(names([one, two])).toEqual(['one', 'one.prebuilt.restate', 'two', 'two.prebuilt.restate']);
+    expect(names([one, two])).not.toContain('signals');
+    // The name of the agent as it is, whatever it is.
+    expect(companionOf(agentNamed('Billing_v2')).name).toBe('Billing_v2.prebuilt.restate');
+    expect(() => companionOf({ name: 'plain' })).toThrow('plain is not an agent of @restatedev/agents');
+  });
+
+  it('is served with its agent when RESTATE_SERVE_ONLY names the agent alone', () => {
+    expect(names([one, two], 'two')).toEqual(['two', 'two.prebuilt.restate']);
+  });
+
+  it("has every handler private to the ingress: clients reach it through the agent's views", () => {
+    const handlers = (companionOf(one) as unknown as { object: Record<string, object> }).object;
+    expect(Object.keys(handlers).length).toBeGreaterThan(10);
+    for (const [name, handler] of Object.entries(handlers)) {
+      const symbol = Object.getOwnPropertySymbols(handler).find((s) => s.description === 'Handler')!;
+      const options = (handler as Record<symbol, { options?: { ingressPrivate?: boolean } }>)[symbol]?.options;
+      expect([name, options?.ingressPrivate]).toEqual([name, true]);
+    }
+  });
+
+  it("is called by its agent's turn and views at the agent's own key; a turn of one touches nothing of the other's", async () => {
+    /** The calls and sends of agent `agent` at key `alice`, with a companion that answers each handler plainly. */
+    const runOf = (agent: typeof one, name: string) => {
+      const map = new Map<string, Uint8Array>();
+      const made: Made[] = [];
+      const run = (handler: string, input?: unknown, id = 'inv') =>
+        invoke(
+          agent,
+          handler,
+          fakeContext({ map, service: name, key: 'alice', id, calls: made, sends: made, answer }),
+          input,
+        );
+      return { run, made };
+    };
+    const a = runOf(one, 'one');
+    const b = runOf(two, 'two');
+    expect(await a.run('chat', 'hi', 'inv_turn')).toBe('ok');
+    await a.run('status');
+    await a.run('pending');
+    await a.run('signal', { name: 'approval', value: 'yes' }, 'inv_signal');
+    await a.run('stop', undefined, 'inv_stop');
+    await a.run('notifications');
+    const companions = a.made.filter((m) => m.service.endsWith(COMPANION_SUFFIX));
+    expect(companions.map((m) => m.method)).toEqual([
+      'start',
+      'close',
+      'status',
+      'pending',
+      'resolve',
+      'status',
+      'notifications',
+    ]);
+    expect(new Set(companions.map((m) => `${m.service}/${m.key}`))).toEqual(new Set(['one.prebuilt.restate/alice']));
+    expect(a.made.some((m) => m.service.startsWith('two'))).toBe(false);
+    // The other agent's turn, at the same key: its own companion, which the first one's turn never called.
+    expect(b.made).toEqual([]);
+    expect(await b.run('chat', 'hi', 'inv_other')).toBe('ok');
+    expect(new Set(b.made.map((m) => `${m.service}/${m.key}`))).toEqual(new Set(['two.prebuilt.restate/alice']));
   });
 });

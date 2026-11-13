@@ -20,7 +20,7 @@
 // abort at each write, twice, and hardly ever survived; a key whose every
 // commit is one could not commit at all.
 import * as restate from '@restatedev/restate-sdk';
-import { type Store, withStoreWrapper } from '@restatedev/sessions/internal';
+import { served, type Store, withStoreWrapper } from '@restatedev/sessions/internal';
 import { fileURLToPath } from 'node:url';
 import { seeded, seedFromEnv } from './random.ts';
 
@@ -61,9 +61,13 @@ const faulty = (store: Store): Store => ({
     }),
 });
 
-/** `services`, their session objects' stores aborting the process with ABORT_PER_MILLE. */
+/**
+ * `services`, with what they need beside them (`served`: an agent's
+ * companion, say), their session objects' stores aborting the process with
+ * ABORT_PER_MILLE.
+ */
 export const withFaults = (services: restate.ServeOptions['services']): restate.ServeOptions['services'] =>
-  perMille > 0 ? services.map((service) => withStoreWrapper(service, faulty)) : services;
+  perMille > 0 ? served(services).map((service) => withStoreWrapper(service, faulty)) : served(services);
 
 /** Serve `services` when `meta` is the entry module's `import.meta`. */
 export function serveIfMain(meta: ImportMeta, services: restate.ServeOptions['services']) {

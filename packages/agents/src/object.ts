@@ -2,6 +2,8 @@
 import * as restate from '@restatedev/sessions';
 import { reset } from '@restatedev/sessions/internal';
 import {
+  type AgentContext,
+  type AgentViewContext,
   type Answering,
   BUDGET,
   type Chat,
@@ -22,18 +24,17 @@ import {
 } from './common.ts';
 import { compact, type Items, nextStart, restart, SCHEMA, settle, steerStored } from './conversation.ts';
 import {
+  companionAt,
   type Notifications,
   type Resolved,
   type Signal,
-  signals,
-  signalsOf,
   type Steer,
   type Steered,
   type Steering,
   withCompanion,
   type Waiting,
   type Watch,
-} from './signals.ts';
+} from './companion.ts';
 
 /**
  * The options of every object here, beside a session object's: retries for
@@ -61,12 +62,13 @@ export interface Stopped {
 }
 
 /**
- * A call of the companion's of `ctx`; with `step`, a change, keyed by the
- * request and `step`: a restarted view joins the same call. A read has no
- * key: asked again, it answers again, and Restate keeps nothing of it.
+ * A call of the companion of the object of `ctx` (its own, at its key); with
+ * `step`, a change, keyed by the request and `step`: a restarted view joins
+ * the same call. A read has no key: asked again, it answers again, and
+ * Restate keeps nothing of it.
  */
-const companion = (ctx: restate.ViewContext, step?: string) =>
-  ctx.rpc(signals, signalsOf(ctx), step === undefined ? {} : { idempotencyKey: `${ctx.request.id}:${step}` });
+const companion = (ctx: AgentViewContext, step?: string) =>
+  ctx.rpc(companionAt(ctx), ctx.key, step === undefined ? {} : { idempotencyKey: `${ctx.request.id}:${step}` });
 
 /**
  * Cancel the invocation of the message being answered, if any, and say
@@ -75,7 +77,7 @@ const companion = (ctx: restate.ViewContext, step?: string) =>
  * invocation again (which does nothing), not the message that started once
  * it was cancelled.
  */
-async function stopped(ctx: restate.ViewContext, step: string): Promise<Stopped> {
+async function stopped(ctx: AgentViewContext, step: string): Promise<Stopped> {
   const turn = (await companion(ctx, step).status()).answering;
   if (turn) ctx.cancel(turn.invocationId);
   return { stopped: turn?.invocationId ?? null };
@@ -96,18 +98,19 @@ const WAITS = { inactivityTimeout: { minutes: 5 } } satisfies restate.HandlerOpt
  * it answers, and `notifications` and `watch`, the revision of its
  * conversation, and a wait for a newer one (an agent's
  * has `clear` and `sync` too: {@link FOLLOWED}). Each asks the object's
- * `signals` companion, which knows what the object does: they run while the
- * object's handler works.
+ * companion (its own `<name>.prebuilt.restate`, at the same key), which
+ * knows what the object does: they run while the object's handler works.
+ * They are the only way a client reaches the companion, whose handlers
+ * Restate's ingress refuses.
  */
 const BUILT_IN = {
-  signal: async (ctx: restate.ViewContext, signal: Signal): Promise<Resolved> =>
-    companion(ctx, 'signal').resolve(signal),
-  pending: async (ctx: restate.ViewContext): Promise<Waiting[]> => companion(ctx).pending(),
-  status: async (ctx: restate.ViewContext): Promise<Status> => companion(ctx).status(),
+  signal: async (ctx: AgentViewContext, signal: Signal): Promise<Resolved> => companion(ctx, 'signal').resolve(signal),
+  pending: async (ctx: AgentViewContext): Promise<Waiting[]> => companion(ctx).pending(),
+  status: async (ctx: AgentViewContext): Promise<Status> => companion(ctx).status(),
   /** Cancel the invocation of the message being answered (`status`'s), as Restate's admin API cancels one. */
-  stop: async (ctx: restate.ViewContext): Promise<Stopped> => stopped(ctx, 'stop'),
+  stop: async (ctx: AgentViewContext): Promise<Stopped> => stopped(ctx, 'stop'),
   /** The revision of the conversation: each change of what `messages` and `status` give increases it. */
-  notifications: async (ctx: restate.ViewContext): Promise<Notifications> => companion(ctx).notifications(),
+  notifications: async (ctx: AgentViewContext): Promise<Notifications> => companion(ctx).notifications(),
   /**
    * The revision, once there is one newer than `revision`, or at the timeout (50 s by
    * default, at most 60 s), whichever comes first: a client then reads what
@@ -116,7 +119,7 @@ const BUILT_IN = {
    */
   watch: {
     ...WAITS,
-    handler: async (ctx: restate.ViewContext, watch: Watch): Promise<Notifications> =>
+    handler: async (ctx: AgentViewContext, watch: Watch): Promise<Notifications> =>
       companion(ctx, 'watch').watch(watch),
   },
 };
@@ -135,7 +138,7 @@ const BUILT_IN = {
 const followed = (steerable: boolean) => ({
   /**
    * Forget the conversation: stop the message being answered (as `stop`),
-   * then empty the key's database, and what its `signals` hold (waits and
+   * then empty the key's database, and what its companion holds (waits and
    * kept signals). The conversation's ids and cursors go on (see
    * conversation.ts), so a follower reads on, and drops the messages before `first`.
    * A message sent before it is answered first, then forgotten too; one sent
@@ -144,7 +147,7 @@ const followed = (steerable: boolean) => ({
   clear: {
     // `erase` waits for the messages sent before it.
     ...WAITS,
-    handler: async (ctx: restate.ViewContext): Promise<Stopped> => {
+    handler: async (ctx: AgentViewContext): Promise<Stopped> => {
       const stop = await stopped(ctx, 'clear');
       await ctx.rpc({
         service: ctx.request.target.service,
@@ -168,7 +171,7 @@ const followed = (steerable: boolean) => ({
   steer: {
     input: messageSerde,
     accept: '*/*',
-    handler: async (ctx: restate.ViewContext, text: string): Promise<Steered> => {
+    handler: async (ctx: AgentViewContext, text: string): Promise<Steered> => {
       if (!steerable) {
         throw new restate.TerminalError(
           `${ctx.request.target.service} takes no steered messages: its \`chat\` handler is no framework's \`chat()\` (chatHandler)`,
@@ -181,7 +184,7 @@ const followed = (steerable: boolean) => ({
   sync: {
     ...WAITS,
     handler: async (
-      ctx: restate.ViewContext,
+      ctx: AgentViewContext,
       { cursor = 0, revision, timeoutSeconds = 50, limit = 100, view }: SyncRequest = {},
     ): Promise<Synced> => {
       if (revision !== undefined) await companion(ctx, 'watch').watch({ revision, timeoutSeconds });
@@ -211,14 +214,14 @@ const FOLLOWED = followed(false);
 /**
  * The agents' handlers that only their own views call (Restate's ingress
  * refuses them), and their types leave out: `erase`, `clear`'s work, once
- * the handlers before it are done. It empties the key's database and its
- * signals', and the conversation's ids and cursors go on where they got to
+ * the handlers before it are done. It empties the key's database and what its
+ * companion holds, and the conversation's ids and cursors go on where they got to
  * (conversation.ts).
  */
 const internal = (items: Items<unknown> | undefined) => ({
   erase: {
     ingressPrivate: true,
-    handler: async (ctx: restate.SessionContext) => {
+    handler: async (ctx: AgentContext) => {
       // Read first, which also makes the reset apply the conversation's schema again.
       await SCHEMA.ensure(ctx.db);
       const start = await nextStart(ctx.db);
@@ -228,7 +231,7 @@ const internal = (items: Items<unknown> | undefined) => ({
         await reset(tx);
         await restart(tx, start);
       });
-      await ctx.rpc(signals, signalsOf(ctx), { idempotencyKey: `${ctx.request.id}:reset` }).reset();
+      await ctx.rpc(companionAt(ctx), ctx.key, { idempotencyKey: `${ctx.request.id}:reset` }).reset();
     },
   },
   /**
@@ -240,7 +243,7 @@ const internal = (items: Items<unknown> | undefined) => ({
    */
   settle: {
     ingressPrivate: true,
-    handler: async (ctx: restate.SessionContext, invocationId: string) => {
+    handler: async (ctx: AgentContext, invocationId: string) => {
       if (!items || !(await settle(ctx, items, invocationId))) return false;
       // The companion published as it closed the turn, before this stored how it ended: publish that too.
       await publish(ctx);
@@ -250,7 +253,7 @@ const internal = (items: Items<unknown> | undefined) => ({
   /** Summarize the earliest turns, past the agent's budget. Whether it did. */
   compact: {
     ingressPrivate: true,
-    handler: async (ctx: restate.SessionContext) => (items ? compact(ctx, items) : false),
+    handler: async (ctx: AgentContext) => (items ? compact(ctx, items) : false),
   },
 });
 
@@ -264,7 +267,7 @@ const internal = (items: Items<unknown> | undefined) => ({
 const steeredOf = ({ answer, steers }: { answer: Chat; steers: Steers }) => ({
   ingressPrivate: true,
   explicitCancellation: true,
-  handler: async (ctx: restate.SessionContext, { id, text }: Steer) => {
+  handler: async (ctx: AgentContext, { id, text }: Steer) => {
     if (await steerStored(ctx.db, id)) return;
     await chatTurn(ctx, text, answer, steers);
   },
@@ -297,8 +300,8 @@ export interface Definition<P extends string> {
   description?: string;
   schema?: readonly restate.Step[];
   /**
-   * Whether it works unwatched, such as a subagent: its turn calls its
-   * `signals` only at its end, not at each step, so a client that follows it
+   * Whether it works unwatched, such as a subagent: its turn publishes to its
+   * companion only at its end, not at each step, so a client that follows it
    * sees each turn once it ended. `messages` has every turn as before.
    */
   background?: boolean;
@@ -365,8 +368,8 @@ type With<H, V> = Functions<typeof BUILT_IN> &
  */
 export const sessionObject = <
   P extends string,
-  H extends Record<string, restate.Entry<restate.SessionContext>>,
-  V extends Record<string, restate.Entry<restate.ViewContext>>,
+  H extends Record<string, restate.Entry<AgentContext>>,
+  V extends Record<string, restate.Entry<AgentViewContext>>,
 >(
   definition: Definition<P> & {
     handlers?: H & Reserved;
@@ -391,14 +394,14 @@ export const sessionObject = <
   }
   // A model provider's refusal (a missing API key) ends a handler's invocation.
   const yours = Object.fromEntries(
-    Object.entries(handlers as Record<string, restate.Entry<restate.SessionContext>>).map(([key, entry]) => [
+    Object.entries(handlers as Record<string, restate.Entry<AgentContext>>).map(([key, entry]) => [
       key,
       answering(entry),
     ]),
   );
-  const messages = (views as Record<string, restate.Entry<restate.ViewContext>>).messages;
+  const messages = (views as Record<string, restate.Entry<AgentViewContext>>).messages;
   const page = (typeof messages === 'function' ? messages : messages?.handler) as
-    | ((ctx: restate.ViewContext, request: MessagesRequest) => Promise<Messages>)
+    | ((ctx: AgentViewContext, request: MessagesRequest) => Promise<Messages>)
     | undefined;
   // A `chat` that `chatHandler` made: its answer answers the steered messages no turn took (`steered`).
   const chatEntry = (handlers as Record<string, unknown>).chat;
@@ -413,8 +416,8 @@ export const sessionObject = <
     );
   }
   const { erase, ...stored } = internal(items);
-  const steering: Record<string, restate.Entry<restate.SessionContext>> = chat ? { steered: steeredOf(chat) } : {};
-  const privates: Record<string, restate.Entry<restate.SessionContext>> = messages === undefined
+  const steering: Record<string, restate.Entry<AgentContext>> = chat ? { steered: steeredOf(chat) } : {};
+  const privates: Record<string, restate.Entry<AgentContext>> = messages === undefined
     ? {}
     : items
       ? { erase, ...stored, ...steering }
@@ -436,11 +439,11 @@ export const sessionObject = <
 };
 
 /** `entry`, but a model provider's refusal it fails with ends its invocation, as `chat`'s does. */
-function answering(entry: restate.Entry<restate.SessionContext>): restate.Entry<restate.SessionContext> {
+function answering(entry: restate.Entry<AgentContext>): restate.Entry<AgentContext> {
   const { handler, ...options } = typeof entry === 'function' ? { handler: entry } : entry;
   return {
     ...options,
-    handler: async (ctx: restate.SessionContext, input: unknown) => {
+    handler: async (ctx: AgentContext, input: unknown) => {
       try {
         return await handler(ctx, input);
       } catch (error) {

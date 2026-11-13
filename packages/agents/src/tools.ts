@@ -14,7 +14,7 @@ import { attach, start } from '@restatedev/sessions/internal';
 import { z } from 'zod';
 import { stopSignalOf, type Configure, configured, ToolError } from './common.ts';
 import { callOf } from './calls.ts';
-import { signals, signalsOf } from './signals.ts';
+import { companionHere, NoCompanion } from './companion.ts';
 
 const TOOL = Symbol.for('restate-agents.tool');
 
@@ -104,6 +104,9 @@ export const tool = <S extends z.ZodObject>(options: {
       const turn = stopSignalOf(ctx);
       if (turn?.aborted) throw turn.reason;
       if (error instanceof restate.CancelledError) throw error;
+      // An object without a companion, waiting for a signal: a programming error, which fails the turn once,
+      // rather than an answer for the model to act on.
+      if (error instanceof NoCompanion) throw error;
       // A terminal error is the tool's answer, which the model can act on; any
       // other error fails the attempt, which Restate retries.
       if (error instanceof restate.TerminalError) return `Error: ${error.message}`;
@@ -384,20 +387,23 @@ export const signal = (name: string, options: { description: string; input?: z.Z
  * `pending` shows `input` if `shown`. `rejoin` and `approval` are
  * {@link callOf}'s.
  */
-const wait = (
+const wait = async (
   toolCall: ToolCall,
   name: string,
   input: unknown,
   { shown, rejoin, approval }: { shown: boolean; rejoin?: boolean; approval?: boolean },
-): Promise<unknown> =>
-  once(
+): Promise<unknown> => {
+  // Before the call is recorded: an object without a companion fails the turn, once (`NoCompanion`).
+  const companion = companionHere(toolCall.ctx, 'a wait for a signal');
+  return once(
     `signal/${name}`,
     input,
     toolCall,
     async ({ ctx, idempotencyKey: id }) =>
-      ctx.rpc(signals, signalsOf(ctx), { idempotencyKey: id }).wait({ id, name, ...(shown ? { input } : {}) }),
+      ctx.rpc(companion, ctx.key, { idempotencyKey: id }).wait({ id, name, ...(shown ? { input } : {}) }),
     { rejoin, approval },
   );
+};
 
 /**
  * Wait for the signal `name` to the agent, for the model's tool call

@@ -1,5 +1,5 @@
 // Test support for the agents, without a Restate server: an attempt of an
-// agent's handler with the `signals` object, and a conversation with a ledger
+// agent's handler with its companion, and a conversation with a ledger
 // that records its calls, through crashes of the handler.
 import { expect } from 'vitest';
 import * as restate from '@restatedev/sessions';
@@ -8,10 +8,11 @@ import { type AttemptContext, contextOf } from '@restatedev/sessions/internal';
 import { type AttemptOptions, sqlAttempt as baseAttempt } from '@restatedev/sessions/test/support';
 import { z } from 'zod';
 import type { Audit, Transfer } from '@restatedev/sessions/test/ledger';
+import { companionName, COMPANION_SUFFIX, withCompanion } from '../src/companion.ts';
 import { SCHEMA, STEPS, TURNS } from '../src/conversation.ts';
 
 /**
- * The `signals` object of an agent's tests, as far as following goes: the
+ * The companion of an agent's tests, as far as following goes: the
  * message being answered, the turns closed, and how often the conversation
  * was published.
  */
@@ -66,9 +67,11 @@ const made = (c: Made): Made => ({
 });
 
 /**
- * An attempt of a handler, @restatedev/sessions's own, with the `signals` object
- * of following over `map`: `ctx`, a handler's context, and `view`, a view's.
- * `route` answers the calls to anything but `signals`.
+ * An attempt of a handler, @restatedev/sessions's own, with the agent's
+ * companion of following over `map`: `ctx`, a handler's context, and `view`,
+ * a view's. `route` answers the calls to anything but a companion. A call of
+ * another companion than the agent's own (`<agent>.prebuilt.restate`),
+ * or at another key than the agent's, fails.
  */
 export function sqlAttempt(
   options: AttemptOptions & {
@@ -77,12 +80,6 @@ export function sqlAttempt(
     signal?: (wait: { id: string; name: string; input?: unknown }) => unknown;
     /** Run at each publish, before it answers: a follower reading the conversation, say. */
     published?: () => Promise<void>;
-    /**
-     * The companion of an older deployment (or of the Python SDK's before
-     * 1.5.2): its `start` publishes nothing, and returns nothing, whatever
-     * the turn says.
-     */
-    olderCompanion?: boolean;
   },
 ) {
   const following = followingOf(options.map);
@@ -90,11 +87,14 @@ export function sqlAttempt(
   const base = baseAttempt({
     ...options,
     send: (sent) => {
-      if (sent.service === 'signals') void route(sent);
+      if (sent.service.endsWith(COMPANION_SUFFIX)) void route(sent);
       options.send?.(sent);
     },
   });
-  // The `signals` object, as the agents call it.
+  // The agent's own companion, as it calls it: its name, and the agent's key.
+  const service = options.object?.name ?? options.service ?? 'agent';
+  const key = options.key ?? 'k';
+  const companion = companionName(service);
   /** As the companion's `publish`: the new revision, and the messages steered to the turn that it has not taken. */
   const published = async () => {
     await options.published?.();
@@ -102,7 +102,7 @@ export function sqlAttempt(
     const steering = following.answering?.steers ? following.steering : [];
     return steering.length > 0 ? { revision, steering: [...steering] } : { revision };
   };
-  const signals: Record<string, (input: never) => unknown> = {
+  const handlers: Record<string, (input: never) => unknown> = {
     publish: published,
     // A transaction's send: its parameter as it was stored, JSON.
     taken: (parameter: Uint8Array | string[]) => {
@@ -125,7 +125,7 @@ export function sqlAttempt(
         if (following.answering) closed(following.answering.invocationId, true);
         following.answering = turn;
       }
-      return turn.publishes && !options.olderCompanion ? published() : undefined;
+      return turn.publishes ? published() : undefined;
     },
     // As the companion's: a turn's close publishes it.
     close: (turn: string) => closed(turn),
@@ -145,21 +145,23 @@ export function sqlAttempt(
   /** The results of the invocations calls started, by their id. */
   const sent = new Map<string, Promise<unknown>>();
   const route = (c: Made) => {
-    if (c.service !== 'signals') {
+    if (!c.service.endsWith(COMPANION_SUFFIX)) {
       if (options.route) return options.route(made(c));
       throw new Error(`no ${c.service} in this test`);
     }
-    const method = signals[c.method];
-    if (!method) throw new Error(`no signals.${c.method} in this test`);
+    if (c.service !== companion || c.key !== key) {
+      throw new Error(
+        `${service}'s key ${key} called ${c.service} at ${c.key}, not its own companion ${companion} at ${key}`,
+      );
+    }
+    const method = handlers[c.method];
+    if (!method) throw new Error(`no ${companion}.${c.method} in this test`);
     following.made.push(c.method);
     return method(c.parameter as never);
   };
   const sdk = {
-    key: options.key ?? 'k',
-    request: () => ({
-      ...base.request(),
-      target: { service: options.object?.name ?? options.service ?? 'agent', key: options.key ?? 'k', handler: 'chat' },
-    }),
+    key,
+    request: () => ({ ...base.request(), target: { service, key, handler: 'chat' } }),
     // A call's invocation: one per target and key, as a workflow's run is,
     // whose result `attach` gets.
     genericCall: (c: Made) => {
@@ -181,8 +183,8 @@ export function sqlAttempt(
       },
     }),
   } as unknown as AttemptContext;
-  // A chat handler's: with explicit cancellation.
-  const definition = options.object;
+  // A chat handler's: with explicit cancellation. An object of its own is the test's; else one with a companion.
+  const definition = options.object ?? withCompanion({ name: service });
   const ctx = contextOf(sdk, base.db, { explicitCancellation: true, definition });
   return { ...base, ctx, view: contextOf(sdk, base.db, { view: true, definition }) };
 }

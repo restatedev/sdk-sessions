@@ -34,7 +34,7 @@ with the rows it read and the gets made while it ran.
   reading that turn, the latest, from the cursor before it, the same way.
 - The agent's defaults: `window` 1, `budget` 32,000, no summaries.
 
-Not covered: the companion (`signals`), the call records (no tool here
+Not covered: the companion (`<agent>.prebuilt.restate`), the call records (no tool here
 makes Restate calls), and a real server (whether it sends a key's whole
 state with each invocation).
 

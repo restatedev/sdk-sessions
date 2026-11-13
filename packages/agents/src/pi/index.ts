@@ -78,7 +78,6 @@ import {
   refusal,
   REFUSED,
   RETURNED_UNRECORDED,
-  stepped,
   stopSignalOf,
   toolCallStarted,
 } from '../common.ts';
@@ -516,7 +515,7 @@ export const withPi = async <T>(
           if (!copiedSteps) return;
           copiedSteps = false;
           // Failing, it fails the attempt, as a tool's error does: never pi's commit, which is done.
-          await stepped(ctx).catch((error: unknown) => {
+          await current.stepsCommitted().catch((error: unknown) => {
             failed(error);
             cancel(error);
           });

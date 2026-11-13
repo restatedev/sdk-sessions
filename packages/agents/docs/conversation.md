@@ -149,7 +149,13 @@ const SCHEMA = new Schema('restate_agents.turns', [
   a publish, before each Restate call, send or wait of the library (a call
   record, LangGraph's nodes and interrupts), and when its attempt fails
   with an error in process; a crash loses it, and the retry makes it again.
-  A conversation written directly writes each step as it comes. A
+  That is the conversation's own durability. Telling followers is not: the
+  conversation stores a turn, and knows nothing of the companion. After
+  each write of steps that commits, the run makes what `answerOnce` passed
+  to `Conversation.hold`: what the `chat` turn it runs in asked for (a
+  followed turn's publish, which `chatTurn` sets), or nothing, for a turn
+  run outside one. A conversation written directly writes each step as it
+  comes. A
   reply at the end can be dropped (to ask the model again), which is one
   range delete; its `seq` is kept in the start row, so cursors never go
   back.
@@ -215,7 +221,7 @@ there with one read of that index (`steerStored`).
 | Where                                                                                                                               | What                                                                                                                                                                                                                                                                                                                                                   | Written by                                                                                                                    |
 | ----------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
 | `restate_agent_calls` (schema `restate-agents.calls`, as today), in the key's database                                              | one row: the invocation's Restate calls made by tools, as JSON ([Tool calls, once](#tool-calls-once-the-call-records))                                                                                                                                                                                                                                 | the tools built on Restate (`call`, `send`, `workflow`, `subagent`, `signal`) and `waitFor`                                   |
-| the companion's state: the `signals` object, keyed `<agent>:<key>`                                                                  | `turn`: the turn being answered (`Started`: its invocation, since when, whether the agent `settles`, whether it `steers`); `waiting`: the tools' waits, each with its awakeable; `kept`: signals that came before their wait; `inbox`: the messages steered to turns not closed yet, each with its text until its turn took it; `revision`; `watching` | the companion's handlers (`start`, `close`, `ended`, `listen`, `resolve`, `forget`, `publish`, `subscribe`, `steer`, `taken`) |
+| the companion's state: the agent's own `<agent>.prebuilt.restate`, keyed as the agent                                               | `turn`: the turn being answered (`Started`: its invocation, since when, whether the agent `settles`, whether it `steers`); `waiting`: the tools' waits, each with its awakeable; `kept`: signals that came before their wait; `inbox`: the messages steered to turns not closed yet, each with its text until its turn took it; `revision`; `watching` | the companion's handlers (`start`, `close`, `ended`, `listen`, `resolve`, `forget`, `publish`, `subscribe`, `steer`, `taken`) |
 | `restate_langgraph_checkpoints`, `restate_langgraph_channel_values`, `restate_langgraph_writes` (schema `restate-agents.langgraph`) | a LangGraph graph's checkpoints, channel values by version, and pending writes, per thread and namespace                                                                                                                                                                                                                                               | `SqlCheckpointSaver`, for a graph of your own; the built-in agent uses none                                                   |
 | pi-durable's `restate_pi_*` tables (its own migrations, `restate_pi_durable_schema`)                                                | pi's conversation, tasks and documents ([The frameworks](frameworks.md#pi))                                                                                                                                                                                                                                                                            | pi, through [`src/pi/storage.ts`](../src/pi/storage.ts)                                                                       |
 | `restate_deepseek_sessions`, `restate_deepseek_events` (schema `restate-agents.deepseek`)                                           | the DeepSeek Harness's event log ([The frameworks](frameworks.md#deepseek-harness))                                                                                                                                                                                                                                                                    | the harness, through [`src/deepseek/persistence.ts`](../src/deepseek/persistence.ts)                                          |
@@ -550,7 +556,10 @@ invocation (the next invocation's first call replaces it):
   harness stores the call) waits with `rejoin`: the call made again joins
   the wait an earlier attempt opened with the same input, as Restate's
   tools do, until that call's result is stored.
-- **Forgetting.** At each publish and before each tool call, a record whose
+- **Forgetting.** After each commit of the turn's steps (in `answerOnce`'s
+  run, before anything the turn asked for then, such as a `chat` turn's
+  publish: once per commit, whoever runs the turn), before each tool call,
+  and at the turn's end, a record whose
   Restate call returned is forgotten once the turn has its result under the
   latest id it was made with (`Turn.stored`): a success, or the very error
   the call returned. Another error in the turn (one the framework made up for

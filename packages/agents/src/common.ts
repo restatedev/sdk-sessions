@@ -6,7 +6,33 @@
 import * as restate from '@restatedev/sessions';
 import { cancelCalls, cancelled, definitionOf, Link, ScopeKey } from '@restatedev/sessions/internal';
 import { flushHeld, settleCalls } from './calls.ts';
-import { type Published, type Steer, signals, signalsOf } from './signals.ts';
+import { companionHere, type Published, type Steer } from './companion.ts';
+
+/**
+ * The context of an agent's handler: a session context, from an object that
+ * has a companion.
+ *
+ * The agent's own surface takes it: the handlers and views of
+ * `sessionObject()` and of a framework's `agent()`, a `chat` handler's
+ * answer, and what only an agent does with a context ({@link chatTurn},
+ * {@link publish}). The layer a handler belongs to is then in its
+ * signature, where the person writing it reads it, rather than found out in
+ * the middle of a turn, after a model round-trip, looking like a tool
+ * failure.
+ *
+ * It is a signpost, not a fence: it adds nothing to a session context, so
+ * the two are the same type to the compiler, and `NoCompanion` stays the
+ * guard that stops a wait from an object without a companion.
+ */
+export interface AgentContext extends restate.SessionContext {}
+
+/**
+ * The context of an agent's view: a view context, from an object that has a
+ * companion. What {@link AgentContext} is to a handler, for the views that
+ * read what the agent is doing, or tell its companion to (`status`,
+ * `pending`, `signal`, `steer`, `watch`).
+ */
+export interface AgentViewContext extends restate.ViewContext {}
 
 /**
  * A value, or a function of the invocation's context that gives it: the
@@ -273,8 +299,11 @@ export const settingsOf = (ctx: restate.SessionContext): Settings =>
 /** Whether the agent of `ctx` runs in the background. */
 const unfollowed = (ctx: restate.SessionContext) => agentOf(ctx)?.background === true;
 
-/** The `signals` object of the agent of `ctx`. */
-const signalsOfAgent = (ctx: restate.SessionContext) => ctx.rpc(signals, signalsOf(ctx));
+/**
+ * The companion of the agent of `ctx`, for `needs`: its own, at its key. An
+ * object without one fails with a terminal error (`NoCompanion`).
+ */
+const companionOfAgent = (ctx: restate.SessionContext, needs: string) => ctx.rpc(companionHere(ctx, needs), ctx.key);
 
 /**
  * The messages steered to a `chat` turn that it has not taken yet, as the
@@ -323,27 +352,50 @@ export const inboxOf = (ctx: restate.SessionContext) => INBOX.get(ctx);
  * forgotten first. It is a call to Restate, so it also sends what the
  * handler wrote before, for them to read: the rows the conversation holds
  * back are written first (`flushHeld`), as the clients read them once told.
+ *
+ * Only a `chat` turn ({@link chatTurn}: after each commit of its steps) and
+ * `settle` publish, on an object with a companion: one without fails with a
+ * terminal error (`NoCompanion`), rather than call a companion nobody serves.
  */
-export const publish = async (ctx: restate.SessionContext) => {
+export const publish = async (ctx: AgentContext) => {
+  const companion = companionOfAgent(ctx, 'a publish');
   await flushHeld(ctx);
-  const stored = ANSWERING.get(ctx);
-  if (stored) await settled(ctx, stored);
-  const published = await signalsOfAgent(ctx).publish();
+  const published = await companion.publish();
   INBOX.get(ctx)?.saw(published);
 };
 
-/** A step of a turn of `ctx`: {@link publish} it, unless the agent runs in the background, which publishes the turn's end only. */
-export const stepped = async (ctx: restate.SessionContext) => {
-  if (!unfollowed(ctx)) await publish(ctx);
-};
+/**
+ * What the turn running on `ctx` makes after each commit of its steps (a
+ * reply with tool calls, the tools' results), if anything: set by
+ * {@link chatTurn}, for a followed turn, to publish. The conversation takes
+ * it as it is, without knowing what it does (`answerOnce` hands it to
+ * `Conversation.hold`); a turn run outside a `chat` turn (a handler of your
+ * own that calls a framework's `prompt()`) has none: it stores its steps,
+ * and publishes nothing.
+ */
+const AFTER_STEPS = new ScopeKey<() => Promise<void>>('afterSteps');
+
+/** What the turn running on `ctx` makes after each commit of its steps, if anything: see {@link AFTER_STEPS}. */
+export const afterStepsOf = (ctx: restate.SessionContext): (() => Promise<void>) | undefined => AFTER_STEPS.get(ctx);
 
 /**
  * A tool call of the turn of `ctx` starts: forget the calls whose results are
- * stored (calls.ts) before the tool makes its own. It publishes nothing: the
- * turn publishes once the call is stored (with its reply), and once its
- * result is ({@link stepped}).
+ * stored (calls.ts) before the tool makes its own. It publishes nothing: a
+ * followed `chat` turn publishes once the call is stored (with its reply),
+ * and once its result is ({@link afterStepsOf}).
  */
 export async function toolCallStarted(ctx: restate.SessionContext) {
+  await settleAnswered(ctx);
+}
+
+/**
+ * Forget the call records (calls.ts) whose results the turn answering on
+ * `ctx` has stored ({@link answering}), if one does: after each commit of its
+ * steps (`answerOnce` does, before what the turn asked for then, such as a
+ * `chat` turn's publish, for every turn, in a `chat` turn or not), as a tool
+ * call starts, and as the turn ends.
+ */
+export async function settleAnswered(ctx: restate.SessionContext) {
   const stored = ANSWERING.get(ctx);
   if (stored) await settled(ctx, stored);
 }
@@ -367,8 +419,8 @@ function settled(ctx: restate.SessionContext, stored: Stored): Promise<void> {
 
 /**
  * Run `work`, a framework's turn on the conversation of turns, forgetting
- * the calls whose results it stores as it goes: each publish while it runs
- * (after a write of its steps commits), each tool call's start, and its
+ * the calls whose results it stores as it goes: each write of its steps
+ * that commits ({@link settleAnswered}), each tool call's start, and its
  * end, forget the Restate calls of
  * the tool calls whose results `stored` says are stored (calls.ts).
  */
@@ -400,14 +452,14 @@ export const aborted = (signal: AbortSignal) =>
   });
 
 /** A `chat` handler's answer to a message: a framework's prompt, say. */
-export type Chat<A = unknown> = (ctx: restate.SessionContext, message: string) => Promise<A>;
+export type Chat<A = unknown> = (ctx: AgentContext, message: string) => Promise<A>;
 
 /**
  * Whether a `chat` handler's turns take steered messages: for every message,
  * or for each, as the invocation's context says (a framework's options that
  * a function gives, say).
  */
-export type Steers = boolean | ((ctx: restate.SessionContext) => boolean | Promise<boolean>);
+export type Steers = boolean | ((ctx: AgentContext) => boolean | Promise<boolean>);
 
 /** What makes a `chat` handler (`chatHandler`): its answer, and whether it takes steered messages. */
 const CHAT = new Link<{ answer: Chat; steers: Steers }>('restate-agents.chat');
@@ -431,9 +483,9 @@ export const chatOf = (entry: object) => CHAT.of(entry);
  * attempt that ends first (`attemptCompletedSignal`) aborts it too, with an
  * {@link AttemptEnded}: the work stops, and the next attempt goes on with it.
  *
- * It publishes when it starts (its companion's `start` does, or else the
- * turn) and ends ({@link publish}), for the clients that follow the
- * conversation.
+ * It publishes when it starts (its companion's `start` does) and ends
+ * ({@link publish}), for the clients that follow the conversation, unless
+ * the agent runs in the background, which publishes the end only.
  *
  * As the `chat` handler of an agent, it also answers each message sent to
  * the agent's `steer` view that no turn took, as a turn of its own (the
@@ -446,7 +498,7 @@ export const chatHandler = <A = string>(answer: Chat<A>, { steers = false }: { s
       input: messageSerde,
       accept: '*/*',
       explicitCancellation: true,
-      handler: (ctx: restate.SessionContext, text: string): Promise<A> => chatTurn(ctx, text, answer, steers),
+      handler: (ctx: AgentContext, text: string): Promise<A> => chatTurn(ctx, text, answer, steers),
     },
     { answer, steers },
   );
@@ -458,7 +510,7 @@ export const chatHandler = <A = string>(answer: Chat<A>, { steers = false }: { s
  * in the background).
  */
 export async function chatTurn<A>(
-  ctx: restate.SessionContext,
+  ctx: AgentContext,
   text: string,
   answer: Chat<A>,
   steers: Steers = false,
@@ -473,24 +525,26 @@ export async function chatTurn<A>(
   if (steering) INBOX.set(ctx, new Inbox());
   // A followed turn's start is its first publish: the companion makes it, and returns what `publish` returns.
   const followed = !unfollowed(ctx);
-  const started = await ctx.rpc(signals, signalsOf(ctx)).start({
+  const companion = companionOfAgent(ctx, 'a chat turn');
+  const started = await companion.start({
     invocationId,
     since: new Date().toISOString(),
     ...(settles ? { settles } : {}),
     ...(steering ? { steers: steering } : {}),
     ...(followed ? { publishes: true } : {}),
   });
-  if (typeof started === 'object' && started !== null) INBOX.get(ctx)?.saw(started);
-  // A companion that returns nothing from `start` (an older deployment's, or the Python SDK's before 1.5.2) did
-  // not publish it: the turn does.
-  else if (followed) await publish(ctx);
+  INBOX.get(ctx)?.saw(started);
+  // A followed turn publishes after each commit of its steps, for its
+  // followers to read them there: the conversation makes what the turn sets
+  // here (`afterStepsOf`), without knowing it publishes. A background turn
+  // publishes its end only.
+  if (followed) AFTER_STEPS.set(ctx, () => publish(ctx));
   // The log takes the turn's last change, then the companion closes the
   // turn, which publishes it: one revision. The close is a call the turn
   // waits for, so that it is done before the turn ends (see `awaitTurn`).
   const end = async () => {
-    const stored = ANSWERING.get(ctx);
-    if (stored) await settled(ctx, stored);
-    await signalsOfAgent(ctx).close(invocationId);
+    await settleAnswered(ctx);
+    await companion.close(invocationId);
   };
   const turn = new AbortController();
   TURN.set(ctx, turn.signal);
@@ -521,6 +575,7 @@ export async function chatTurn<A>(
   } finally {
     // An attempt's signal aborts at every attempt's end, the turn's too.
     attempt.removeEventListener('abort', attemptEnded);
+    AFTER_STEPS.delete(ctx);
   }
   await end();
   return answered;

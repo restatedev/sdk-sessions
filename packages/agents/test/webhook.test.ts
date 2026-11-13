@@ -135,16 +135,18 @@ describe('a webhook', () => {
 });
 
 describe("an agent's companion", () => {
-  it('is served beside the agent: restate.serve of an agent serves its signals too', () => {
-    expect(served([triage, audit]).map((s) => s.name)).toEqual(['triage', 'signals', 'audit']);
+  it('is served beside the agent: restate.serve of an agent serves its own companion too', () => {
+    expect(served([triage, audit]).map((s) => s.name)).toEqual([
+      'triage',
+      'triage.prebuilt.restate',
+      'audit',
+      'audit.prebuilt.restate',
+    ]);
   });
 
-  it('is found from the agent: its signals object, keyed `<agent>:<key>`', () => {
-    const companion = companionOf(triage, 'ENG-1');
-    expect(companion.object.name).toBe('signals');
-    expect(companion.key).toBe('triage:ENG-1');
-    expect(companion.agent).toEqual({ service: 'triage', key: 'ENG-1' });
-    expect(() => companionOf({ name: 'plain' }, 'k')).toThrow('plain is not an agent of @restatedev/agents');
+  it('is found from the agent: its own object, `<agent>.prebuilt.restate`', () => {
+    expect(companionOf(triage).name).toBe('triage.prebuilt.restate');
+    expect(() => companionOf({ name: 'plain' })).toThrow('plain is not an agent of @restatedev/agents');
   });
 
   it("takes a delivery from a session object's handler, as from one of the SDK's", () => {

@@ -2,6 +2,7 @@
 // with a fake context that records the calls they make.
 import * as restate from '@restatedev/sessions';
 import { call, sessionObject, send, signal, subagent, tool, workflow, type Tool } from '@restatedev/agents';
+import { withCompanion } from '../src/companion.ts';
 import { type AttemptContext, contextOf, invoke } from '@restatedev/sessions/internal';
 import { fakeContext, type Made, memoryDatabase } from '@restatedev/sessions/test/support';
 import { describe, expect, it } from 'vitest';
@@ -52,7 +53,10 @@ function context(state = new Map<string, Uint8Array>()) {
       },
     }),
   };
-  const ctx = contextOf(sdk as unknown as AttemptContext, memoryDatabase(state));
+  // An object with a companion, as `sessionObject()` makes one.
+  const ctx = contextOf(sdk as unknown as AttemptContext, memoryDatabase(state), {
+    definition: withCompanion({ name: 'assistant' }),
+  });
   return { made, ctx, sdk };
 }
 
@@ -166,7 +170,7 @@ describe('workflow', () => {
 });
 
 describe('signal', () => {
-  it("waits on the agent's signals object, once per tool call, for what the model says", async () => {
+  it("waits on the agent's own companion, at its key, once per tool call, for what the model says", async () => {
     const t = signal('approval', { description: 'Wait for a manager', input: z.object({ order: z.string() }) });
     expect(t.name).toBe('wait_for_approval');
     expect(fields(t)).toEqual(['order']);
@@ -174,8 +178,8 @@ describe('signal', () => {
     expect(result).toBe('approved');
     expect(made).toMatchObject([
       {
-        service: 'signals',
-        key: 'assistant:alice',
+        service: 'assistant.prebuilt.restate',
+        key: 'alice',
         method: 'wait',
         parameter: { id: 'inv1:call_1', name: 'approval', input: { order: '103' } },
         idempotencyKey: 'inv1:call_1',
@@ -374,9 +378,9 @@ describe('object', () => {
     expect(cancels).toEqual([turn]);
     expect(calls).toEqual([
       {
-        service: 'signals',
+        service: 'desk.prebuilt.restate',
         method: 'status',
-        key: 'desk:alice',
+        key: 'alice',
         parameter: undefined,
         idempotencyKey: 'inv_stop:stop',
       },

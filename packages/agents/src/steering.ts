@@ -5,7 +5,7 @@
 // queues it at once as a turn of its own (the agent's private `steered`), in
 // order with the messages sent after it, and, if the turn being answered
 // takes steered messages, holds it for that turn too (`steer` of
-// signals.ts).
+// companion.ts).
 //
 // The turn learns of it from its next `publish`, which it makes anyway as it
 // starts and after each write of steps that commits (a reply with tool
@@ -22,9 +22,9 @@
 // answered as a turn of its own. So each message is answered once.
 import type * as restate from '@restatedev/sessions';
 import type { Transaction } from '@restatedev/sessions';
-import { inboxOf, stopSignalOf } from './common.ts';
+import { type AgentContext, inboxOf, stopSignalOf } from './common.ts';
 import type { Conversation } from './conversation.ts';
-import { signals, signalsOf } from './signals.ts';
+import { companionHere } from './companion.ts';
 
 /**
  * Take the messages steered to the turn being answered, at a step: store
@@ -62,7 +62,7 @@ export async function takeSteers<I>(ctx: restate.SessionContext, conversation: C
  * stored, and once. A framework that places steered messages itself (pi,
  * DeepSeek) calls it as it copies them into the turn.
  */
-export function tookSteers(ctx: restate.SessionContext, tx: Transaction, ids: string[]) {
+export function tookSteers(ctx: AgentContext, tx: Transaction, ids: string[]) {
   if (ids.length === 0) return;
-  tx.send(signals, signalsOf(ctx), { idempotencyKey: `taken:${ids[0]}` }).taken(ids);
+  tx.send(companionHere(ctx, 'steering'), ctx.key, { idempotencyKey: `taken:${ids[0]}` }).taken(ids);
 }

@@ -11,12 +11,14 @@ explain why the model is as it is.
 
 The code:
 
-- [`src/common.ts`](../src/common.ts): `chatHandler`, the turn's wrapper:
-  start and close in the companion, cancellation, attempts; and `answering`,
-  which settles the call records as the turn stores results;
+- [`src/common.ts`](../src/common.ts): `chatHandler`, the turn's wrapper
+  (`chatTurn`): start, publishes and close in the companion, cancellation,
+  attempts; and `answering`, which settles the call records as the turn
+  stores results;
 - `src/conversation.ts` (new): the conversation, `Conversation`, `Turn`,
-  `answerOnce` (which answers a prompt), `settle` and `compact`;
-- [`src/signals.ts`](../src/signals.ts): the companion;
+  `answerOnce` (which answers a prompt, and stores it: it knows nothing of
+  the companion), `settle` and `compact`;
+- [`src/companion.ts`](../src/companion.ts): the companion;
 - [`src/object.ts`](../src/object.ts): the views (`status`, `stop`, `clear`,
   `sync`, `watch`) and the private handlers (`erase`, `settle`, `compact`);
 - `src/messages.ts` (new): the conversation as clients read it;
@@ -43,8 +45,13 @@ The Python SDK's agents follow the same turn, companion and conversation
 - **Attempt.** One run of a turn's invocation. A crash, a lost connection or
   a suspension ends an attempt; Restate starts another, which runs the
   handler again from its first line and resumes from what the database has.
-- **Companion.** The agent's `signals` object, keyed `<agent>:<key>` (such
-  as `assistant:alice`). It is a journaled virtual object, so it can wait
+- **Companion.** The agent's own virtual object, named
+  `<agent>.prebuilt.restate` and keyed as the agent (agent
+  `assistant`'s key `alice` has `assistant.prebuilt.restate/alice`),
+  which each agent brings with it and `serve` serves beside it. Only the
+  agent's handlers and views call it (its handlers are private to the
+  ingress), and it sends back to the agent it was made for (`settle`,
+  `steered`), at its own key. It is a journaled virtual object, so it can wait
   (awakeables, timers) and be written while the turn runs. It keeps the
   running turn, the waits of its tools, and the conversation's revision.
   Nothing in it is needed to complete a turn: it is the control plane.
@@ -99,7 +106,7 @@ sequenceDiagram
   participant C as Client
   participant A as Agent (chat)
   participant DB as Key's database
-  participant S as Companion (signals)
+  participant S as Companion (assistant.prebuilt.restate)
   C->>A: chat("Plan my week")
   A->>S: start(turn, settles, publishes)
   S-)S: awaitTurn(turn)
@@ -147,11 +154,13 @@ sequenceDiagram
    its tools run; the tools' results before the model is asked again). A
    final reply, which no tool waits for, is held, and commits with the
    answer. After each write of steps that commits, the turn publishes once,
-   and waits for it (`Conversation.hold`, which `answerOnce` sets: `append`
-   and `appendReply` publish themselves; a framework that copies its steps
-   in a transaction of its own, `copyIn`, publishes once that commits). So
-   a follower sees the calls as their tools start, and their results before
-   the model's next request.
+   and waits for it. The `chat` turn asks for it (`chatTurn`, for a
+   followed turn), and the conversation makes it without knowing what it
+   is: `answerOnce` passes it to `Conversation.hold`, `append` and
+   `appendReply` make it themselves, and a framework that copies its steps
+   in a transaction of its own, `copyIn`, makes it once that commits
+   (`Turn.stepsCommitted`). So a follower sees the calls as their tools
+   start, and their results before the model's next request.
 4. **Answer.** The answer is stored on the turn's row, with what the turn
    carries, and the final reply, in one commit. If the turns before the next turn's window outgrow the agent's
    budget, the agent sends itself `compact`
@@ -224,7 +233,7 @@ sequenceDiagram
   participant O as Operator
   participant A as Agent (chat)
   participant DB as Key's database
-  participant S as Companion (signals)
+  participant S as Companion (assistant.prebuilt.restate)
   participant T as Agent (settle)
   A->>S: start(turn, settles)
   S-)S: awaitTurn(turn)
@@ -272,7 +281,7 @@ sequenceDiagram
   autonumber
   participant N as Next turn (chat)
   participant DB as Key's database
-  participant S as Companion (signals)
+  participant S as Companion (assistant.prebuilt.restate)
   participant T as Agent (settle)
   N->>S: start(next turn)
   Note over S: a turn before it never closed: close it, send settle
@@ -662,6 +671,39 @@ twice, say): each prompt is a turn of the conversation, `<id>`, then
 `<id>:2`. A retried attempt makes them in the same order, so each finds its
 own answer, and the companion's turn is the invocation, all of them.
 
+## A turn outside a `chat` turn
+
+Storing a turn and telling followers about it are two jobs, of two layers.
+The conversation (`answerOnce`) stores the turn, whatever handler runs it.
+The `chat` turn (`chatTurn`: a `chatHandler`, a framework's `chat()`, the
+private `steered`) starts it in the companion, publishes its steps (unless
+the agent runs in the background) and closes it.
+
+A handler of your own that calls a framework's `prompt()` (or `answerOnce`)
+outside `chatHandler` runs a turn that only the conversation knows: it is
+stored, step by step, and answered once, as any; but the companion is not
+told of it. `status` does not show it, `stop` does not stop it, no `steer`
+reaches it, and it publishes nothing: a follower sees it once something
+else publishes (the next `chat` turn, say). Wrap the handler in
+`chatHandler` for all of that (`summarize: chatHandler(async (ctx, topic)
+=> pi.prompt(ctx, …))`).
+
+Which objects can do what:
+
+| Object                                     | Companion | A turn of `chat` (`chatHandler`)              | A turn of a handler of your own (`prompt()`)                         |
+| ------------------------------------------ | --------- | --------------------------------------------- | -------------------------------------------------------------------- |
+| a framework's `agent()`                    | served    | published, steered, followed (`sync`)         | (it has none)                                                        |
+| `sessionObject()` with a `messages` view   | served    | published, steered, followed (`sync`)         | stored; waits for signals; publishes nothing                         |
+| `sessionObject()` without one              | served    | published (`watch`), not steered (no `steer`) | stored; waits for signals; publishes nothing                         |
+| a session object of `@restatedev/sessions` | none      | fails at once (`NoCompanion`, terminal)       | stored; a wait for a signal fails the turn (`NoCompanion`, terminal) |
+
+A wait for a signal (`signal()`, `waitFor`, LangGraph's interrupts and
+`waitForSignal`) needs the companion, not a `chat` turn: in a handler of
+your own on an object of `sessionObject()` it waits as in `chat` (see the
+limit on its waits below). An object without a companion fails it once,
+with a terminal error that says so, rather than calling a companion nobody
+serves; as it does a `chat` turn, and any publish.
+
 ## What a client sees
 
 | View                     | What it gives                                                                                                                                                                                                                                            |
@@ -706,23 +748,24 @@ with the turn's end.
 
 ## Agents of the Python SDK
 
-The companion's handler names and shapes are shared with the Python SDK
-(`start`, `close`, `ended`, `awaitTurn`, `wait`, `listen`, `resolve`,
-`pending`, `status`, `watch`, `subscribe`, `unsubscribe`, `publish`,
-`notifications`, `forget`, `reset`, `steer`, `taken`), so one Restate
-cluster's `signals` object may hold the turns of either SDK's agents. An
-agent says it has
-`settle` as it starts a turn (`Started.settles`, which `status` does not
-show), and only such a turn is sent it. A turn says too whether `start`
-publishes it (`Started.publishes`): the companion then publishes and returns
-what `publish` returns; a turn that does not say so (another SDK's) gets
-nothing back, and is not published; and a turn that says so, of a companion
-that returns nothing, publishes its start itself:
+The companion's handler names and shapes are the Python SDK's (`start`,
+`close`, `ended`, `awaitTurn`, `wait`, `listen`, `resolve`, `pending`,
+`status`, `watch`, `subscribe`, `unsubscribe`, `publish`, `notifications`,
+`forget`, `reset`, `steer`, `taken`). But an agent of this package and its
+companion are always the same code, in the same deployment: each agent
+brings its own (`<agent>.prebuilt.restate`, keyed as the agent), and
+no companion is shared with another SDK's agents, or another deployment's.
 
-- an agent's turn that the other SDK's companion holds is closed in the
-  companion; its agent is sent `settle` if it said it settles;
-- an agent whose turn a companion without `ended` holds (one released
-  before this design) has a dead turn closed by its next message.
+An agent says it has `settle` as it starts a turn (`Started.settles`, which
+`status` does not show): only an agent on the conversation of turns has it,
+and only its turns are sent it. A turn says too whether `start` publishes
+it (`Started.publishes`): a followed turn, which the companion publishes,
+and which gets what `publish` returns; a background agent's turn does not
+say so, gets nothing back, and is not published as it starts.
+
+Up to 0.5, every agent shared one `signals` object, keyed `<agent>:<key>`.
+Upgrading leaves its state behind: the turns in flight, pending waits, kept
+signals, steered messages and the revision do not carry over.
 
 ## Guarantees and limits
 

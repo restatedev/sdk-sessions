@@ -11,6 +11,7 @@ once, and each tool call is made once.
 - [Calling an agent](#calling-an-agent)
 - [Tools](#tools)
 - [Signals](#signals)
+- [The companion](#the-companion)
 - [Models](#models)
 - [Your own session object](#your-own-session-object)
 - [Build your own](#build-your-own)
@@ -57,13 +58,16 @@ curl localhost:8080/assistant/alice/messages                                 # t
 `assistant` is a virtual object: each key (`alice`, `bob`) is a
 conversation of its own, with a database of its own, and answers one
 message at a time. `serve` (@restatedev/sessions' `restate.serve`) serves it
-on PORT (default 9080), with the `signals` object every agent uses (its
-waits, and what it is doing), which each agent brings with it; an endpoint
-of your own (`restate.endpoint()`) binds `signals` too.
-`RESTATE_SERVE_ONLY=triage,planner` serves only the services it names, so
-that one program (or image) deploys in parts; `signals` too, in one of them
-(`RESTATE_SERVE_ONLY=triage,planner,signals`): the agents reach it through
-Restate, wherever it is.
+on PORT (default 9080), with the agent's companion: a virtual object of
+the agent's own, named `<agent>.prebuilt.restate`
+(`assistant.prebuilt.restate`) and keyed as the agent (`alice`), which
+keeps its waits and what it is doing ([The companion](#the-companion)).
+Each agent brings its companion with it: you never name it. An endpoint of
+your own binds what `served([assistant])` lists (the agents with their
+companions): `restate.endpoint()`, or the SDK's `restate.serve({ services:
+served([...]), port })`. `RESTATE_SERVE_ONLY=triage,planner` serves only
+the services it names, each agent with its companion, so that one program
+(or image) deploys in parts.
 
 ## Choose a framework
 
@@ -133,7 +137,7 @@ Every agent takes these too, beside its framework's options:
 | Option        | What                                                                                                                                             |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `description` | What it is, for the UI, and for a parent's model: `subagent(agent)` tells it                                                                     |
-| `background`  | It works unwatched (a subagent, say): its turn tells its `signals` at its end only, not at each step, so a follower sees each turn once it ended |
+| `background`  | It works unwatched (a subagent, say): its turn tells its companion at its end only, not at each step, so a follower sees each turn once it ended |
 | `schema`      | Tables of your own in its database ([Build your own](#build-your-own))                                                                           |
 | `window`      | How many of the latest answered turns its model sees whole, with their tool calls and results (default 1), or `'all'`                            |
 | `budget`      | How many tokens of the turns before the window its model sees, as their messages and answers (default 32 000); `summarize` summarizes the rest   |
@@ -237,7 +241,7 @@ replaces it.
 **Forget a conversation.** `clear` starts a key over, such as for a UI's
 New chat button: it stops the message being answered (as `stop`), then
 forgets the conversation, the key's database, and what its
-`signals` hold (waits and kept signals). It answers as `stop`
+companion holds (waits and kept signals). It answers as `stop`
 does. The next message starts anew; its ids and cursors go on from where
 the forgotten conversation got to, so a follower (`follow`, `sync`) reads on,
 and drops the messages it kept from before `first` (which a page and each
@@ -308,8 +312,9 @@ made so far.
 **What it is doing.** `status` says which message the agent answers, if
 any (its invocation id, to attach to its answer, and since when), and what
 its tools wait for ([Signals](#signals)). The message is in the agent's
-`signals` object, which `chat` tells when it starts, and when it answers or
-fails for good (Restate's UI shows it there):
+companion (`support.prebuilt.restate`, key `alice`), which `chat` tells
+when it starts, and when it answers or fails for good (Restate's UI shows it
+there):
 
 ```sh
 curl localhost:8080/support/alice/status
@@ -504,9 +509,30 @@ with `approval: true`, those its permission rules ask about: see
 [its README](src/opencode/README.md#permissions).
 
 A wait ends with its agent's invocation: a cancelled or killed one leaves `pending`.
-The waits are kept by the `signals` object, keyed `<agent>:<key>`, which
-`serve` serves beside the agents. See
+The waits are kept by the agent's companion, `<agent>.prebuilt.restate`
+keyed as the agent, which `serve` serves beside it. See
 [`examples/intermediate/support.ts`](../examples/intermediate/support.ts).
+
+## The companion
+
+Each agent brings a companion of its own: a virtual object named
+`<agent>.prebuilt.restate`, the agent's name as it is (agent `support`
+has `support.prebuilt.restate`), keyed as the agent (`support/alice`'s
+is `support.prebuilt.restate/alice`). It keeps what the agent's key is
+doing: the message it answers, the waits of its tools, the messages steered
+to it, and the revision a follower waits on. `serve` serves it with the
+agent, without your naming it (Restate refuses names that start with
+`restate`, so the name ends with it instead). Clients never call it: its
+handlers are private to Restate's ingress, and the agent's own views
+(`status`, `pending`, `signal`, `steer`, `stop`, `watch`, `sync`) ask it.
+
+Up to 0.5, every agent shared one `signals` object, keyed `<agent>:<key>`.
+Upgrading leaves its state behind: the turns in flight, pending waits and
+kept signals, and the revision do not carry over to the new companions
+(the revision starts again from 0: a client that kept a later one should
+follow anew). Upgrade with no turn running and
+no wait pending, and remove the `signals` service from Restate once no
+deployment serves it.
 
 ## Structured answers
 
@@ -573,9 +599,9 @@ is never dropped.
 The same delivery is yours from any handler (a session object's, or a
 service's or workflow's of the SDK), for events of other kinds (a queue, a
 schedule): `deliver(ctx, agent, key, text, { idempotencyKey })`.
-Every `sessionObject()` and `agent()` knows its companion,
-`companionOf(agent, key)` (its `signals` object and key), so whoever holds an
-agent can reach it.
+Every `sessionObject()` and `agent()` brings its own companion,
+`companionOf(agent)` (the object `<agent>.prebuilt.restate`, at the
+agent's own keys), which `deliver` and `webhook` check for.
 
 The agent's message says where it comes from, with the body as JSON:
 
@@ -676,6 +702,16 @@ that takes its message as `chat` does (text, or a JSON string):
 ```ts
 summarize: chatHandler(async (ctx, topic) => pi.prompt(ctx, `Summarize what we said about ${topic}`)),
 ```
+
+`chatHandler` is what tells the companion of the turn: `status` shows it,
+`stop` stops it, `steer` reaches it, and its steps are published for
+followers. A `prompt()` in a handler without it stores its turn and
+publishes nothing (a follower sees it with the next publish); a `signal`
+tool still waits, as the object's companion keeps the wait. A session
+object of `@restatedev/sessions` has no companion: a `prompt()` there
+stores its turns too, but a wait for a signal fails the turn, and a
+`chatHandler` the message, with a terminal error that says so
+([A turn outside a `chat` turn](docs/turns.md#a-turn-outside-a-chat-turn)).
 
 pi also has `withPi(ctx, options, work)`, for more than a prompt: the Harness's own
 API, such as compacting the conversation (see its README).

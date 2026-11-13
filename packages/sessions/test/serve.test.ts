@@ -20,4 +20,8 @@ describe('restate.serve', () => {
     expect(names(served([notes, lists], 'lists, helper'))).toEqual(['helper', 'lists']);
     expect(() => served([notes], 'notes,nobody')).toThrow(/RESTATE_SERVE_ONLY names nobody/);
   });
+
+  it('serves what a service RESTATE_SERVE_ONLY names needs beside it, unnamed', () => {
+    expect(names(served([notes, lists], 'lists'))).toEqual(['lists', 'helper']);
+  });
 });

@@ -84,7 +84,7 @@ handler's attempts over an in-memory store, crashes them at a chosen state
 request (`conversation(...).attempt(id, prompt, crashAt)`), sweeps every
 crash point (`crashedAnywhere`), and fakes the companion and a bank ledger;
 the companion's own handlers are tested on a fake context
-(`test/signals.test.ts`). The e2e crash test (`packages/e2e/crash.ts`) runs
+(`test/companion.test.ts`). The e2e crash test (`packages/e2e/crash.ts`) runs
 every framework's agent (`test/<framework>.ts`) in processes it kills at
 random, and checks that every prompt is in `messages` once and moved money
 once.
@@ -94,19 +94,19 @@ once.
 Proposed defaults: the PR's review may change any of them, and D5 and D6 most
 of all.
 
-| #   | Decision                                                                                                                                                                                                                                                                                            | Why                                                                                                                                         |
-| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| D1  | **New databases only.** No migration from v0.3.0's tables, no `DROP TABLE`, no compatibility code. A key that v0.3.0 wrote keeps its old tables, unused (no name collides).                                                                                                                         | Unannounced; the Python SDK did the same (its D1).                                                                                          |
-| D2  | **Parity with the Python SDK** for what is shared: `restate_agents.turns` (its steps, in order), `restate-agents.calls`, the companion's handlers and shapes, `messages` and `sync`, `CANCELLED`, `UNANSWERED`, `ENDED`, `RETURNED_UNRECORDED`, `SUMMARY`, `SUMMARIZE`, `window` 1, `budget` 32 000 | One layout and one wire format for both SDKs: a deployment's `signals` serves both, and a client or tool reads either.                      |
-| D3  | **Snapshots are not ported.** Their table is created (the schema's steps stay Python's), and nothing writes it.                                                                                                                                                                                     | No framework here takes a list of items and compacts it itself.                                                                             |
-| D4  | **Two ways to give the model its history**: the turn projection (Claude, LangGraph's built-in agent), and framework-owned history (DeepSeek, pi, OpenCode).                                                                                                                                         | DeepSeek, pi and OpenCode are durable engines with their own stores, which cannot be handed a list of messages ([why](frameworks.md)).      |
-| D5  | **pi keeps pi-durable**, on framework-owned history, rather than the turn projection on pi-ai alone.                                                                                                                                                                                                | The other way drops pi-durable's harness, coding tools, compaction and `withPi`, which the README's default and tutorial lesson 16 rely on. |
-| D6  | **OpenCode goes last, after a spike.** If a dead turn cannot be closed through OpenCode's public API (it resumes a claimed turn at every boot), OpenCode leaves the package for now. **Done**: it left, and is back ([OpenCode's return](opencode.md)).                                             | It is the riskiest port: a second database, messages changed in place, no shared transaction.                                               |
-| D7  | **One framework per object.** An object's conversation holds its framework's items (from its `messages` view); `answerOnce` refuses another framework's items in the same object.                                                                                                                   | The rows are the framework's own items; two formats in one conversation can't be read.                                                      |
-| D8  | **A dead turn is closed, never finished**, in every framework.                                                                                                                                                                                                                                      | Finishing it answers a prompt nobody waits for, under the wrong idempotency keys.                                                           |
-| D9  | **`output` asks again within the turn** (`check`), once; a second reply that does not fit fails the turn, terminal, as today.                                                                                                                                                                       | Asking again is a step of the turn, not a turn of its own.                                                                                  |
-| D10 | **The status type `Turn` is renamed `Answering`**; `Turn` is the conversation's turn. The wire format (`invocationId`, `since`) does not change.                                                                                                                                                    | As in the Python SDK.                                                                                                                       |
-| D11 | **LangGraph's checkpointer keeps its schema name** (`restate-agents.langgraph`), though the Python SDK's is `restate_agents.langgraph`.                                                                                                                                                             | Its tables are a framework's, not the conversation's; a new name would make v0.3.0's databases fail, for nothing.                           |
+| #   | Decision                                                                                                                                                                                                                                                                                            | Why                                                                                                                                                                         |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| D1  | **New databases only.** No migration from v0.3.0's tables, no `DROP TABLE`, no compatibility code. A key that v0.3.0 wrote keeps its old tables, unused (no name collides).                                                                                                                         | Unannounced; the Python SDK did the same (its D1).                                                                                                                          |
+| D2  | **Parity with the Python SDK** for what is shared: `restate_agents.turns` (its steps, in order), `restate-agents.calls`, the companion's handlers and shapes, `messages` and `sync`, `CANCELLED`, `UNANSWERED`, `ENDED`, `RETURNED_UNRECORDED`, `SUMMARY`, `SUMMARIZE`, `window` 1, `budget` 32 000 | One layout and one wire format for both SDKs: a client or tool reads either. (Each agent now brings its own companion, `<agent>.prebuilt.restate`: no `signals` is shared.) |
+| D3  | **Snapshots are not ported.** Their table is created (the schema's steps stay Python's), and nothing writes it.                                                                                                                                                                                     | No framework here takes a list of items and compacts it itself.                                                                                                             |
+| D4  | **Two ways to give the model its history**: the turn projection (Claude, LangGraph's built-in agent), and framework-owned history (DeepSeek, pi, OpenCode).                                                                                                                                         | DeepSeek, pi and OpenCode are durable engines with their own stores, which cannot be handed a list of messages ([why](frameworks.md)).                                      |
+| D5  | **pi keeps pi-durable**, on framework-owned history, rather than the turn projection on pi-ai alone.                                                                                                                                                                                                | The other way drops pi-durable's harness, coding tools, compaction and `withPi`, which the README's default and tutorial lesson 16 rely on.                                 |
+| D6  | **OpenCode goes last, after a spike.** If a dead turn cannot be closed through OpenCode's public API (it resumes a claimed turn at every boot), OpenCode leaves the package for now. **Done**: it left, and is back ([OpenCode's return](opencode.md)).                                             | It is the riskiest port: a second database, messages changed in place, no shared transaction.                                                                               |
+| D7  | **One framework per object.** An object's conversation holds its framework's items (from its `messages` view); `answerOnce` refuses another framework's items in the same object.                                                                                                                   | The rows are the framework's own items; two formats in one conversation can't be read.                                                                                      |
+| D8  | **A dead turn is closed, never finished**, in every framework.                                                                                                                                                                                                                                      | Finishing it answers a prompt nobody waits for, under the wrong idempotency keys.                                                                                           |
+| D9  | **`output` asks again within the turn** (`check`), once; a second reply that does not fit fails the turn, terminal, as today.                                                                                                                                                                       | Asking again is a step of the turn, not a turn of its own.                                                                                                                  |
+| D10 | **The status type `Turn` is renamed `Answering`**; `Turn` is the conversation's turn. The wire format (`invocationId`, `since`) does not change.                                                                                                                                                    | As in the Python SDK.                                                                                                                                                       |
+| D11 | **LangGraph's checkpointer keeps its schema name** (`restate-agents.langgraph`), though the Python SDK's is `restate_agents.langgraph`.                                                                                                                                                             | Its tables are a framework's, not the conversation's; a new name would make v0.3.0's databases fail, for nothing.                                                           |
 
 ## The steps
 
@@ -297,12 +297,12 @@ it is not 0. `MessagesRequest` gains `view?: 'full' | 'summary'`.
 - the agent's settings (the `AGENT` link): `background`, `clear`, and now
   `items`, `window`, `budget`, `summarize`;
 - the status type `Turn` is renamed `Answering` (D10), in `client.ts`,
-  `object.ts`, `signals.ts` and the exports.
+  `object.ts`, `companion.ts` and the exports.
 
-**`src/signals.ts`**, as the Python SDK's: `Started` (`Answering` and
+**`src/companion.ts`**, as the Python SDK's: `Started` (`Answering` and
 `settles?`); `start` closes an earlier turn as gone; `closed(ctx, turn,
 gone)` sends the agent `settle(turn)` (a generic send to `<agent>/<key>`,
-the companion's key split at its first `:`) when the turn was gone and its
+to the agent the companion was made for, at the same key) when the turn was gone and its
 `start` said `settles`; a new private handler `ended(turn)`, which is
 `closed(ctx, turn, true)`; `awaitTurn` sends `ended`, not `close`, when the
 invocation failed; `status` shows `invocationId` and `since` only.
@@ -335,7 +335,7 @@ results); `test/support.ts`'s companion fake learns `start` with `settles`,
   [`agents_conversation.py`](https://github.com/restatedev/sdk-python/blob/434bb6fe05ab17f3384709b48f060a47e68f5fb7/tests/agents_conversation.py)
   ([the list](#the-tests-that-define-it));
 - `test/messages.test.ts`: the 6 of `agents_messages.py`;
-- `test/signals.test.ts`: `ended` closes a failed turn, and sends `settle`
+- `test/companion.test.ts`: `ended` closes a failed turn, and sends `settle`
   only to a turn that said it settles; the next `start` closing a dead turn
   sends it too; `status` does not show `settles`;
 - the call records' tests that need a turn (from `agents_snapshots.py` and
@@ -555,7 +555,7 @@ SDK's (its `tests/`, at `434bb6f`).
 - `test_a_cleared_conversation_goes_on_from_its_ids_and_cursors`
 - `test_the_summary_is_each_turns_message_and_answer_under_their_ids`
 
-**`agents_signals.py`** → `test/signals.test.ts`:
+**`agents_signals.py`** → `test/companion.test.ts`:
 
 - `test_a_turn_is_answered_until_it_closes_and_a_failed_one_is_closed_for_it`
 - `test_a_turn_whose_invocation_is_gone_is_settled_by_its_agent_if_the_agent_settles`
