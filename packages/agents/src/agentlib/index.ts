@@ -432,7 +432,18 @@ class Turn implements Conversation {
         content: steeringNote(e.parts.map((p) => (p.type === 'text' ? p.text : '')).join('')),
       }));
     await this.store([{ role: 'user', content: this.live.prompt }, ...steered, { role: 'assistant', content: text }]);
-    this.rewrite([...this.entries, { role: 'assistant', parts: [{ type: 'text', text }], answer: true }]);
+    // A tool call the turn cut off says how it ended, as every agent's does (`Cancelled: …`, `Ended: …`).
+    const closed = this.entries.map((entry) =>
+      entry.role === 'assistant' && entry.parts.some((p) => p.type === 'tool' && p.output === undefined)
+        ? {
+            ...entry,
+            parts: entry.parts.map((p): Part =>
+              p.type === 'tool' && p.output === undefined ? { ...p, output: text, error: true } : p,
+            ),
+          }
+        : entry,
+    );
+    this.rewrite([...closed, { role: 'assistant', parts: [{ type: 'text', text }], answer: true }]);
   }
 
   /** The turn ended: the conversation goes on after its messages. */

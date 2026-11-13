@@ -441,7 +441,7 @@ if (process.argv[2] === 'serve') {
     assert.equal(await post('planner/carol/chat', 'Hello'), `Answered: Hello (after: ${CANCELLED})`);
     assert.deepEqual(await conversation('planner/carol'), [
       ['user', 'Plan my week'],
-      ['assistant', 'wait_for_approval: undefined'],
+      ['assistant', `wait_for_approval: ${CANCELLED}`],
       ['assistant', CANCELLED],
       ['user', 'Hello'],
       ['assistant', `Answered: Hello (after: ${CANCELLED})`],
@@ -471,7 +471,7 @@ if (process.argv[2] === 'serve') {
       ['user', 'Plan my month'],
       ['assistant', 'wait_for_approval: approved'],
       ['user', 'Wait again'],
-      ['assistant', 'wait_for_approval: undefined'],
+      ['assistant', `wait_for_approval: ${CANCELLED}`],
       ['assistant', CANCELLED],
       ['user', 'Hello'],
       ['assistant', `Answered: Hello (after: ${CANCELLED}) [steered: Wait again]`],
