@@ -3,12 +3,14 @@
 // the database as committed), and their operations are awaited concurrently,
 // with native or hand-written combinators (@restatedev/sessions' promise selector
 // drives them all); a suspension waits for any of them, and a cancellation
-// reaches all of them. With lazy state, every page the database reads is a
+// reaches all of them; a handler that only watches for its cancellation,
+// while it works outside Restate, is not suspended. With lazy state, every page the database reads is a
 // request to the server. A wait is a call to a journaled service, `Helper`,
 // which sleeps.
 //
 //   pnpm --filter e2e concurrency   (RESTATE_SERVER=/path/to/restate-server to use another)
 import * as restate from '@restatedev/sessions';
+import { cancelled } from '@restatedev/sessions/internal';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, openSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -157,6 +159,18 @@ const conc = restate.sessionObject({
         slow(ctx, { tag: 'cancelled', ms: 20_000, value: 1 }),
       ]);
       return results.map((r) => (r.status === 'rejected' ? `rejected:${r.reason?.code}` : r.status));
+    },
+
+    // Works outside Restate for `ms` (a model's request, say), past the
+    // inactivity timeout, and stops when its invocation is cancelled: its
+    // cancellation is all it awaits of Restate's, and it does not wait for it.
+    watches: {
+      explicitCancellation: true,
+      handler: async (ctx: restate.SessionContext, ms: number) => {
+        const n = attempt(ctx);
+        const stopped = await Promise.race([cancelled(ctx).then(() => true), sleep(ms).then(() => false)]);
+        return { stopped, attempts: n() };
+      },
     },
 
     // --- The database, its pages read lazily: each a request to the server.
@@ -437,6 +451,28 @@ await check('a cancellation reaches every pending operation', async () => {
     signal: AbortSignal.timeout(30_000),
   }).then((r) => r.json());
   assert.deepEqual(output, ['rejected:409', 'rejected:409', 'rejected:409']);
+});
+
+await check('a handler that watches for its cancellation works past the inactivity timeout', async () => {
+  const { value } = await call('Concurrency/watches/watches', 3 * INACTIVITY);
+  // Not suspended on the cancel signal, which nothing but a cancellation would resume.
+  assert.deepEqual(value, { stopped: false, attempts: 1 });
+});
+
+await check('its cancellation reaches it as it works', async () => {
+  const r = await fetch(`${INGRESS}/Concurrency/watched/watches/send`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '20000',
+  });
+  const { invocationId } = (await r.json()) as { invocationId: string };
+  await sleep(300);
+  const cancel = await fetch(`${ADMIN}/invocations/${invocationId}/cancel`, { method: 'PATCH' });
+  assert.ok(cancel.ok, `cancel: ${cancel.status} ${await cancel.text()}`);
+  const output = await fetch(`${INGRESS}/restate/invocation/${invocationId}/attach`, {
+    signal: AbortSignal.timeout(10_000),
+  }).then((attached) => attached.json());
+  assert.deepEqual(output, { stopped: true, attempts: 1 });
 });
 
 const values = (n: number) => Array.from({ length: n }, (_, i) => `v${i}`);

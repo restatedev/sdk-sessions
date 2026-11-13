@@ -33,6 +33,13 @@ export type DoProgressResult =
   | 'CancelSignalReceived'
   | { EphemeralNotificationReady: number };
 
+/** The handle of the invocation's cancel signal: the VM's, and what `ctx.cancellation()` awaits. */
+const CANCELLATION = 1;
+
+/** Whether `future` waits for the invocation's cancellation, and nothing else. */
+const cancellationAlone = (future: UnresolvedFuture): boolean =>
+  'Single' in future ? future.Single === CANCELLATION : Object.values(future)[0]!.every(cancellationAlone);
+
 /** What the selector needs of a promise: the shape of InternalRestatePromise. */
 export interface Selectable {
   /** Takes the result if it is ready, and settles the promise with it. */
@@ -52,6 +59,8 @@ export interface SelectorDriver {
   awaitExternalProgress(): Promise<void>;
   /** Signals external progress. */
   wake(): void;
+  /** Whether the input closed: nothing more comes from the server in this attempt. */
+  inputClosed(): boolean;
   executeRun(handle: number): void;
   completeEphemeral(completionId: number): Promise<void>;
   /** The attempt cannot go on: suspension, or an error. */
@@ -73,6 +82,15 @@ export interface SelectorDriver {
  * VM reports its notification ahead of any future, and the loop goes on while
  * one is in flight, even with no promise pending. The loop runs while
  * something is pending, and is the only one waiting for external progress.
+ *
+ * A handler with explicit cancellation may await its cancellation alone
+ * (`cancelled(ctx)`), while it works outside Restate: a model's request, say.
+ * It waits for nothing then, so the invocation must not suspend: once the
+ * input closed (Restate's inactivity timeout), a check on the cancellation
+ * alone would suspend it in the middle of that work, with a cancellation as
+ * the only thing to resume it. The loop asks for it while input may come, so
+ * that a cancellation reaches the handler as it works, and stops asking when
+ * the input closed, until something else is awaited.
  */
 export class PromiseSelector {
   private readonly pending = new Set<Selectable>();
@@ -149,15 +167,25 @@ export class PromiseSelector {
         await setImmediate();
 
         const futures: UnresolvedFuture[] = [];
+        // Whether something is awaited beside the invocation's cancellation.
+        let waits = this.ephemeral.size > 0;
         for (const promise of this.pending) {
           const future = promise.unresolvedFuture();
           if (future === null) {
             this.pending.delete(promise);
           } else {
             futures.push(future);
+            waits ||= !cancellationAlone(future);
           }
         }
         if (futures.length === 0 && this.ephemeral.size === 0) return;
+        // Only the cancellation, and no input to bring it: asking would
+        // suspend the invocation on it. The next registration starts a loop
+        // that asks for it along with what is awaited then, which also finds
+        // a cancellation that came as the input closed. (The SDK notes the
+        // closed input some microtasks after it signals: the turn above let
+        // them run.)
+        if (!waits && this.driver.inputClosed()) return;
 
         // With only ephemeral commands in flight, no future: the VM reports
         // their notifications, or waits for input.
@@ -209,6 +237,11 @@ interface Executor {
   errorCallback: (e: unknown) => void;
 }
 
+/** The SDK's input pump, as far as the hook needs it: `runDone` resolves when the input ends, or the attempt. */
+interface InputPump {
+  runDone: PromiseLike<unknown>;
+}
+
 const FIELDS = [
   'coreVm',
   'outputPump',
@@ -225,8 +258,9 @@ const FIELDS = [
  * own loops.
  */
 export function hookSelector(ctx: object): () => void {
-  const executor = (ctx as { promisesExecutor?: Executor }).promisesExecutor;
-  const missing = executor ? FIELDS.filter((field) => executor[field] === undefined) : ['promisesExecutor'];
+  const { promisesExecutor: executor, inputPump } = ctx as { promisesExecutor?: Executor; inputPump?: InputPump };
+  const missing: string[] = executor ? FIELDS.filter((field) => executor[field] === undefined) : ['promisesExecutor'];
+  if (typeof inputPump?.runDone?.then !== 'function') missing.push('inputPump.runDone');
   if (missing.length > 0 || typeof executor?.coreVm.do_progress !== 'function') {
     throw new Error(
       `@restatedev/sessions drives a handler's promises through the SDK's internals, which this SDK version does not have ` +
@@ -234,11 +268,17 @@ export function hookSelector(ctx: object): () => void {
     );
   }
   const { coreVm, outputPump, externalProgressChannel, runClosuresTracker, ephemeralRequestTracker } = executor;
+  let inputClosed = false;
+  void (async () => {
+    await inputPump!.runDone;
+    inputClosed = true;
+  })();
   const selector = new PromiseSelector({
     doProgress: (future) => coreVm.do_progress(future),
     flushOutput: () => outputPump.awaitNextProgress(),
     awaitExternalProgress: () => externalProgressChannel.awaitNext(),
     wake: () => externalProgressChannel.signal(),
+    inputClosed: () => inputClosed,
     executeRun: (handle) => runClosuresTracker.executeRun(handle),
     completeEphemeral: (completionId) =>
       ephemeralRequestTracker.complete(completionId, coreVm.take_ephemeral_notification(completionId)),

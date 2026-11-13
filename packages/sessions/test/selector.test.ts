@@ -58,6 +58,8 @@ function resolved(f: UnresolvedFuture, ready: Map<number, Result>): boolean {
 
 class FakeVm {
   readonly ready = new Map<number, Result>();
+  // Notifications that came in and no check processed yet: not to be taken until one does.
+  readonly arrived = new Map<number, Result>();
   readonly runs = new Set<number>();
   readonly executing = new Set<number>();
   readonly ephemeralInFlight = new Set<number>();
@@ -72,6 +74,8 @@ class FakeVm {
     if (this.suspendedOn) throw new Error('closed');
     if (this.failWith) throw this.failWith;
     this.progress.push(f);
+    for (const [handle, result] of this.arrived) this.ready.set(handle, result);
+    this.arrived.clear();
     for (const id of this.ephemeralReady) {
       this.ephemeralReady.delete(id);
       return { EphemeralNotificationReady: id };
@@ -188,6 +192,7 @@ function setup(opts: { onFlush?: () => void } = {}) {
     },
     awaitExternalProgress: () => channel.awaitNext(),
     wake: () => channel.signal(),
+    inputClosed: () => fake.inputClosed,
     executeRun: (h) => started.push(h),
     completeEphemeral: (id) => {
       ephemerals.push(id);
@@ -195,7 +200,7 @@ function setup(opts: { onFlush?: () => void } = {}) {
     },
     onError: (e) => errors.push(e),
   });
-  let next = 1;
+  let next = 17; // as the VM's handles: those below are its own signals', the cancellation's (1) among them
   const t = {
     fake,
     channel,
@@ -206,6 +211,12 @@ function setup(opts: { onFlush?: () => void } = {}) {
     flushes: () => flushes,
     promise<T = unknown>() {
       const p = new FakePromise<T>(fake, next++);
+      selector.register(p);
+      return p;
+    },
+    /** The invocation's cancellation, as a handler with explicit cancellation awaits it. */
+    cancellation() {
+      const p = new FakePromise<void>(fake, 1);
       selector.register(p);
       return p;
     },
@@ -399,6 +410,94 @@ describe('PromiseSelector', () => {
     t.complete(c, 'after');
     await expect(c.user).resolves.toBe('after');
     expect(t.errors).toEqual([]);
+  });
+
+  describe('with the cancellation awaited alone, as a handler that works outside Restate does', () => {
+    it('settles it when the cancel signal comes', async () => {
+      const t = setup();
+      const cancelled = t.cancellation();
+      await until(() => t.fake.progress.length > 0);
+      expect(t.fake.progress).toEqual([{ Single: 1 }]);
+      t.complete(cancelled, undefined);
+      await expect(cancelled.user).resolves.toBeUndefined();
+      expect(t.errors).toEqual([]);
+    });
+
+    it('does not suspend once the input closed', async () => {
+      const t = setup();
+      const cancelled = t.cancellation();
+      await until(() => t.fake.progress.length > 0);
+      t.closeInput();
+      await settle();
+      expect(t.fake.suspendedOn).toBeUndefined();
+      expect(t.errors).toEqual([]);
+      expect(t.fake.progress).toEqual([{ Single: 1 }]); // not asked again
+      expect(cancelled.isDone()).toBe(false);
+    });
+
+    it('does not suspend if the input closed before it was awaited', async () => {
+      const t = setup();
+      t.fake.inputClosed = true;
+      t.cancellation();
+      await settle();
+      expect(t.fake.suspendedOn).toBeUndefined();
+      expect(t.fake.progress).toEqual([]);
+      expect(t.errors).toEqual([]);
+    });
+
+    it('suspends on it and on what is awaited after the input closed', async () => {
+      const t = setup();
+      t.cancellation();
+      await until(() => t.fake.progress.length > 0);
+      t.closeInput();
+      await settle();
+      const p = t.promise();
+      await until(() => t.errors.length > 0);
+      expect((t.errors[0] as Error).message).toBe('suspended');
+      expect(t.fake.suspendedOn).toEqual({ FirstCompleted: [{ Single: 1 }, { Single: p.handle }] });
+    });
+
+    it('settles what is awaited after the input closed, in the same attempt', async () => {
+      const t = setup();
+      const cancelled = t.cancellation();
+      await until(() => t.fake.progress.length > 0);
+      t.closeInput();
+      await settle();
+      const run = t.run<string>();
+      await until(() => t.started.length > 0);
+      t.complete(run, 'ran');
+      await expect(run.user).resolves.toBe('ran');
+      await settle();
+      expect(t.fake.suspendedOn).toBeUndefined();
+      expect(t.errors).toEqual([]);
+      expect(cancelled.isDone()).toBe(false);
+    });
+
+    it('settles it with a cancel signal found once something else is awaited', async () => {
+      const t = setup();
+      const cancelled = t.cancellation();
+      await until(() => t.fake.progress.length > 0);
+      // The signal came as the input closed: no check saw it.
+      t.fake.inputClosed = true;
+      t.fake.arrived.set(1, { ok: undefined });
+      t.channel.signal();
+      await settle();
+      expect(cancelled.isDone()).toBe(false);
+      t.promise();
+      await expect(cancelled.user).resolves.toBeUndefined();
+      expect(t.fake.suspendedOn).toBeUndefined();
+    });
+
+    it('suspends on a combinator over it and something else', async () => {
+      const t = setup();
+      const a = new FakePromise(t.fake, 1);
+      const b = new FakePromise(t.fake, 40);
+      t.selector.register(new FakeRace([a, b]));
+      await until(() => t.fake.progress.length > 0);
+      t.closeInput();
+      await until(() => t.errors.length > 0);
+      expect(t.fake.suspendedOn).toEqual({ FirstCompleted: [{ Single: 1 }, { Single: 40 }] });
+    });
   });
 
   it('stops when nothing is pending, and starts again on a registration', async () => {
