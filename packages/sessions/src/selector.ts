@@ -54,9 +54,9 @@ export interface Selectable {
 export interface SelectorDriver {
   /**
    * Asks the VM for progress on `future`. With nothing ready, the VM tells
-   * Restate what the handler waits for; and once the input closed, it
-   * suspends the invocation on it (a throw), unless a run of the future is
-   * executing.
+   * Restate what the handler waits for, unless a run is executing; and once
+   * the input closed, it suspends the invocation on it (a throw), unless a
+   * run of the future is executing.
    */
   doProgress(future: UnresolvedFuture): DoProgressResult;
   /** Writes out what the VM has buffered. */
@@ -65,8 +65,12 @@ export interface SelectorDriver {
   awaitExternalProgress(): Promise<void>;
   /** Signals external progress. */
   wake(): void;
-  /** Whether the input closed: nothing more comes from Restate in this attempt. */
-  inputClosed(): boolean;
+  /**
+   * The handle of the attempt's working run, made at the first call: a run
+   * that the VM hands out like any other (`ExecuteRun`) and that never ends
+   * while the attempt lasts. It stands for the handler's work outside Restate.
+   */
+  work(): number;
   executeRun(handle: number): void;
   /** The attempt cannot go on: suspension, or an error. */
   onError(e: unknown): void;
@@ -81,10 +85,11 @@ export type Failpoint = 'pass' | 'wait';
 /**
  * For tests: what every selector's loop awaits at each of its failpoints, to
  * hold it there while something else happens (the input closes, a signal
- * comes). At `wait`, it gets what the check asked for. Empty otherwise, and
- * the loop then awaits nothing there.
+ * comes). At `wait`, it gets what the check asked for, and whether that was
+ * the invocation's cancellation alone (with the working run). Empty
+ * otherwise, and the loop then awaits nothing there.
  */
-export const failpoints = new Map<Failpoint, (asked?: UnresolvedFuture) => unknown>();
+export const failpoints = new Map<Failpoint, (asked?: UnresolvedFuture, watching?: boolean) => unknown>();
 
 /**
  * One loop that drives every pending promise of an invocation, so that the
@@ -100,16 +105,22 @@ export const failpoints = new Map<Failpoint, (asked?: UnresolvedFuture) => unkno
  * there is something to ask the VM for, and is the only one waiting for
  * external progress.
  *
- * To ask is to say that the handler waits: the VM reports what for, and
- * suspends the invocation on it once the input closed (Restate's inactivity
- * timeout). That holds for every promise but one. A handler with explicit
- * cancellation awaits its cancellation (`cancelled(ctx)`) to stop work it
- * does outside Restate, a model's request, say: it watches for it, and does
- * not wait for it. Suspended on the cancellation alone, the invocation would
- * end its attempt in the middle of that work, with a cancellation as the only
- * thing to resume it. So the loop asks for the cancellation alone only while
- * the input is open, which is when a cancel signal can come, and not once it
- * closed: see `awaited`.
+ * To ask is to say that the handler waits: the VM tells Restate what for,
+ * and suspends the invocation on it once the input closed (Restate's
+ * inactivity timeout). That holds for every promise but one. A handler with
+ * explicit cancellation awaits its cancellation (`cancelled(ctx)`) to stop
+ * work it does outside Restate, a model's request, say: it watches for it,
+ * and does not wait for it. Reported as awaited, the cancel signal would be
+ * all Restate believes the handler waits for; and suspended on it, the
+ * invocation would end its attempt in the middle of that work, with a
+ * cancellation as the only thing to resume it.
+ *
+ * So with only the cancellation pending, the loop asks for it together with
+ * the attempt's working run (`SelectorDriver.work`), which says what is true:
+ * the handler is at work on something of its own, as inside `ctx.run`. While
+ * a run executes, the VM reports no await, and does not suspend on a future
+ * the run is part of, whether the input is open or closed; and it still
+ * finds the cancel signal when it comes. See `awaited`.
  */
 export class PromiseSelector {
   private readonly pending = new Set<Selectable>();
@@ -117,6 +128,8 @@ export class PromiseSelector {
   private closed = false;
   // Between a check that found nothing and the next external progress.
   private waiting = false;
+  // Whether the last check asked for the cancellation alone, with the working run.
+  private watching = false;
 
   private readonly driver: SelectorDriver;
 
@@ -158,11 +171,10 @@ export class PromiseSelector {
   }
 
   /**
-   * What to ask the VM for: the first of the pending promises to complete.
-   * Undefined when there is nothing to ask for: nothing is pending, or
-   * only the invocation's cancellation, with the input closed. That one
-   * stays pending, and is asked for again with whatever is awaited next,
-   * which also finds a cancel signal that came as the input closed.
+   * What to ask the VM for: the first of the pending promises to complete,
+   * or undefined with nothing pending. With only the invocation's
+   * cancellation pending, the handler watches and waits for nothing: the
+   * working run goes with it (see the class).
    */
   private awaited(): UnresolvedFuture | undefined {
     const futures: UnresolvedFuture[] = [];
@@ -176,8 +188,9 @@ export class PromiseSelector {
         watching &&= cancellationAlone(future);
       }
     }
+    this.watching = watching && futures.length > 0;
     if (futures.length === 0) return undefined;
-    if (watching && this.driver.inputClosed()) return undefined;
+    if (watching) futures.push({ Single: this.driver.work() });
     return futures.length === 1 ? futures[0] : { FirstCompleted: futures };
   }
 
@@ -190,11 +203,10 @@ export class PromiseSelector {
         for (const promise of this.pending) {
           await promise.tryComplete();
         }
-        // A turn of the event loop, before every check. What was settled
-        // runs, and registers what it awaits next, so that one check covers
-        // that too (a combinator also flags itself completed in a .finally,
-        // a tick late). And the SDK has said so if the input closed: it does
-        // within microtasks of signalling the progress that woke this loop.
+        // A turn of the event loop: what was settled runs, and registers
+        // what it awaits next, so that one check covers that too (a
+        // combinator also flags itself completed in a .finally, a tick late).
+        // An optimization: what is registered later wakes the loop anyway.
         await setImmediate();
         // From here to the end of the pass, or to `waiting`, in one turn:
         // what is registered after the check finds the loop gone, and starts
@@ -206,7 +218,7 @@ export class PromiseSelector {
           continue;
         } else if (result === 'WaitExternalProgress') {
           this.waiting = true;
-          if (failpoints.size > 0) await failpoints.get('wait')?.(future);
+          if (failpoints.size > 0) await failpoints.get('wait')?.(future, this.watching);
           await this.driver.flushOutput();
           await this.driver.awaitExternalProgress();
           this.waiting = false;
@@ -234,16 +246,18 @@ export class PromiseSelector {
 /** The SDK's promises executor, as far as the hook needs it: its fields are private in its types. */
 interface Executor {
   doProgress(promise: Selectable): Promise<void>;
-  coreVm: { do_progress(future: UnresolvedFuture): DoProgressResult };
+  coreVm: {
+    do_progress(future: UnresolvedFuture): DoProgressResult;
+    sys_run(name: string): { handle: number };
+    propose_run_completion_success(handle: number, value: Uint8Array): void;
+  };
   outputPump: { awaitNextProgress(): Promise<void> };
   externalProgressChannel: { awaitNext(): Promise<void>; signal(): void };
-  runClosuresTracker: { executeRun(handle: number): void };
+  runClosuresTracker: {
+    executeRun(handle: number): void;
+    registerRunClosure(handle: number, run: () => Promise<unknown>): void;
+  };
   errorCallback: (e: unknown) => void;
-}
-
-/** The SDK's input pump, as far as the hook needs it: `runDone` resolves when the input ends, or the attempt. */
-interface InputPump {
-  runDone: PromiseLike<unknown>;
 }
 
 const FIELDS = ['coreVm', 'outputPump', 'externalProgressChannel', 'runClosuresTracker', 'errorCallback'] as const;
@@ -255,27 +269,38 @@ const FIELDS = ['coreVm', 'outputPump', 'externalProgressChannel', 'runClosuresT
  * own loops.
  */
 export function hookSelector(ctx: object): () => void {
-  const { promisesExecutor: executor, inputPump } = ctx as { promisesExecutor?: Executor; inputPump?: InputPump };
+  const executor = (ctx as { promisesExecutor?: Executor }).promisesExecutor;
   const missing: string[] = executor ? FIELDS.filter((field) => executor[field] === undefined) : ['promisesExecutor'];
-  if (typeof inputPump?.runDone?.then !== 'function') missing.push('inputPump.runDone');
-  if (missing.length > 0 || typeof executor?.coreVm.do_progress !== 'function') {
+  if (missing.length === 0) {
+    const { coreVm, runClosuresTracker } = executor!;
+    for (const method of ['do_progress', 'sys_run', 'propose_run_completion_success'] as const) {
+      if (typeof coreVm[method] !== 'function') missing.push(`coreVm.${method}`);
+    }
+    if (typeof runClosuresTracker.registerRunClosure !== 'function')
+      missing.push('runClosuresTracker.registerRunClosure');
+  }
+  if (missing.length > 0 || executor === undefined) {
     throw new Error(
       `@restatedev/sessions drives a handler's promises through the SDK's internals, which this SDK version does not have ` +
-        `(${missing.join(', ') || 'coreVm.do_progress'}): use the @restatedev/restate-sdk that @restatedev/sessions pins`,
+        `(${missing.join(', ')}): use the @restatedev/restate-sdk that @restatedev/sessions pins`,
     );
   }
   const { coreVm, outputPump, externalProgressChannel, runClosuresTracker } = executor;
-  let inputClosed = false;
-  void (async () => {
-    await inputPump!.runDone;
-    inputClosed = true;
-  })();
+  // The working run: journaled as a run named `work`, with no closure of its
+  // own to end it. It ends with the attempt.
+  let work: number | undefined;
   const selector = new PromiseSelector({
     doProgress: (future) => coreVm.do_progress(future),
     flushOutput: () => outputPump.awaitNextProgress(),
     awaitExternalProgress: () => externalProgressChannel.awaitNext(),
     wake: () => externalProgressChannel.signal(),
-    inputClosed: () => inputClosed,
+    work: () => {
+      if (work === undefined) {
+        work = coreVm.sys_run('work').handle;
+        runClosuresTracker.registerRunClosure(work, () => new Promise(() => {}));
+      }
+      return work;
+    },
     executeRun: (handle) => runClosuresTracker.executeRun(handle),
     onError: (e) => executor.errorCallback(e),
   });
@@ -284,5 +309,15 @@ export function hookSelector(ctx: object): () => void {
   return () => {
     selector.close();
     delete (executor as Partial<Executor>).doProgress;
+    // The work is over: so is its run, in the journal of an invocation that
+    // goes on to answer. (A VM that an error or a suspension closed refuses.)
+    if (work !== undefined) {
+      try {
+        coreVm.propose_run_completion_success(work, new Uint8Array());
+      } catch {
+        // The attempt ended: the next one, or nothing, ends the run.
+      }
+      work = undefined;
+    }
   };
 }

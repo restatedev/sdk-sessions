@@ -47,6 +47,10 @@ type Result = { ok: unknown } | { fail: Error };
 
 /** The handle of the cancel signal. */
 const CANCELLATION = 1;
+/** The handle the fake VM gives the working run. */
+const WORK = 9999;
+/** A check for the cancellation alone: with the working run, which stands for the handler's work. */
+const WATCHING: UnresolvedFuture = { FirstCompleted: [{ Single: CANCELLATION }, { Single: WORK }] };
 
 function leaves(f: UnresolvedFuture): number[] {
   if ('Single' in f) return [f.Single];
@@ -71,17 +75,18 @@ class FakeVm {
   cancelled = false;
   suspendedOn?: UnresolvedFuture;
   readonly progress: UnresolvedFuture[] = [];
-  // The checks on the cancellation alone made with the input closed: each would suspend on it.
-  readonly askedForCancellationAloneOnClosedInput: UnresolvedFuture[] = [];
+  // The checks on the cancellation alone: each tells Restate that the handler awaits it, and suspends on it
+  // once the input closed.
+  readonly askedForCancellationAlone: UnresolvedFuture[] = [];
+  // The attempt's working run, once the selector made it: handed out like any run, and never done.
+  work?: number;
   failWith?: Error;
 
   doProgress(f: UnresolvedFuture): DoProgressResult {
     if (this.suspendedOn) throw new Error('closed');
     if (this.failWith) throw this.failWith;
     this.progress.push(f);
-    if (this.inputClosed && leaves(f).every((h) => h === CANCELLATION)) {
-      this.askedForCancellationAloneOnClosedInput.push(f);
-    }
+    if (leaves(f).every((h) => h === CANCELLATION)) this.askedForCancellationAlone.push(f);
     if (this.cancelled) {
       this.cancelled = false;
       return 'CancelSignalReceived';
@@ -195,7 +200,13 @@ function setup(opts: { onFlush?: () => void } = {}) {
     },
     awaitExternalProgress: () => channel.awaitNext(),
     wake: () => channel.signal(),
-    inputClosed: () => fake.inputClosed,
+    work: () => {
+      if (fake.work === undefined) {
+        fake.work = WORK;
+        fake.runs.add(WORK);
+      }
+      return WORK;
+    },
     executeRun: (h) => started.push(h),
     onError: (e) => errors.push(e),
   });
@@ -386,11 +397,14 @@ describe('PromiseSelector', () => {
   });
 
   describe('with the cancellation awaited alone, as a handler that works outside Restate does', () => {
-    it('settles it when the cancel signal comes', async () => {
+    it('asks for it with the working run, and settles it when the cancel signal comes', async () => {
       const t = setup();
       const cancelled = t.cancellation();
-      await until(() => t.fake.progress.length > 0);
-      expect(t.fake.progress).toEqual([{ Single: 1 }]);
+      await until(() => t.fake.progress.length > 1);
+      // The first check starts the working run, the second waits: never for the cancellation alone.
+      expect(t.fake.progress).toEqual([WATCHING, WATCHING]);
+      expect(t.started).toEqual([WORK]);
+      expect(t.fake.askedForCancellationAlone).toEqual([]);
       t.complete(cancelled, undefined);
       await expect(cancelled.user).resolves.toBeUndefined();
       expect(t.errors).toEqual([]);
@@ -399,12 +413,12 @@ describe('PromiseSelector', () => {
     it('does not suspend once the input closed', async () => {
       const t = setup();
       const cancelled = t.cancellation();
-      await until(() => t.fake.progress.length > 0);
+      await until(() => t.fake.progress.length > 1);
       t.closeInput();
       await settle();
       expect(t.fake.suspendedOn).toBeUndefined();
       expect(t.errors).toEqual([]);
-      expect(t.fake.progress).toEqual([{ Single: 1 }]); // not asked again
+      expect(t.fake.askedForCancellationAlone).toEqual([]);
       expect(cancelled.isDone()).toBe(false);
     });
 
@@ -414,14 +428,15 @@ describe('PromiseSelector', () => {
       t.cancellation();
       await settle();
       expect(t.fake.suspendedOn).toBeUndefined();
-      expect(t.fake.progress).toEqual([]);
+      expect(t.started).toEqual([WORK]);
+      expect(t.fake.askedForCancellationAlone).toEqual([]);
       expect(t.errors).toEqual([]);
     });
 
-    it('suspends on it and on what is awaited after the input closed', async () => {
+    it('suspends on it and on what is awaited after the input closed, without the working run', async () => {
       const t = setup();
       t.cancellation();
-      await until(() => t.fake.progress.length > 0);
+      await until(() => t.fake.progress.length > 1);
       t.closeInput();
       await settle();
       const p = t.promise();
@@ -433,11 +448,11 @@ describe('PromiseSelector', () => {
     it('settles what is awaited after the input closed, in the same attempt', async () => {
       const t = setup();
       const cancelled = t.cancellation();
-      await until(() => t.fake.progress.length > 0);
+      await until(() => t.fake.progress.length > 1);
       t.closeInput();
       await settle();
       const run = t.run<string>();
-      await until(() => t.started.length > 0);
+      await until(() => t.started.includes(run.handle));
       t.complete(run, 'ran');
       await expect(run.user).resolves.toBe('ran');
       await settle();
@@ -446,21 +461,16 @@ describe('PromiseSelector', () => {
       expect(cancelled.isDone()).toBe(false);
     });
 
-    it('settles it with a cancel signal found once something else is awaited', async () => {
+    it('settles it with a cancel signal that came as the input closed', async () => {
       const t = setup();
       const cancelled = t.cancellation();
-      await until(() => t.fake.progress.length > 0);
-      // The signal came as the input closed: no check saw it.
-      t.fake.inputClosed = true;
+      await until(() => t.fake.progress.length > 1);
       t.fake.arrived.push([CANCELLATION, { ok: undefined }]);
+      t.fake.inputClosed = true;
       t.channel.signal();
-      await settle();
-      expect(cancelled.isDone()).toBe(false);
-      const p = t.promise();
       await expect(cancelled.user).resolves.toBeUndefined();
-      // And then the handler, which goes on waiting here, is suspended on what it waits for.
-      await until(() => t.errors.length > 0);
-      expect(t.fake.suspendedOn).toEqual({ Single: p.handle });
+      expect(t.fake.suspendedOn).toBeUndefined();
+      expect(t.errors).toEqual([]);
     });
 
     it('suspends on a combinator over it and something else', async () => {
@@ -485,7 +495,7 @@ describe('PromiseSelector', () => {
       await settle();
       held.release();
       await settle();
-      expect(t.fake.askedForCancellationAloneOnClosedInput).toEqual([]);
+      expect(t.fake.askedForCancellationAlone).toEqual([]);
       expect(t.fake.suspendedOn).toBeUndefined();
       expect(t.errors).toEqual([]);
     });
@@ -499,7 +509,7 @@ describe('PromiseSelector', () => {
       await settle();
       held.release();
       await settle();
-      expect(t.fake.askedForCancellationAloneOnClosedInput).toEqual([]);
+      expect(t.fake.askedForCancellationAlone).toEqual([]);
       expect(t.fake.suspendedOn).toBeUndefined();
       expect(t.errors).toEqual([]);
     });
@@ -515,7 +525,7 @@ describe('PromiseSelector', () => {
       await expect(cancelled.user).resolves.toBeUndefined();
     });
 
-    it('never asks for it alone on a closed input, whatever else comes and goes', async () => {
+    it('never asks for it alone, whatever else comes and goes', async () => {
       let seed = 11;
       const random = () => {
         seed = (seed * 1103515245 + 12345) % 2 ** 31;
@@ -554,16 +564,22 @@ describe('PromiseSelector', () => {
           }
           if (random() < 0.6) await setImmediate();
         }
-        await settle(40);
+        // Until every result that came in was taken in, or the invocation suspended.
+        const quiet = async () => {
+          await until(() => t.fake.arrived.length === 0 || t.fake.suspendedOn !== undefined, 2000);
+          await settle(40);
+        };
+        await quiet();
         // The runs that execute finish, whether the input closed or not.
         for (const p of open.filter((r) => t.fake.executing.has(r.handle))) t.complete(p, p.handle);
-        await settle(40);
+        await quiet();
         failpoints.clear();
-        expect(t.fake.askedForCancellationAloneOnClosedInput).toEqual([]);
+        expect(t.fake.askedForCancellationAlone).toEqual([]);
         // It suspended only on something else that the handler waits for; and it did suspend if the handler
         // waits for something else with the input closed, unless a run still executes (the VM waits for it).
         const on = t.fake.suspendedOn;
-        const idle = on === undefined && t.fake.inputClosed && t.fake.executing.size === 0;
+        const atWork = [...t.fake.executing].filter((h) => h !== WORK);
+        const idle = on === undefined && t.fake.inputClosed && atWork.length === 0;
         expect(on === undefined || leaves(on).some((h) => h !== CANCELLATION)).toBe(true);
         expect(idle ? open.filter((p) => !p.isDone()).map((p) => p.handle) : []).toEqual([]);
         if (on !== undefined) suspended++;

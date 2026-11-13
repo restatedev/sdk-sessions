@@ -38,6 +38,8 @@ const probe = restate.sessionObject({
 
 const run = (input: Work, options?: Parameters<typeof attempt>[3]) => attempt(probe, 'Probe/work', input, options);
 const SUSPENSION = 0x0001;
+const PROPOSE_RUN_COMPLETION = 0x0005;
+const RUN = 0x0411;
 const onCancellationAlone = (o: Outcome) => o.kind === 'suspended' && o.on.completions.length === 0;
 const within = <T>(promise: Promise<T>, ms: number, what: string) =>
   Promise.race([
@@ -60,7 +62,7 @@ describe('a handler that works outside Restate and watches for its cancellation,
     const a = run({ ms: 30, watch }, { closed: true });
     expect(await within(a.ended, 2000, 'the attempt')).toEqual({ kind: 'output', value: { stopped: false } });
     expect(a.sent).not.toContain(SUSPENSION);
-    expect(a.reported).toEqual([]); // and asked Restate for nothing
+    expect(a.reported).toEqual([]);
   });
 
   it('stops at a cancel signal that comes while its input is open', async () => {
@@ -70,19 +72,25 @@ describe('a handler that works outside Restate and watches for its cancellation,
     expect(await within(a.ended, 1000, 'the attempt')).toEqual({ kind: 'output', value: { stopped: true } });
   });
 
-  // What stays of the misreport: to learn of a cancel signal, the selector asks the VM for it, and the VM tells
-  // Restate that the handler awaits it (once, or again after each wake-up). Restate 1.8 records that, and does
-  // nothing with it.
-  it('tells Restate that it awaits its cancellation while its input is open, and no more once it closed', async () => {
-    const a = run({ ms: 300, watch: true });
-    for (let i = 0; a.reported.length === 0 && i < 200; i++) await sleep(1);
-    await sleep(20);
-    const reports = a.reported.length;
-    expect(reports).toBeGreaterThan(0);
-    expect(a.reported).toEqual(Array.from({ length: reports }, () => ({ signals: [CANCEL], completions: [] })));
+  // To ask the VM for the cancellation alone would tell Restate that the handler awaits it, and nothing else.
+  // Asked with the working run, the VM reports no await at all: the handler is at work.
+  it('tells Restate of no await while it works, whether its input is open or closed', async () => {
+    const a = run({ ms: 150, watch: true });
+    await sleep(60);
+    expect(a.reported).toEqual([]);
     a.closeInput();
-    await within(a.ended, 2000, 'the attempt');
-    expect(a.reported).toHaveLength(reports);
+    expect(await within(a.ended, 2000, 'the attempt')).toEqual({ kind: 'output', value: { stopped: false } });
+    expect(a.reported).toEqual([]);
+    expect(a.sent).toContain(RUN); // its working run, in the journal
+    expect(a.sent).toContain(PROPOSE_RUN_COMPLETION); // and its end, with the attempt's
+  });
+
+  it('stops at a cancel signal that the input closes right behind', async () => {
+    const a = run({ ms: 2000, watch: true });
+    await sleep(20);
+    a.cancel();
+    a.closeInput(); // in the same turn: one read after the other
+    expect(await within(a.ended, 1000, 'the attempt')).toEqual({ kind: 'output', value: { stopped: true } });
   });
 
   it('is suspended on its commit and its cancellation, when it commits after its input closed', async () => {
@@ -135,6 +143,7 @@ describe('a handler that works outside Restate and watches for its cancellation,
         const wrong = [
           onCancellationAlone(outcome) && 'suspended on the cancel signal alone',
           outcome.kind === 'error' && 'failed',
+          a.reported.some((r) => r.completions.length === 0) && 'told Restate that it awaits its cancellation alone',
           !input.commit && answers === undefined && 'did not answer',
           // It stops for a cancel signal only: one sent, and to a handler that watches.
           answers?.stopped && !(cancelAt !== undefined && input.watch) && 'stopped without a cancel signal',

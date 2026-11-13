@@ -15,7 +15,7 @@
 //
 //   pnpm --filter e2e suspension   (RESTATE_SERVER=/path/to/restate-server to use another)
 import * as restate from '@restatedev/sessions';
-import { cancelled, failpoints, type Failpoint, type UnresolvedFuture } from '@restatedev/sessions/internal';
+import { cancelled, failpoints, type Failpoint } from '@restatedev/sessions/internal';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, openSync } from 'node:fs';
@@ -258,16 +258,12 @@ async function send<O extends Outcome = Outcome>(path: string, body: unknown) {
   };
 }
 
-/** Whether a check asked for the invocation's cancellation, and nothing else. */
-const forCancellationAlone = (asked?: UnresolvedFuture) =>
-  asked !== undefined && 'Single' in asked && asked.Single === 1;
-
-/** Holds every selector's loop at `point`, from its next arrival there (after a check that `when` takes) until released. */
-function hold(point: Failpoint, when: (asked?: UnresolvedFuture) => boolean = () => true) {
+/** Holds every selector's loop at `point`, from its next arrival there (`watching`: after a check for a cancellation alone) until released. */
+function hold(point: Failpoint, { watching = false } = {}) {
   const gate = Promise.withResolvers<void>();
   const arrived = Promise.withResolvers<void>();
-  failpoints.set(point, (asked) => {
-    if (!when(asked)) return undefined;
+  failpoints.set(point, (_asked, watches) => {
+    if (watching && !watches) return undefined;
     arrived.resolve();
     return gate.promise;
   });
@@ -377,7 +373,7 @@ await check('the input closes while the loop is held before its check: not suspe
 });
 
 await check('the input closes between a check and its wait: not suspended', async () => {
-  const held = hold('wait', forCancellationAlone);
+  const held = hold('wait', { watching: true });
   const p = await start('watching', { ms: 4 * INACTIVITY });
   await held.arrived; // checked for its cancellation with the input open, and about to wait
   await sleep(2 * INACTIVITY); // the input closes
@@ -386,19 +382,46 @@ await check('the input closes between a check and its wait: not suspended', asyn
 });
 
 await check(
-  'a cancel signal that comes, and the input that closes, while the loop is held: found at the next await',
+  'a cancel signal that comes, and the input that closes, while the loop is held: found on its release',
   async () => {
-    const p = await start('watching', { ms: 4 * INACTIVITY, after: 'race' });
+    const p = await start('watching', { ms: 4 * INACTIVITY });
     await sleep(200);
     const held = hold('pass');
     await p.cancel(); // wakes the loop, which is held at the start of its pass
     await held.arrived;
     await sleep(2 * INACTIVITY); // the input closes, with the signal in the VM and no check to see it
     held.release();
-    // The work goes on to its end: nothing may ask for the cancellation alone. Then the race finds it.
+    // The next check asks for the cancellation with the working run: it finds the signal, input closed or not.
     const outcome = await p.outcome();
     assert.deepEqual({ ...outcome, ms: 0 }, { stopped: true, attempts: 1, ms: 0 });
-    assert.ok(outcome.ms >= 4 * INACTIVITY, `${outcome.ms} ms`);
+    assert.ok(outcome.ms < 3.5 * INACTIVITY, `${outcome.ms} ms`);
+  },
+);
+
+// --- What Restate is told
+
+await check(
+  'while it works, Restate is told of no await; its working run is in the journal, and ends with it',
+  async () => {
+    const p = await start('watching', { ms: 2 * INACTIVITY });
+    const told = async () =>
+      (
+        await query<{ last_awaiting_on_future_json?: string }>(
+          `SELECT last_awaiting_on_future_json FROM sys_invocation_state WHERE id = '${p.id}'`,
+        )
+      )[0]?.last_awaiting_on_future_json;
+    await sleep(INACTIVITY / 2); // at work, its input open
+    assert.equal(await told(), undefined);
+    await sleep(INACTIVITY); // at work, its input closed
+    assert.equal(await told(), undefined);
+    assert.deepEqual({ ...(await p.outcome()), ms: 0 }, { stopped: false, attempts: 1, ms: 0 });
+    const journal = await query<{ entry_type: string; name: string }>(
+      `SELECT entry_type, name FROM sys_journal WHERE id = '${p.id}' ORDER BY index`,
+    );
+    const entries = journal.map((e) => `${e.entry_type}${e.name ? `(${e.name})` : ''}`);
+    assert.ok(entries.includes('Command: Run(work)'), entries.join(', '));
+    assert.ok(entries.includes('Notification: Run'), entries.join(', '));
+    assert.equal(entries.at(-1), 'Command: Output', entries.join(', '));
   },
 );
 
