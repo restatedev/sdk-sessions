@@ -27,6 +27,7 @@ import type * as restate from '@restatedev/sessions';
 import type { LangGraphRunnableConfig } from '@langchain/langgraph';
 import { flushHeld } from '../calls.ts';
 import { signals, signalsOf } from '../signals.ts';
+import { runWorkflow } from '../tools.ts';
 import { handlerContext } from './context.ts';
 
 /** A LangGraph node: it takes the state and the run's config, and returns the state's update. */
@@ -153,13 +154,11 @@ export const call = <M>(target: Target<M>, handler: keyof M & string, options: C
   checkKey(target, options.key);
   return async (state, config) => {
     const { ctx, idempotencyKey } = await stepOf(config, 'call');
-    const result = await ctx.rpc({
-      service: target.name,
-      handler,
-      key: options.key?.(state),
-      input: plain(options.input?.(state)),
-      idempotencyKey,
-    });
+    const parameters = { service: target.name, key: options.key?.(state), input: plain(options.input?.(state)) };
+    const result =
+      'workflow' in target && handler === 'run'
+        ? await runWorkflow(ctx, { ...parameters, key: parameters.key! })
+        : await ctx.rpc({ ...parameters, handler, idempotencyKey });
     return update(options.output, result);
   };
 };
@@ -193,7 +192,8 @@ export const send = <M>(
 /**
  * A node that runs the workflow `target` (its `run` handler) to the end, and
  * writes its result to `output`. The workflow's id is `key`'s, or one of the
- * node's own, made of the agent's key and the node's task:
+ * node's own, made of the agent's key and the node's task. Run again, the
+ * node waits for the run it started (see `runWorkflow` in tools.ts):
  *
  *   graph.addNode('ship', nodes.workflow(shipping, { input: (s) => s.order, output: 'receipt' }))
  */
@@ -201,12 +201,10 @@ export const workflow =
   (target: restate.WorkflowDefinition<string, { run: unknown }>, { output, input, key }: CallOptions = {}): Node =>
   async (state, config) => {
     const { ctx, idempotencyKey } = await stepOf(config, 'workflow');
-    const result = await ctx.rpc({
+    const result = await runWorkflow(ctx, {
       service: target.name,
-      handler: 'run',
       key: key?.(state) ?? idempotencyKey,
       input: plain(input?.(state)),
-      idempotencyKey,
     });
     return update(output, result);
   };
