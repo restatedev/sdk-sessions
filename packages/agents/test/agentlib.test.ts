@@ -232,6 +232,12 @@ describe('toolsOf', () => {
     expect(Object.keys(toolsOf('a', { weather, ...own }))).toEqual(['weather', 'echo']);
   });
 
+  it("refuses an approval of a tool that is none of the agent's own of @restatedev/agents", () => {
+    expect(() => toolsOf('a', [weather, own], ['get_weather'])).not.toThrow();
+    expect(() => toolsOf('a', [weather, own], ['echo'])).toThrow('a: approval names echo');
+    expect(() => toolsOf('a', [weather], ['nope'])).toThrow('a: approval names nope');
+  });
+
   it('refuses two tools of one name', () => {
     expect(() => toolsOf('a', [weather, { get_weather: own.echo }])).toThrow(
       'a: two tools are named get_weather',

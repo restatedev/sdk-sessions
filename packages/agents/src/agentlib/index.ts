@@ -13,4 +13,4 @@
 export { agent } from './agent.ts';
 export { DEFAULT_MODEL } from './model.ts';
 export type { Definition, Options } from './options.ts';
-export type { AgentlibContext, AgentlibTool, Tools } from './tools.ts';
+export type { AgentlibContext, AgentlibTool, Approval, Tools } from './tools.ts';

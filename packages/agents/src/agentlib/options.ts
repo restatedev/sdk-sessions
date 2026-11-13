@@ -1,7 +1,7 @@
 // What an agentlib agent takes.
 import type { AgentOptions as LibOptions, CompactionPolicy, Model } from '@restatedev/agentlib';
 import type { sdk as restate } from '@restatedev/sessions/internal';
-import type { AgentlibContext, Tools } from './tools.ts';
+import type { AgentlibContext, Approval, Tools } from './tools.ts';
 
 /** agentlib's options that the agent sets itself, or takes under another name. */
 type Replaced = 'model' | 'name' | 'instructions' | 'tools' | 'onApproval' | 'onHumanApproval';
@@ -28,6 +28,15 @@ export interface Options<O = string> extends Omit<LibOptions<AgentlibContext, O>
    * model calls them, as in `[weather, { transfer: asyncTool(...) }]`.
    */
   tools?: Tools;
+
+  /**
+   * The tools of `@restatedev/agents` whose calls wait for a person's
+   * approval before they run, by name, or a function of a call that says
+   * whether it does. `pending` lists the wait, and `signal` approves it
+   * (`true`, `"approved"`, `{ "approved": true }`) or denies it (anything
+   * else). agentlib's own tools take `needsApproval` instead.
+   */
+  approval?: Approval;
 
   /**
    * How the model's conversation stays short from turn to turn. At a turn's

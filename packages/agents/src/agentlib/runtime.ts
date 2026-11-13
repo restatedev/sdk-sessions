@@ -39,7 +39,10 @@ interface Loaded<O> {
 export class Runtime<O> {
   private readonly name: string;
   private readonly background: boolean;
-  private readonly libOptions: Omit<Options<O>, 'model' | 'system' | 'tools' | 'history'>;
+  private readonly libOptions: Omit<
+    Options<O>,
+    'model' | 'system' | 'tools' | 'approval' | 'history'
+  >;
   private readonly system: Options<O>['system'];
   private readonly tools?: Record<string, AgentlibTool>;
   private readonly history: Options<O>['history'];
@@ -47,7 +50,7 @@ export class Runtime<O> {
   private loading?: Promise<Loaded<O>>;
 
   constructor(name: string, background: boolean, options: Options<O>) {
-    const { model, system, tools, history, ...libOptions } = options;
+    const { model, system, tools, approval, history, ...libOptions } = options;
     this.name = name;
     this.background = background;
     this.libOptions = libOptions;
@@ -56,7 +59,7 @@ export class Runtime<O> {
     this.loadModel = modelLoader(name, model);
     if (history) checkHistory(name, history);
     // Restate's tools become agentlib's here, so that two tools of one name fail now.
-    if (tools !== undefined) this.tools = toolsOf(name, tools);
+    if (tools !== undefined) this.tools = toolsOf(name, tools, approval);
   }
 
   /** Answers `text` in the turn of `ctx`'s invocation. */
