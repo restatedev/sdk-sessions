@@ -75,7 +75,8 @@ let replies = 0;
 /** `message`, its tools named as Claude Code offered them (`transfer` as `mcp__restate__transfer`), with an id of its own. */
 const named = (message: Message, tools: { name: string }[] = []): Message => ({
   ...message,
-  id: `msg_teller_${++replies}`,
+  // A reply a test gave an id of its own (`msg_keep_…`, the same twice, say) keeps it.
+  id: message.id.startsWith('msg_keep_') ? message.id : `msg_teller_${++replies}`,
   content: message.content.map((c) =>
     c.type === 'tool_use'
       ? { ...c, name: tools.find((t) => t.name === c.name || t.name.endsWith(`__${c.name}`))?.name ?? c.name }

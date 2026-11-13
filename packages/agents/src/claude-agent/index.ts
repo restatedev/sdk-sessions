@@ -238,6 +238,61 @@ const shown = (name: string) => (name.startsWith(PREFIX) ? name.slice(PREFIX.len
 export const INTERRUPTED =
   "[Tool call interrupted: the session ended before this call's result was recorded, so its outcome is unknown. Check whether it took effect before relying on it or running it again.]";
 
+/**
+ * The terminal error of a turn that ended with `stop` (its last reply's
+ * stop reason) and `error` (Claude Code's API error, if it wrote one), `why`
+ * its text: declined, refused for good (424), cut off; or none (an outage,
+ * which the next attempt resumes).
+ */
+function failureOf(stop: string | null | undefined, error: string | undefined, why: string, model: string | undefined) {
+  if (stop === 'refusal') return new restate.TerminalError(`the model declined to answer: ${why}`);
+  if (error !== undefined && REFUSALS.has(error)) return refused(error, model);
+  if (error === 'max_output_tokens' || stop === 'max_tokens') {
+    return new restate.TerminalError(`the model's reply was cut off: ${why}`);
+  }
+  return undefined;
+}
+
+/** How a turn ended, as its transcript says (see {@link endingOf}). */
+type Ending = { kind: 'resume' } | { kind: 'answered'; lines: Line[] } | { kind: 'failed'; error: Error };
+
+/**
+ * How the turn whose ask is the line `ask` ended, as the transcript `lines`
+ * say: a turn whose messages end with a reply of the model that ends it
+ * (`end_turn`, its text empty too) was answered; one that ends with a reply
+ * cut off or declined, or with Claude Code's error of a request refused for
+ * good, failed, as it did; one that ends with a message of the user (the
+ * prompt, the results of its calls, Claude Code's own nudge) or with an
+ * outage's error goes on (Claude Code resumes it). Decided here, not by
+ * Claude Code: a resume of a turn that ended has nothing to go on with, and
+ * would wait for a prompt that never comes.
+ */
+function endingOf(lines: Line[], ask: string, model: string | undefined): Ending {
+  const from = lines.findIndex((l) => l.uuid === ask);
+  if (from < 0) return { kind: 'resume' };
+  const said = lines.slice(from).filter((l) => !l.isSidechain && (l.type === 'user' || l.type === 'assistant'));
+  const last = said.at(-1);
+  if (last?.type !== 'assistant') return { kind: 'resume' };
+  const text = blocksOf(last)
+    .flatMap((b) => (b.type === 'text' && b.text ? [b.text] : []))
+    .join('');
+  if (last.isApiErrorMessage || last.message?.model === '<synthetic>') {
+    const error = typeof last.error === 'string' ? last.error : undefined;
+    const failure = failureOf(last.message?.stop_reason, error, text, model);
+    return failure ? { kind: 'failed', error: failure } : { kind: 'resume' };
+  }
+  // The reply's lines: the last ones, of its API message.
+  let first = said.length - 1;
+  while (first > 0 && said[first - 1]!.type === 'assistant' && said[first - 1]!.message?.id === last.message?.id)
+    first--;
+  const reply = said.slice(first);
+  if (reply.some((l) => blocksOf(l).some((b) => b.type === 'tool_use'))) return { kind: 'resume' };
+  const stop = last.message?.stop_reason;
+  if (stop === 'end_turn') return { kind: 'answered', lines: reply };
+  const failure = failureOf(stop, undefined, text, model);
+  return failure ? { kind: 'failed', error: failure } : { kind: 'resume' };
+}
+
 /** The end of the transcript `lines`, as a short text: what a resume that did not go on found. */
 const tailOf = (lines: Line[]) =>
   lines
@@ -302,19 +357,23 @@ function newItems(
   );
   const held = new Set(turn.steered().map((e) => e.steer));
   const copied: { item: Item; reply?: boolean; steer?: string }[] = [];
-  // The replies, by their API message: Claude Code writes a line per content block.
+  // The replies: Claude Code writes a line per content block of an API message, one after another. A reply is
+  // copied once, by its message's id and its first line's uuid (the API's ids are unique, but a reply must not
+  // be left out for an id the turn has: it would be stored in the transcript, and missing in the turn).
   const replies = new Map<string, { text: string[]; calls: Call[]; stop?: string | null }>();
   const order: (string | Item | { steer: string; text: string; from: string })[] = [];
+  let current: { id: string; key: string } | undefined;
   for (const line of lines) {
     if (line.isSidechain) continue;
     const message = line.message;
+    if (line.type !== 'assistant') current = undefined;
     if (line.type === 'assistant' && message?.id && !line.isApiErrorMessage && message.model !== '<synthetic>') {
-      let reply = replies.get(message.id);
-      if (!reply) {
-        reply = { text: [], calls: [] };
-        replies.set(message.id, reply);
-        order.push(message.id);
+      if (current?.id !== message.id) {
+        current = { id: message.id, key: `${message.id}/${line.uuid ?? ''}` };
+        replies.set(current.key, { text: [], calls: [] });
+        order.push(current.key);
       }
+      const reply = replies.get(current.key)!;
       for (const block of blocksOf(line)) {
         if (block.type === 'text' && block.text) reply.text.push(block.text);
         if (block.type === 'tool_use' && block.id) {
@@ -351,8 +410,8 @@ function newItems(
       const reply = replies.get(entry)!;
       if (have.has(entry)) continue;
       const text = reply.text.join('');
-      // A reply that ends the turn is one of its text; one cut off, refused or failed is none.
-      if (reply.calls.length === 0 && (reply.stop !== 'end_turn' || !text.trim())) continue;
+      // A reply that ends the turn is one of its text, empty too; one cut off, refused or failed is none.
+      if (reply.calls.length === 0 && reply.stop !== 'end_turn') continue;
       copied.push({ item: { type: 'assistant', text, calls: reply.calls, from: entry }, reply: true });
       have.add(entry);
     } else if ('steer' in entry) {
@@ -499,11 +558,19 @@ const refused = (why: string, model: string | undefined) =>
 /** How long a tool waits for its call to be committed before the attempt fails. */
 const GATE_MS = 60_000;
 
-/** How long a resumed turn may do nothing (no model request, no tool) before the attempt fails. */
-const IDLE_MS = 60_000;
-
-/** How long a tool call's end waits for Claude Code to queue a message steered to the turn. */
-const QUEUE_MS = 2_000;
+/**
+ * Timings, and how a steered message is given: for tests (a shorter wait, a
+ * message Claude Code takes late), not options.
+ *
+ * - `idleMs`: how long a resumed Claude Code may write nothing to its
+ *   transcript (it writes as it sends the turn's request) before the attempt
+ *   fails;
+ * - `queueMs`: how long a tool call's end waits for Claude Code to queue a
+ *   message steered to the turn;
+ * - `steerPriority`: how a steered message is given (`'next'`: at the next
+ *   step; `'later'`, for tests: after the turn).
+ */
+export const tuning = { idleMs: 60_000, queueMs: 2_000, steerPriority: 'next' as 'next' | 'later' };
 
 /** How long a stop waits for Claude Code to end its turn before the process is killed. */
 const STOP_MS = 5_000;
@@ -552,7 +619,7 @@ class Input implements AsyncIterable<SDKUserMessage> {
 }
 
 /** A message of the user, as Claude Code's input takes it. */
-const said = (text: string, uuid: string, priority?: 'next'): SDKUserMessage => ({
+const said = (text: string, uuid: string, priority?: 'next' | 'later'): SDKUserMessage => ({
   type: 'user',
   message: { role: 'user', content: text },
   parent_tool_use_id: null,
@@ -722,9 +789,11 @@ class Claude {
 
 /**
  * How many Claude Code processes this process started for turns, how many
- * turns took a kept one instead, and how many took a spare.
+ * turns took a kept one instead, how many took a spare, and how many turns
+ * Claude Code began on its own (with a message given to a turn that it did
+ * not take) were dropped, their process killed.
  */
-export const processes = { started: 0, reused: 0, spared: 0 };
+export const processes = { started: 0, reused: 0, spared: 0, dropped: 0 };
 
 /** The idle processes, by agent and key: each holds the key's transcript as far as the store has it. */
 const idle = new Map<string, Claude>();
@@ -918,6 +987,10 @@ class Run {
   #apiError: string | undefined;
   /** The end of the transcript a resumed turn found, for its error should it not go on. */
   tail = '';
+  /** Told of each line of the transcript Claude Code writes: a resumed turn went on. */
+  #wrote: (() => void) | undefined;
+  /** Whether Claude Code began a turn of its own after this one (a message given, not taken): nothing more of it is stored. */
+  #foreign = false;
 
   constructor(ctx: restate.SessionContext, turn: Turn<Item>, options: Options) {
     this.ctx = ctx;
@@ -943,7 +1016,18 @@ class Run {
   // The mirror.
 
   /** Store `entries`, lines of the transcript at `subpath`, and copy what is new of the turn, in one transaction. */
-  async append(subpath: string, entries: Line[]) {
+  async append(subpath: string, written: Line[]) {
+    this.#wrote?.();
+    // A turn of Claude Code's own after this one (a message given to the turn, which Claude Code took after it)
+    // is nobody's: none of it is stored, and the process is killed.
+    if (this.#foreign) return;
+    const at = subpath === '' ? written.findIndex((line) => this.#startsAnother(line)) : -1;
+    const entries = at < 0 ? written : written.slice(0, at);
+    if (at >= 0) {
+      this.#foreign = true;
+      processes.dropped += 1;
+      this.claude?.kill();
+    }
     const turn = this.#turn;
     let steps = false;
     const calls: string[] = [];
@@ -999,6 +1083,22 @@ class Run {
         this.#queueing.get(entry.content)?.();
       }
     }
+  }
+
+  /**
+   * Whether `line` is the prompt of a turn Claude Code starts after this one:
+   * a message given to this turn (by its uuid) that Claude Code did not place
+   * at a step, and runs as a prompt of its own once the turn ended.
+   */
+  #startsAnother(line: Line) {
+    if (line.type !== 'user' || !line.uuid || !this.#steers.has(line.uuid) || line.isSidechain) return false;
+    return !blocksOf(line).some((b) => b.type === 'tool_result');
+  }
+
+  /** Whether a message given to Claude Code for this turn was not taken by it: Claude Code holds it still. */
+  untaken() {
+    const held = new Set(this.#turn.steered().map((e) => e.steer));
+    return [...this.#steers.values()].some((id) => !held.has(id));
   }
 
   /** Wait until tool call `id` is committed: a tool runs only once its call is stored. */
@@ -1076,11 +1176,11 @@ class Run {
       const uuid = uuidOf(`steer:${id}`);
       this.#steers.set(uuid, id);
       queued.push(new Promise<void>((resolve) => this.#queueing.set(text, resolve)));
-      this.claude?.input.push(said(text, uuid, 'next'));
+      this.claude?.input.push(said(text, uuid, tuning.steerPriority));
     }
     if (queued.length === 0) return;
     let timer: NodeJS.Timeout | undefined;
-    await Promise.race([Promise.all(queued), new Promise((resolve) => (timer = setTimeout(resolve, QUEUE_MS)))]);
+    await Promise.race([Promise.all(queued), new Promise((resolve) => (timer = setTimeout(resolve, tuning.queueMs)))]);
     clearTimeout(timer);
   }
 
@@ -1140,15 +1240,16 @@ class Run {
       idleTimer = undefined;
     };
     if (interrupted) {
-      // A resumed turn starts at once: one that does nothing, Claude Code did not resume.
+      // A resumed turn writes its transcript as it sends its request: one that writes nothing, Claude Code did not resume.
+      this.#wrote = busy;
       idleTimer = setTimeout(
         () =>
           void this.fail(
             new Error(
-              `the resumed turn did not go on within ${IDLE_MS / 1000} s (the transcript ends: ${this.tail}): ${claude.stderr.slice(-500)}`,
+              `the resumed turn did not go on within ${tuning.idleMs / 1000} s (the transcript ends: ${this.tail}): ${claude.stderr.slice(-500)}`,
             ),
           ),
-        IDLE_MS,
+        tuning.idleMs,
       );
     }
     try {
@@ -1196,10 +1297,8 @@ class Run {
     if (result.subtype === 'error_max_turns') throw new restate.TerminalError(`the turn reached maxTurns: ${why}`);
     if (result.subtype === 'error_max_budget_usd')
       throw new restate.TerminalError(`the turn reached its budget: ${why}`);
-    if (result.stop_reason === 'refusal') throw new restate.TerminalError(`the model declined to answer: ${why}`);
-    if (this.#apiError !== undefined && REFUSALS.has(this.#apiError)) throw refused(this.#apiError, model);
-    if (this.#apiError === 'max_output_tokens')
-      throw new restate.TerminalError(`the model's reply was cut off: ${why}`);
+    const failure = failureOf(result.stop_reason, this.#apiError, why, model);
+    if (failure) throw failure;
     // An outage past Claude Code's retries, or a failure of its own: the attempt fails, and the next resumes the turn.
     throw new Error(`Claude Code's turn failed: ${why}`);
   }
@@ -1223,6 +1322,19 @@ class Run {
     await claude?.appending;
     this.fence.closed = true;
     claude?.kill();
+  }
+
+  /** Answer with the final reply of `lines`, the turn's last in the transcript: copied into the turn first, if missing. */
+  async answerFrom(lines: Line[]) {
+    const turn = this.#turn;
+    await this.ctx.db.transaction(async (tx) => {
+      const copied = newItems(lines, turn, this.#steers);
+      if (copied.length > 0) await turn.copyIn(tx, copied);
+    });
+    return (
+      turn.finalReply() ??
+      lines.flatMap((l) => blocksOf(l).flatMap((b) => (b.type === 'text' && b.text ? [b.text] : []))).join('')
+    );
   }
 
   /**
@@ -1396,7 +1508,12 @@ const runOf = (ctx: restate.SessionContext, options: Options) => async (conversa
     const session = known ?? uuidOf(`session:${turn.id}`);
     if (interrupted) {
       await run.closeCutOff(session, askUuid);
-      run.tail = tailOf(await linesOf(ctx.db));
+      const lines = await linesOf(ctx.db);
+      // A turn that ended in the transcript is answered, or fails, as it did: Claude Code is not started.
+      const ending = endingOf(lines, askUuid, model);
+      if (ending.kind === 'failed') throw ending.error;
+      if (ending.kind === 'answered') return await run.answerFrom(ending.lines);
+      run.tail = tailOf(lines);
     }
     let prompt: SDKUserMessage | undefined;
     if (!interrupted) {
@@ -1431,8 +1548,9 @@ const runOf = (ctx: restate.SessionContext, options: Options) => async (conversa
     if (claude) {
       claude.run = undefined;
       const reuse = reuseOf(options);
-      // Kept for the key's next turn only once it answered, every line it wrote stored.
-      if (answered && reuse && claude.reusable && !claude.dead && !run.fence.closed) {
+      // Kept for the key's next turn only once it answered, every line it wrote stored, and nothing given to it
+      // that it has not taken: it would answer that as a turn of its own.
+      if (answered && reuse && claude.reusable && !claude.dead && !run.fence.closed && !run.untaken()) {
         await claude.appending;
         if (!claude.dead) keep(`${ctx.request.target.service}/${ctx.key}`, claude, reuse);
       } else claude.kill();

@@ -390,6 +390,43 @@ describe.each(REUSES)('the Claude Code agent ($name)', ({ reuse }) => {
 
 type Message = Anthropic.Beta.Messages.BetaMessage;
 
+/**
+ * `prompt` (with `input`) crashed at each of the last `last` state requests of
+ * its turn, each in a conversation of its own, then retried: what each retry
+ * answered or failed with (`no answer` if it gave none in `within` ms), by
+ * the request it crashed at.
+ */
+async function crashedAtTheEnd(prompt: PromptHandler, input: string, { last = 12, within = 20_000 } = {}) {
+  let total = 0;
+  for (let n = 1; ; n++) {
+    const probe = conversation(prompt, `end-probe-${Math.random()}`);
+    const first = await probe.attempt('inv1', input, n).catch((error: unknown) => error);
+    if (first !== 'crashed') {
+      total = n - 1;
+      break;
+    }
+    if (n > 500) throw new Error('the turn makes more than 500 state requests');
+  }
+  const outcomes: string[] = [];
+  for (let n = total; n > Math.max(0, total - last); n--) {
+    const c = conversation(prompt, `end-${n}-${Math.random()}`);
+    if ((await c.attempt('inv1', input, n).catch(() => 'failed')) !== 'crashed') continue;
+    const outcome = await Promise.race([
+      c.attempt('inv1', input).then(
+        (answer) => `answered: ${answer}`,
+        (error: unknown) => `failed: ${String(error).slice(0, 120)}`,
+      ),
+      new Promise<string>((resolve) => setTimeout(() => resolve('no answer'), within)),
+    ]);
+    outcomes.push(`${n}: ${outcome}`);
+  }
+  return outcomes;
+}
+
+/** A reply of the model with `content`, `stop_reason` and `id` (`msg_keep_…` keeps its id: see the teller). */
+const replyOf = (content: unknown[], stop_reason: string, id?: string) =>
+  ({ ...reply(''), ...(id ? { id } : {}), content, stop_reason }) as Message;
+
 /** A reply of the model with `text`. */
 const reply = (text: string): Message =>
   ({
@@ -778,5 +815,161 @@ describe("Claude Code's processes, kept between the turns of a key", () => {
     const { reused } = claudeAgent.processes;
     expect(await c.attempt('inv2', 'audit the books')).toMatch(/^Done: .*"transfers":1/);
     expect(claudeAgent.processes.reused - reused).toBe(1);
+  }, 60_000);
+});
+
+/** The teller, but the transfer's reply and the final reply share an API message id (as the old teller's could). */
+const sameIds = (request: Parameters<typeof teller>[0]) => ({ ...teller(request), id: 'msg_keep_same' });
+
+describe.each(REUSES)('the Claude Code agent, its turn ended in the transcript ($name)', ({ reuse }) => {
+  it('answers a turn whose final reply reached the transcript but not the turn (an id it already had)', async () => {
+    script.reply = sameIds;
+    const outcomes = await crashedAtTheEnd(bankChat(reuse), 'Please move 5 from 1 to 2');
+    expect(outcomes.filter((o) => !o.endsWith('answered: Done: moved 5 from account 1 to account 2'))).toEqual([]);
+  }, 600_000);
+
+  it('answers a turn whose final reply is empty, after a crash right after it', async () => {
+    script.reply = (request) => {
+      const last = request.messages.at(-1)!;
+      const results = Array.isArray(last.content) && last.content.some((b) => b.type === 'tool_result');
+      return results ? replyOf([{ type: 'text', text: '' }], 'end_turn') : teller(request);
+    };
+    const outcomes = await crashedAtTheEnd(bankChat(reuse), 'Please move 5 from 1 to 2');
+    expect(outcomes.filter((o) => o !== `${o.split(':')[0]}: answered: `)).toEqual([]);
+  }, 600_000);
+
+  it('fails a turn cut off at the output limit, after a crash right after it, as it would have', async () => {
+    script.reply = () => replyOf([{ type: 'text', text: 'cut' }], 'max_tokens');
+    const outcomes = await crashedAtTheEnd(bankChat(reuse), 'Hello');
+    expect(outcomes.filter((o) => !/failed: .*cut off/.test(o))).toEqual([]);
+  }, 600_000);
+
+  it('fails a turn the model declined, after a crash right after it, as it would have', async () => {
+    script.reply = () =>
+      ({
+        ...replyOf([{ type: 'text', text: 'I can' }], 'refusal'),
+        stop_details: { type: 'refusal', category: 'cyber', explanation: 'no' },
+      }) as Message;
+    const outcomes = await crashedAtTheEnd(bankChat(reuse), 'Hello');
+    expect(outcomes.filter((o) => !/failed: .*declined/.test(o))).toEqual([]);
+  }, 600_000);
+
+  it('resumes a turn whose transcript ends in an outage, then crashed in its transfer', async () => {
+    let down = true;
+    script.reply = (request) => {
+      if (down) throw new HttpError(500, 'api_error', 'boom');
+      return teller(request);
+    };
+    const c = conversation(
+      claudeAgent.chat({ reuse, tools: bank('ClaudeCodeAgent'), retry: { maxRetries: 0 } }),
+      'outage-crash',
+    );
+    const failed = await c.attempt('inv1', 'Please move 3 from 1 to 2').then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(failed).not.toBeInstanceOf(restate.TerminalError);
+    down = false;
+    await c.crash('inv1', 'Please move 3 from 1 to 2');
+    expect(await c.attempt('inv1', 'Please move 3 from 1 to 2')).toBe('Done: moved 3 from account 1 to account 2');
+    expect(c.ledger.transfers.size).toBe(1);
+  }, 120_000);
+});
+
+describe.each(REUSES)('the Claude Code agent, slow and late ($name)', ({ reuse }) => {
+  it('goes on with a resumed turn whose model takes longer than the idle check: it wrote its transcript', async () => {
+    const { idleMs } = claudeAgent.tuning;
+    claudeAgent.tuning.idleMs = 1_000;
+    try {
+      const c = conversation(bankChat(reuse), 'slow');
+      await c.crash('inv1', 'Please move 7 from 3 to 4');
+      // The resumed request is answered past the idle check.
+      script.reply = async (request) => {
+        await new Promise((resolve) => setTimeout(resolve, 3_000));
+        return teller(request);
+      };
+      expect(await c.attempt('inv1', 'Please move 7 from 3 to 4')).toBe('Done: moved 7 from account 3 to account 4');
+    } finally {
+      claudeAgent.tuning.idleMs = idleMs;
+    }
+  }, 60_000);
+
+  it('stores nothing of a turn Claude Code starts with a message it did not take, and keeps no such process', async () => {
+    const { steerPriority } = claudeAgent.tuning;
+    // Given so that Claude Code takes it only after the turn: as a message it did not queue in time would be.
+    claudeAgent.tuning.steerPriority = 'later';
+    try {
+      const c = conversation(bankChat(reuse), 'late-given');
+      const following = followingOf(c.state);
+      let given = false;
+      script.reply = (request) => {
+        const last = request.messages.at(-1)!;
+        if (
+          Array.isArray(last.content) &&
+          last.content.some((b) => b.type === 'text' && b.text === 'audit the books')
+        ) {
+          given = true;
+        }
+        const told = teller(request);
+        // The transfer's call: the message is steered to the turn while it runs.
+        if (told.content.some((b) => b.type === 'tool_use'))
+          following.steering = [{ id: 'late-1', text: 'audit the books' }];
+        return told;
+      };
+      const { started, dropped } = claudeAgent.processes;
+      expect(await c.attempt('inv1', 'Please move 5 from 1 to 2')).toBe('Done: moved 5 from account 1 to account 2');
+      // Not taken: the companion answers it as a turn of its own; Claude Code's own turn of it is stored nowhere.
+      expect(following.taken.flat()).toEqual([]);
+      const { messages } = await c.read(claudeAgent.messages(), {});
+      expect(messages.map((m) => m.role)).toEqual(['user', 'assistant', 'assistant']);
+      script.reply = teller;
+      // The next turn starts a process of its own, and the model sees nothing of that turn of Claude Code's.
+      expect(await c.attempt('inv2', 'Hello')).toMatch(/^Ask me/);
+      expect(claudeAgent.processes.started - started).toBe(2);
+      expect(userTexts()).toEqual(['Please move 5 from 1 to 2', 'Hello']);
+      // Claude Code may have begun that turn of its own before it was killed: never more than once, never stored.
+      expect(claudeAgent.processes.dropped - dropped).toBeLessThanOrEqual(1);
+      void given;
+    } finally {
+      claudeAgent.tuning.steerPriority = steerPriority;
+    }
+  }, 60_000);
+
+  it('drops the turn Claude Code begins with a message it did not take while the run still holds it', async () => {
+    const { steerPriority } = claudeAgent.tuning;
+    claudeAgent.tuning.steerPriority = 'later';
+    try {
+      const c = conversation(bankChat(reuse), 'late-begun');
+      const following = followingOf(c.state);
+      script.reply = (request) => {
+        const last = request.messages.at(-1)!;
+        const results = Array.isArray(last.content) && last.content.some((b) => b.type === 'tool_result');
+        const told = teller(request);
+        if (told.content.some((b) => b.type === 'tool_use'))
+          following.steering = [{ id: 'late-2', text: 'audit the books' }];
+        // The turn's final reply has nothing in it: the run waits for one, while Claude Code goes on with the message.
+        return results ? replyOf([], 'end_turn') : told;
+      };
+      const { dropped } = claudeAgent.processes;
+      expect(await c.attempt('inv1', 'Please move 5 from 1 to 2')).toBe('');
+      expect(claudeAgent.processes.dropped - dropped).toBe(1);
+      expect(following.taken.flat()).toEqual([]);
+      // Nothing of that turn is stored: the transcript and the conversation end with this turn.
+      const { messages } = await c.read(claudeAgent.messages(), {});
+      expect(messages.flatMap((m) => m.parts).some((p) => p.type === 'text' && p.text.includes('audit'))).toBe(false);
+      const lines = await c.read(async (ctx) => ctx.db.values(`SELECT entry FROM ${claudeAgent.ENTRIES}`));
+      expect(
+        lines.some(
+          ([entry]) =>
+            /"content":"audit the books"|"text":"audit the books"/.test(String(entry)) &&
+            !String(entry).includes('queue-operation'),
+        ),
+      ).toBe(false);
+      script.reply = teller;
+      expect(await c.attempt('inv2', 'Hello')).toMatch(/^Ask me/);
+      expect(userTexts().some((t) => t.includes('audit'))).toBe(false);
+    } finally {
+      claudeAgent.tuning.steerPriority = steerPriority;
+    }
   }, 60_000);
 });

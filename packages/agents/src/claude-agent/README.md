@@ -75,8 +75,15 @@ read (`messages`). The two never disagree after a crash. So:
   turn before Claude Code starts: a tool of yours is run again under the
   same call id, so its Restate calls are made once (their idempotency keys
   are the call's); a call of Claude Code's own tools gets Claude Code's own
-  "interrupted" note, and the model decides. Then Claude Code goes on with
-  the turn ("Continue from where you left off."), without a new prompt.
+  "interrupted" note, and the model decides. Then, if the transcript shows
+  the turn ended (its final reply, an empty one too; a reply cut off at the
+  output limit or declined; a request refused for good), the turn answers
+  or fails as it did, without starting Claude Code: Claude Code would find
+  nothing to go on with. Otherwise (the turn's messages end with the user's:
+  its prompt, its calls' results; or with an outage's error), Claude Code
+  goes on with the turn ("Continue from where you left off."), without a
+  new prompt. A resumed Claude Code that writes nothing to its transcript
+  for a minute (it writes as it sends its request) fails the attempt.
 - **A tool's error fails the attempt**, and Restate retries it, resuming
   the turn; a `restate.TerminalError` of a `tool()` is its answer to the
   model.
@@ -105,7 +112,11 @@ tool call returns (its `PostToolUse` hook, which Claude Code awaits): the
 call's result is copied and published, and each waiting message is streamed
 to Claude Code, which places it at its next step, after the round's
 results. Its transcript's line stores it in the turn, once. One sent while
-the model writes its final answer is answered as a turn of its own.
+the model writes its final answer is answered as a turn of its own. So is
+one Claude Code was given but did not place at a step (it queued it too
+late): Claude Code would answer it after the turn, as a turn of its own,
+so the process is killed as the turn ends (never kept), and anything of
+such a turn it began is stored nowhere (`processes.dropped` counts them).
 
 ## Permissions
 
@@ -164,7 +175,8 @@ as without reuse, and correctly, one start per move.
   Code would be frozen too.
 
 `claudeAgent.processes` counts the processes started for turns, the turns
-that took a kept one, and those that took a spare.
+that took a kept one, those that took a spare, and the turns Claude Code
+began on its own that were dropped.
 
 ## Not yet
 
