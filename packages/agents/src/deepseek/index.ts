@@ -50,6 +50,7 @@ import { TokenMeter } from '@deepseek-ai/dsh-token-meter';
 import { ToolResultPruner } from '@deepseek-ai/dsh-compaction-tool-result-pruner';
 import { BasicCompactionEngine, type BasicCompactionConfig } from '@deepseek-ai/dsh-compaction-basic';
 import { ApprovalService, type ApprovalOutcome } from '@deepseek-ai/dsh-user-approval';
+import * as nativeExecutor from '@deepseek-ai/dsh-tool-executor-native';
 import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
 import {
   defineTool,
@@ -147,6 +148,8 @@ async function boot(
   await harness.plugin(SessionStore);
   await harness.plugin(SystemPrompt, system ? { personaPrefix: system } : {});
   await harness.plugin(ToolRuntime, {});
+  // The executor that runs the model's tool calls as the model asks for them.
+  await harness.plugin(nativeExecutor);
   // Without it, the harness denies a call that asks for an approval. With it,
   // the model is also told that some calls may ask for one.
   if (approvals) await harness.plugin(ApprovalService, {});

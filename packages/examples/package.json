@@ -13,14 +13,14 @@
     "@earendil-works/pi-durable": "1.5.2",
     "@earendil-works/pi-schema": "1.5.2",
     "@langchain/core": "1.4.0",
-    "@langchain/openai": "1.7.0",
+    "@langchain/openai": "1.8.4",
     "@modelcontextprotocol/client": "2.0.0",
     "@modelcontextprotocol/server": "2.0.0",
     "@restatedev/agents": "workspace:*",
     "@restatedev/restate-sdk": "1.18.2",
     "@restatedev/restate-sdk-clients": "1.18.2",
     "@restatedev/sessions": "workspace:*",
-    "zod": "4.6.5"
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@types/node": "24.19.2",

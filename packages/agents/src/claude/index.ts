@@ -218,6 +218,9 @@ const runOf =
           ...(system === undefined ? {} : { system }),
           tools,
           messages: sendable(conversation.history()),
+          // The conversation is the session's: each request carries all of it, as stored, and no message thread
+          // of the API's holds a copy that a crash or a steered message would leave behind.
+          thread: false,
         },
         { signal: stopSignalOf(ctx) },
       );
