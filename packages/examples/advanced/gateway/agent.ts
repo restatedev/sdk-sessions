@@ -23,7 +23,7 @@
 // Environment: PORT, MODEL (see @restatedev/agents/pi) with its provider's
 // API key, and WORKSPACE.
 import * as restate from '@restatedev/sessions';
-import { Type } from '@earendil-works/pi-ai';
+import { obj, str, unsafe } from '@earendil-works/pi-schema';
 import { defineTool, type ToolRegistration } from '@earendil-works/pi-durable';
 import { z } from 'zod';
 import { sessionObject } from '@restatedev/agents';
@@ -81,7 +81,7 @@ async function gatewayTools(ctx: restate.SessionContext, tenant: string, user: s
     defineTool({
       name: tool.name,
       description: tool.description,
-      parameters: Type.Unsafe<Record<string, unknown>>(tool.inputSchema),
+      parameters: unsafe<Record<string, unknown>>(tool.inputSchema as Record<string, unknown>),
       replay: 'safe', // runs again after a crash, with the same call id
       execute: async (args, api) => {
         const { content, isError = false } = await ctx
@@ -128,11 +128,11 @@ export const prompt = async (ctx: restate.SessionContext, text: z.infer<typeof P
       name: 'investigate',
       description:
         "Hand an order to its case agent, which looks into it and remembers every report on it; answer with the case agent's answer. One call per order: they run at once.",
-      parameters: Type.Object({
-        order: Type.String({
+      parameters: obj({
+        order: str({
           description: 'The order id, such as "103"',
         }),
-        question: Type.String({
+        question: str({
           description: "What happened to the order, in the customer's words",
         }),
       }),

@@ -4,7 +4,7 @@ import * as restate from '@restatedev/sessions';
 import { CANCELLED, chatHandler, subagent, tool } from '@restatedev/agents';
 import { z } from 'zod';
 import * as pi from '@restatedev/agents/pi';
-import { Type } from '@earendil-works/pi-ai';
+import { num, obj } from '@earendil-works/pi-schema';
 import { defineTool } from '@earendil-works/pi-durable';
 import { describe, expect, it, vi } from 'vitest';
 import { callTools, fakeProvider, say, textOf, unavailable } from './fakes/pi.ts';
@@ -362,7 +362,7 @@ describe('pi.chat', () => {
     const boom = defineTool({
       name: 'boom',
       description: 'Looks a page up.',
-      parameters: Type.Object({}),
+      parameters: obj({}),
       execute: async () => {
         throw new NotFoundError('no such page');
       },
@@ -457,7 +457,7 @@ describe('pi, steered', () => {
     const transfer = defineTool({
       name: 'transfer',
       description: 'Move money, and end the run.',
-      parameters: Type.Object({ from: Type.Number(), to: Type.Number(), amount: Type.Number() }),
+      parameters: obj({ from: num(), to: num(), amount: num() }),
       execute: async () => {
         following.steering = [{ id: 'steer-1', text: 'audit the books' }];
         return { output: [{ type: 'text' as const, text: 'moved' }], control: { terminate: true } };

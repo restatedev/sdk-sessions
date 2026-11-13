@@ -11,7 +11,7 @@
 // and ABORT_PER_MILLE (see ../faults.ts).
 import type * as restate from '@restatedev/sessions';
 import { sessionObject } from '@restatedev/agents';
-import { Type } from '@earendil-works/pi-ai';
+import { int, obj } from '@earendil-works/pi-schema';
 import { defineTool, type ToolRegistration } from '@earendil-works/pi-durable';
 import { serveIfMain } from '@restatedev/sessions/test/faults';
 import { ledger } from '@restatedev/sessions/test/ledger';
@@ -22,10 +22,10 @@ const transfer = (ctx: restate.SessionContext) =>
   defineTool({
     name: 'transfer',
     description: 'Move an amount of money from one account to another.',
-    parameters: Type.Object({
-      from: Type.Integer({ description: 'Account to take the money from' }),
-      to: Type.Integer({ description: 'Account to put the money in' }),
-      amount: Type.Integer({ minimum: 1 }),
+    parameters: obj({
+      from: int({ description: 'Account to take the money from' }),
+      to: int({ description: 'Account to put the money in' }),
+      amount: int({ minimum: 1 }),
     }),
     replay: 'safe', // runs again after a crash, with the same call id
     execute: async ({ from, to, amount }, api) => {
@@ -46,7 +46,7 @@ const audit = (ctx: restate.SessionContext) =>
   defineTool({
     name: 'audit',
     description: 'Check the books: accounts, total money, transfers, and inconsistent accounts.',
-    parameters: Type.Object({}),
+    parameters: obj({}),
     replay: 'safe',
     execute: async (_params, api) => {
       const idempotencyKey = `${ctx.request.id}:${api.callId}`;

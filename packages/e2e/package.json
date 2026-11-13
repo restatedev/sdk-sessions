@@ -17,7 +17,7 @@
     "packaging": "node packaging.ts"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-ai": "1.5.2",
     "@restatedev/agents": "workspace:*",
     "@restatedev/restate-sdk": "1.18.2",
     "@restatedev/restate-sdk-clients": "1.18.2",

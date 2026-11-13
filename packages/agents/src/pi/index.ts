@@ -38,10 +38,15 @@
 // and a coding tool cut off by a crash is not run again (the model is told
 // it was interrupted).
 import * as restate from '@restatedev/sessions';
-import type { Context } from '@earendil-works/chord';
-import { awaitWithContext, BACKGROUND_CONTEXT, withCancel, withoutAbortSignal } from '@earendil-works/chord/context';
+import {
+  awaitWithContext,
+  BACKGROUND_CONTEXT,
+  type Context,
+  withCancel,
+  withoutAbortSignal,
+} from '@earendil-works/chord/context';
 import { mkdir } from 'node:fs/promises';
-import { type Message, type MutableModels, Type } from '@earendil-works/pi-ai';
+import type { Message, MutableModels } from '@earendil-works/pi-ai';
 import { createModels } from '@earendil-works/pi-ai/models';
 import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
 import {
@@ -300,7 +305,7 @@ const native = (t: AnyTool, ctx: restate.SessionContext): ToolRegistration =>
   defineTool({
     name: t.name,
     description: t.description,
-    parameters: Type.Unsafe<Record<string, unknown>>(jsonSchemaOf(t)),
+    parameters: jsonSchemaOf(t), // JSON Schema, as pi takes it
     replay: 'safe', // a crash runs it again, with the same call id
     // Aborted (the conversation's work, on a cancellation), it waits no more.
     execute: async (args, { callId }, task) => ({

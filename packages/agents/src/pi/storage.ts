@@ -33,6 +33,11 @@ class Executor implements SqliteExecutor {
   async run(sql: string, ...params: SqliteValue[]) {
     await this.db.execute(sql, params);
   }
+  /** `run`, resolving with the rows it changed: SQLite's `changes()`, read next on the same connection. */
+  async runCounted(sql: string, ...params: SqliteValue[]): Promise<number> {
+    await this.db.execute(sql, params);
+    return (await this.db.get<{ n: number }>('SELECT changes() AS n'))!.n;
+  }
   async get<T extends object>(sql: string, ...params: SqliteValue[]): Promise<T | undefined> {
     return this.db.get<T>(sql, params);
   }
@@ -66,6 +71,14 @@ export class SqlKvDatabase extends Executor implements SqliteDatabase {
     });
     if (this.afterCommit) await this.afterCommit();
     return result;
+  }
+
+  /**
+   * Outside a transaction, the statement and its count are one: another
+   * statement between them would be what `changes()` counted.
+   */
+  override runCounted(sql: string, ...params: SqliteValue[]): Promise<number> {
+    return this.#session.transaction((tx) => new Executor(tx).runCounted(sql, ...params));
   }
 
   /** The session is the caller's to end, after the calls made before. */

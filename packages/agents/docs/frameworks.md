@@ -534,7 +534,7 @@ and its ask never settles, so the harness stores no decision.
 
 ## pi
 
-`@earendil-works/pi-durable` 1.4.0, `pi-ai` 1.4.0, `chord` 1.4.0.
+`@earendil-works/pi-durable` 1.5.2, `pi-ai` 1.5.2, `chord` 1.5.2.
 [`src/pi/`](../src/pi).
 
 ### Today
