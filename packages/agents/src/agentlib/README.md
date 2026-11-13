@@ -54,6 +54,7 @@ npm install @restatedev/agents @restatedev/agentlib@0.1.0 @restatedev/restate-sd
 | `model`       | `openai/model-id` or `anthropic/model-id` (with `@ai-sdk/openai` or `@ai-sdk/anthropic`), or else `MODEL`, or else `openai/gpt-6-sol`; or a model of agentlib (`aiModel` of `@restatedev/agentlib/provider` for any provider of the AI SDK, `journaledModel` for one of your own)        |
 | `system`      | The instructions (the system prompt): a text, or agentlib's function of the run's context that gives one                                                                                                                                                                                 |
 | `tools`       | The tools of `@restatedev/agents` (`tool()`, `call`, `send`, `workflow`, `signal`, `subagent`), as every agent takes them, and agentlib's own (`asyncTool`, `serviceTool`, `agentTool`, `handoff`, MCP's...) by the name the model calls them: `[weather, { transfer: asyncTool(...) }]` |
+| `approval`    | The tools of `@restatedev/agents` that wait for a person's approval before they run: their names, or a function of a call ([Approvals and signals](#approvals-and-signals))                                                                                                              |
 | `history`     | How the conversation the model gets stays short from turn to turn: `{ maxMessages, maxChars, retainMessages, model }`, or `false` ([A long conversation](#a-long-conversation))                                                                                                          |
 | `output`      | A zod schema: the answer as data, which `chat` answers with                                                                                                                                                                                                                              |
 | `description` | What it is, for the UI, and for a parent's model: `subagent(agent)` tells it                                                                                                                                                                                                             |
@@ -116,12 +117,20 @@ come then), under the same ids.
 
 ## Approvals and signals
 
-A tool call that needs approval (agentlib's `needsApproval`, a
-`humanApprovalTool`, or a tool's `context.approve`) waits for the signal
-`approval`, as the DeepSeek Harness's and OpenCode's do: `pending` lists
-the wait, with the tool and its input, and `signal` approves it (`true`,
-`{"approved": true}`, or a text such as `approved`, `yes` or `ok`) or
-denies it (anything else), and the model is told it was denied.
+`approval` names the tools of `@restatedev/agents` whose calls wait for a
+person's approval before they run (or is a function of a call, `{ name,
+args }`, that says whether it does), as the DeepSeek Harness's option does:
+
+```ts
+agentlib.agent({ name: 'assistant', tools: [weather, transfer], approval: ['transfer'] });
+```
+
+Such a call waits for the signal `approval`, as do agentlib's own tools
+with `needsApproval`, its `humanApprovalTool`, and a tool's
+`context.approve`: `pending` lists the wait, with the tool and its input,
+and `signal` approves it (`true`, `{"approved": true}`, or a text such as
+`approved`, `yes` or `ok`) or denies it (anything else), and the model is
+told it was denied.
 
 ```sh
 curl localhost:8080/assistant/alice/pending

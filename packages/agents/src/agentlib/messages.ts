@@ -107,7 +107,10 @@ const BATCH = 25;
 
 type View = restate.ObjectSharedContext;
 
-/** Reads the entry `id`. At runtime, `get` returns a RestatePromise, although its type says Promise. */
+/**
+ * Reads the entry `id`. At runtime, `get` returns a RestatePromise, although
+ * its type says Promise.
+ */
 function readEntry(ctx: View, id: number) {
   return ctx.get<Entry>(entryKey(id)) as unknown as restate.RestatePromise<Entry | null>;
 }

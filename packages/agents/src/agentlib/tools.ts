@@ -12,7 +12,7 @@
 //   object has no session.
 import {
   RunFailedError,
-  ToolError as LibToolError,
+  tool as libTool,
   type JsonValue,
   type Tool as LibTool,
   type ToolContext as LibToolContext,
@@ -20,11 +20,11 @@ import {
 import type { SessionContext } from '@restatedev/sessions';
 import { call, run, send, serde, type Operation } from '@restatedev/restate-sdk-gen';
 import { sdk as restate } from '@restatedev/sessions/internal';
-import { z } from 'zod';
+import type { z } from 'zod';
 import type { Configure } from '../common.ts';
 import {
+  type Approval,
   isTool,
-  jsonSchemaOf,
   keyed,
   sentTo,
   specOf,
@@ -60,50 +60,68 @@ export type Tools =
   | ReadonlyArray<Tool | Record<string, AgentlibTool>>
   | Record<string, AgentlibTool | Tool>;
 
-/** Gives each tool its name, turning the tools of `@restatedev/agents` into agentlib's. */
-export function toolsOf(agent: string, tools: Tools): Record<string, AgentlibTool> {
+export type { Approval };
+
+/**
+ * Gives each tool its name, turning the tools of `@restatedev/agents` into
+ * agentlib's. Those that `approval` names wait for a person's approval.
+ */
+export function toolsOf(
+  agent: string,
+  tools: Tools,
+  approval?: Approval,
+): Record<string, AgentlibTool> {
   const named: Record<string, AgentlibTool> = {};
+  const ours = new Set<string>();
   const add = (name: string, tool: AgentlibTool | Tool) => {
     if (name in named) throw new Error(`${agent}: two tools are named ${name}`);
-    named[name] = isTool(tool) ? fromTool(tool) : tool;
+    if (isTool(tool)) {
+      named[name] = fromTool(tool, name, approval);
+      ours.add(name);
+    } else {
+      named[name] = tool;
+    }
   };
   const addRecord = (record: Record<string, AgentlibTool | Tool>) => {
     for (const [name, tool] of Object.entries(record)) add(name, tool);
   };
 
-  if (!Array.isArray(tools)) {
+  if (Array.isArray(tools)) {
+    for (const tool of tools as ReadonlyArray<Tool | Record<string, AgentlibTool>>) {
+      if (isTool(tool)) add(tool.name, tool);
+      else addRecord(tool);
+    }
+  } else {
     addRecord(tools as Record<string, AgentlibTool | Tool>);
-    return named;
   }
-  for (const tool of tools as ReadonlyArray<Tool | Record<string, AgentlibTool>>) {
-    if (isTool(tool)) add(tool.name, tool);
-    else addRecord(tool);
+
+  for (const name of Array.isArray(approval) ? approval : []) {
+    if (ours.has(name)) continue;
+    throw new Error(
+      `${agent}: approval names ${name}, which is none of its tools of @restatedev/agents ` +
+        "(agentlib's own tools take needsApproval)",
+    );
   }
   return named;
 }
 
 /**
- * Turns `tool`, one of `@restatedev/agents`, into agentlib's. As in every
- * agent, arguments that do not fit its input are the model's to fix, and a
- * terminal error is the tool's answer, which the model sees.
+ * Turns `tool`, one of `@restatedev/agents`, into agentlib's, named `name`.
+ * As in every agent, arguments that do not fit its input are the model's to
+ * fix, and a terminal error is the tool's answer, which the model sees.
  */
-export function fromTool(tool: Tool): AgentlibTool {
+export function fromTool(tool: Tool, name = tool.name, approval?: Approval): AgentlibTool {
   const spec = specOf(tool);
   if (!spec) {
     throw new Error(`${tool.name} is no tool of @restatedev/agents (tool(), call, send...)`);
   }
 
   function* execute(
-    args: JsonValue,
+    input: Record<string, unknown>,
     { context, callId }: LibToolContext<AgentlibContext>,
   ): Operation<JsonValue> {
-    const parsed = tool.input.safeParse(args);
-    if (!parsed.success) {
-      const problem = `the arguments do not fit the tool's input: ${z.prettifyError(parsed.error)}`;
-      throw new LibToolError(problem, 'input');
-    }
     try {
-      return yield* perform(tool, spec, parsed.data, context.ctx, callId);
+      return yield* perform(tool, spec, input, context.ctx, callId);
     } catch (error) {
       // A tool() that reached for what an agentlib agent lacks is a programming
       // error: it fails the turn, rather than reach the model as an answer.
@@ -114,7 +132,24 @@ export function fromTool(tool: Tool): AgentlibTool {
     }
   }
 
-  return { description: tool.description, inputSchema: jsonSchemaOf(tool), execute };
+  // agentlib's own tool(): it checks the input, and asks for the approval.
+  return libTool<z.ZodObject, AgentlibContext>({
+    description: tool.description,
+    input: tool.input,
+    needsApproval: needsApprovalOf(name, approval),
+    execute,
+  });
+}
+
+/** Whether the tool `name` needs approval, as agentlib's `needsApproval` takes it. */
+function needsApprovalOf(name: string, approval: Approval | undefined) {
+  if (approval === undefined) return false;
+  if (typeof approval !== 'function') return approval.includes(name);
+  const asks = approval;
+  // oxlint-disable-next-line require-yield -- deciding needs no wait
+  return function* (args: unknown): Operation<boolean> {
+    return asks({ name, args });
+  };
 }
 
 /** Does what `tool` does, with its checked `input`, as tool call `callId`. */

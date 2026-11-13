@@ -49,7 +49,7 @@ server, are in its `test/` directory (`pnpm test` at the root runs them all).
   a message steered to its turn, `messages` by page, cursor and summary,
   `sync`, a denied approval, a stop, a refusal (424), `clear`, the tools of
   `@restatedev/agents` (`call`, `send`, `workflow` on services of the classic
-  SDK, a `tool()`, one reaching for `ctx.db`), sub-agents both ways (of a pi
+  SDK, a `tool()`, one that `approval` names, one reaching for `ctx.db`), sub-agents both ways (of a pi
   agent and to one, stopped with the turn), and the service process killed
   mid-turn, after which the replayed turn asks the model, and runs a `tool()`,
   no second time (`pnpm --filter e2e agentlib`).

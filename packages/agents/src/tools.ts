@@ -77,6 +77,13 @@ const withSpec = (t: Tool, spec: ToolSpec): Tool => Object.defineProperty(t, SPE
 /** What tool `t` does: see {@link ToolSpec}. */
 export const specOf = (t: Tool): ToolSpec => (t as Tool & { [SPEC]: ToolSpec })[SPEC];
 
+/**
+ * Which tool calls wait for a person's approval before they run: the names
+ * of their tools, or a function of a call that says whether it does. The
+ * DeepSeek and agentlib agents take it as their `approval`.
+ */
+export type Approval = readonly string[] | ((call: { name: string; args: unknown }) => boolean);
+
 /** The JSON schema of `t`'s input, which a framework offers the model. */
 export const jsonSchemaOf = (t: Tool) => z.toJSONSchema(t.input) as Record<string, unknown>;
 

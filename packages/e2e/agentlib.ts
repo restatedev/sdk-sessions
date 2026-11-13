@@ -293,7 +293,15 @@ const clerk = agentlib.agent({
       input: z.object({}),
       run: async (_input, { ctx }) => ctx.db.execute('SELECT 1'),
     }),
+    tool({
+      name: 'pay',
+      description: 'Pay',
+      input: z.object({ euros: z.number() }),
+      run: ({ euros }) => `paid ${euros}`,
+    }),
   ],
+  // A tool of @restatedev/agents that waits for a person's approval.
+  approval: ['pay'],
 });
 
 // A conversation kept short: past 4 messages, the earliest are summarized, and the latest 2 stay.
@@ -650,8 +658,21 @@ if (process.argv[2] === 'serve') {
     );
     assert.match(
       (await post('clerk/rita/chat', 'Use orders_status {"nope":1}')) as string,
-      /^Done with error: the arguments do not fit the tool's input/,
+      /^Done with error: Invalid tool input/,
     );
+    // A tool() that `approval` names: approved, it runs; denied, it does not.
+    for (const [value, answer] of [
+      ['yes', 'Done with paid 5'],
+      ['no', 'Done with denied'],
+    ]) {
+      const paying = (await post('clerk/rita/chat/send', 'Use pay {"euros":5}')) as {
+        invocationId: string;
+      };
+      const asked = await waiting('clerk/rita');
+      assert.deepEqual(asked.input, { tool: 'pay', input: { euros: 5 } });
+      await post('clerk/rita/signal', { id: asked.id, value });
+      assert.equal(await (await attach(paying.invocationId)).json(), answer);
+    }
     const misuse = await request('clerk/rita/chat', 'Use remember {}');
     assert.equal(misuse.status, 500, await misuse.text());
     const [role, note] = (await conversation('clerk/rita')).at(-1)!;

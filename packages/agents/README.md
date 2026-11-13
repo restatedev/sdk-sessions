@@ -524,7 +524,9 @@ A DeepSeek agent's tool calls that need a person's approval (its `approval`
 option) wait the same way, for the signal `approval`: see
 [its README](src/deepseek/README.md#approvals). So do an OpenCode agent's
 with `approval: true`, those its permission rules ask about: see
-[its README](src/opencode/README.md#permissions).
+[its README](src/opencode/README.md#permissions). So do an agentlib agent's
+that its `approval` option names: see
+[its README](src/agentlib/README.md#approvals-and-signals).
 
 A wait ends with its agent's invocation: a cancelled or killed one leaves `pending`.
 The waits are kept by the agent's companion, `<agent>.prebuilt.restate`
