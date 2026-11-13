@@ -143,10 +143,10 @@ a session already ([its README](src/opencode/README.md)).
 `chat` is journaled, and a crash replays it, so that a model call or a tool
 call that finished is not made again; its conversation is in the object's
 key/value state. It has every agent's handlers and views, and their
-companion, but takes agentlib's own tools (`asyncTool`, `serviceTool`,
-`agentTool`, MCP's...), not those of `@restatedev/agents` below, which are for
-session objects; and neither `schema`, `window` nor `budget`, which are
-the SQL database's ([its README](src/agentlib/README.md)).
+companion, and takes the tools of `@restatedev/agents` below beside
+agentlib's own (`asyncTool`, `serviceTool`, `agentTool`, MCP's...), though a
+`tool()` of its own has no `ctx.db`; and neither `schema`, `window` nor
+`budget`, which are the SQL database's ([its README](src/agentlib/README.md)).
 
 Every agent takes these too, beside its framework's options:
 

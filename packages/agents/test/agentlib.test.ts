@@ -3,10 +3,14 @@
 // Anthropic takes them, a provider's refusals, and what approves a call.
 // The agent itself runs against a real server: e2e/agentlib.ts.
 import type { Message } from '@restatedev/agentlib';
-import { sdk as restate } from '@restatedev/sessions/internal';
+import { sdk, sdk as restate } from '@restatedev/sessions/internal';
 import { describe, expect, it } from 'vitest';
 import * as agentlib from '../src/agentlib/index.ts';
 import { approves, refused, render, withoutBounds } from '../src/agentlib/parts.ts';
+import { toolsOf } from '../src/agentlib/tools.ts';
+import { call, signal, subagent, tool } from '../src/index.ts';
+import { asyncTool } from '@restatedev/agentlib';
+import { z } from 'zod';
 
 const steering = (message: string) => JSON.stringify({ source: 'agent-runtime', type: 'steering', message });
 
@@ -129,20 +133,44 @@ describe('approves', () => {
   });
 });
 
-describe('subagent', () => {
-  it('hands a named task to an agent, described by it, through its chat', () => {
-    const planner = agentlib.agent({ name: 'planner', description: 'Plans work', model: 'openai/gpt-6-sol' });
-    const tool = agentlib.subagent(planner);
-    expect(tool.description).toBe(
+describe('toolsOf', () => {
+  const planner = agentlib.agent({ name: 'planner', description: 'Plans work', model: 'openai/gpt-6-sol' });
+  const orders = sdk.service({
+    name: 'orders',
+    handlers: { status: async (_ctx: sdk.Context, _input: unknown) => 'ok' },
+  });
+  const weather = tool({
+    name: 'get_weather',
+    description: 'The weather in a city.',
+    input: z.object({ city: z.string() }),
+    run: ({ city }) => `Sunny in ${city}`,
+  });
+  const own = { echo: asyncTool({ description: 'Echo', input: z.object({}), execute: async () => 'echo' }) };
+
+  it("names Restate's tools as every agent does, beside agentlib's own, in a list or by name", () => {
+    const tools = toolsOf('a', [
+      weather,
+      call(orders, 'status', { description: 'An order', input: z.object({ order: z.string() }) }),
+      signal('approval', { description: 'Wait for a manager' }),
+      subagent(planner),
+      own,
+    ]);
+    expect(Object.keys(tools)).toEqual(['get_weather', 'orders_status', 'wait_for_approval', 'planner', 'echo']);
+    expect(tools.echo).toBe(own.echo);
+    expect(tools.planner!.description).toBe(
       'Hand a task to the planner agent (Plans work), and get its answer. ' +
         'Tasks of different names run at once; the same name continues the same task.',
     );
-    expect(tool.inputSchema).toMatchObject({
+    expect(tools.orders_status!.inputSchema).toMatchObject({
       type: 'object',
-      properties: { name: { type: 'string', pattern: '^[a-z0-9-]+$' }, task: { type: 'string' } },
-      required: ['name', 'task'],
+      properties: { order: { type: 'string' } },
+      required: ['order'],
     });
-    expect(agentlib.subagent(planner, { description: 'Mine' }).description).toContain('(Mine)');
+    expect(Object.keys(toolsOf('a', { weather, ...own }))).toEqual(['weather', 'echo']);
+  });
+
+  it('refuses two tools of one name', () => {
+    expect(() => toolsOf('a', [weather, { get_weather: own.echo }])).toThrow('a: two tools are named get_weather');
   });
 });
 

@@ -20,26 +20,12 @@ import {
   type ProgressEvent,
   type RunResult,
   type SteeringUpdate,
-  type Tool,
-  type ToolContext,
   ConversationConflictError,
   GuardrailError,
-  handlerTool,
-  tool,
 } from '@restatedev/agentlib';
-import {
-  call as callHandler,
-  channel,
-  execute,
-  internal,
-  serde,
-  type Channel,
-  type Future,
-  type Operation,
-} from '@restatedev/restate-sdk-gen';
+import { channel, execute, internal, type Channel, type Future, type Operation } from '@restatedev/restate-sdk-gen';
 import type { aiModel as aiModelType } from '@restatedev/agentlib/provider';
 import { sdk as restate } from '@restatedev/sessions/internal';
-import { z } from 'zod';
 import {
   CANCELLED,
   CHECK_MODEL,
@@ -66,6 +52,9 @@ import {
   withCompanion,
 } from '../companion.ts';
 import type { Status, Stopped, Synced, SyncRequest } from '../object.ts';
+import { type AgentlibContext, type AgentlibTool, type Tools, toolsOf } from './tools.ts';
+
+export type { AgentlibContext, AgentlibTool, Tools };
 import {
   approves,
   type Entry,
@@ -87,20 +76,6 @@ const read = <T>(ctx: restate.ObjectContext, key: string) =>
 export const DEFAULT_MODEL = 'openai/gpt-6-sol';
 
 /**
- * What a run of the agent gets as its context (agentlib's `RunContext.context`,
- * a tool's `context.context`): the invocation's context of the classic SDK,
- * whose calls an operation awaits with `internal.adopt` of
- * @restatedev/restate-sdk-gen.
- */
-export interface AgentlibContext {
-  readonly ctx: restate.ObjectContext;
-}
-
-/** A tool of agentlib (`tool`, `asyncTool`, `serviceTool`, `agentTool`, MCP's...), or one of {@link signal}. */
-// oxlint-disable-next-line typescript/no-explicit-any -- a tool of any context: the agent's is `AgentlibContext`
-export type AgentlibTool = Tool<any>;
-
-/**
  * The options of an agent, beside agentlib's own (`maxSteps`, `compaction`,
  * `contextWindow`, `toolResults`, `skills`, `beforeTool`, `afterRun`...),
  * which go to its `agent()` as they are.
@@ -117,8 +92,13 @@ export interface Options<O = string> extends Omit<
   model?: string | Model;
   /** The instructions (the system prompt): a text, or agentlib's function of the run's context that gives one. */
   system?: LibOptions<AgentlibContext, O>['instructions'];
-  /** The tools, by the name the model calls them. */
-  tools?: Record<string, AgentlibTool>;
+  /**
+   * The tools: those of `@restatedev/agents` (`tool()`, `call`, `send`,
+   * `workflow`, `signal`, `subagent`), as every agent takes them, and
+   * agentlib's own, by the name the model calls them: `[weather, call(...),
+   * { transfer: asyncTool(...) }]`, or `{ transfer: asyncTool(...) }`.
+   */
+  tools?: Tools;
 }
 
 /** An agent's name, and what it is beside its options. */
@@ -207,79 +187,6 @@ const companionAt = (ctx: restate.ObjectContext | restate.ObjectSharedContext) =
 /** A wait for the signal `name` (with `input`, as `pending` lists it), as `what` of the turn waits (a call's id): its value. */
 function* waitFor(ctx: restate.ObjectContext, what: string, name: string, input?: unknown): Operation<unknown> {
   return yield* adopt(companionAt(ctx).wait({ id: `${ctx.request().id}:${what}`, name, input }));
-}
-
-/**
- * A tool that waits for the signal `name` (a person's approval, another
- * system's result) without holding a process, and answers with its value:
- * `pending` lists the wait, and `signal` resolves it, as with every agent's
- * `signal()` tool. With `input`, the model says what it waits for.
- */
-export const signal = (name: string, { description, input }: { description: string; input?: z.ZodType }) =>
-  tool<z.ZodType, AgentlibContext>({
-    description,
-    input: input ?? z.object({}),
-    *execute(value, { context, callId }: ToolContext<AgentlibContext>) {
-      return (yield* waitFor(context.ctx, callId, name, value)) as JsonValue;
-    },
-  });
-
-/** An object with a `chat` handler; another object needs subagent's `handler`. */
-type WithChat<M> = M extends { chat: unknown }
-  ? unknown
-  : { 'an agent with a chat handler, or a handler option': never };
-
-/**
- * A tool that hands a task to `target` (an agent of any framework, or any
- * virtual object, through `handler`): to its key `<this key>.<task name>`,
- * through its `chat`, and answers with its answer. Tasks of different names
- * run at once; the same name continues the same task, in the sub-agent's
- * own conversation. The model calls it by its key in `tools`:
- *
- *   tools: { planner: agentlib.subagent(planner) }
- *
- * The call is journaled: a crash replays its answer rather than hand the
- * task again. Stopping the turn stops the sub-agent's turn (Restate cancels
- * the call); a sub-agent that fails for good (refused, say) is the tool's
- * error, which the model sees.
- */
-export function subagent<M>(
-  target: restate.VirtualObjectDefinition<string, M> & WithChat<M>,
-  options?: { description?: string },
-): AgentlibTool;
-/** A sub-agent through another of its handlers (which takes the task as text, or a JSON string). */
-export function subagent<M>(
-  target: restate.VirtualObjectDefinition<string, M>,
-  options: { description?: string; handler: keyof M & string },
-): AgentlibTool;
-export function subagent<M>(
-  target: restate.VirtualObjectDefinition<string, M>,
-  {
-    description = (target as { description?: string }).description,
-    handler,
-  }: { description?: string; handler?: keyof M & string } = {},
-): AgentlibTool {
-  return handlerTool<z.ZodType<{ name: string; task: string }>, AgentlibContext>({
-    description:
-      `Hand a task to the ${target.name} agent${description ? ` (${description})` : ''}, and get its answer. ` +
-      'Tasks of different names run at once; the same name continues the same task.',
-    input: z.object({
-      name: z
-        .string()
-        .regex(/^[a-z0-9-]+$/)
-        .describe('A short name for the task, such as "fizzbuzz"'),
-      task: z.string().describe('The task in full: the agent sees nothing else'),
-    }),
-    call: ({ name, task }, { context }) =>
-      callHandler<string, JsonValue>({
-        service: target.name,
-        method: handler ?? 'chat',
-        key: `${context.ctx.key}.${name}`,
-        parameter: task,
-        inputSerde: serde.json,
-        outputSerde: serde.json,
-      }),
-  });
 }
 
 /** What the agent keeps in its state, beside its messages: under `meta`. */
@@ -694,6 +601,8 @@ export function agent<P extends string, O = string>({
     );
   }
   const loadModel = modelOf(name, model);
+  // Each tool by its name, Restate's made agentlib's: two of one name fail here.
+  const named = tools === undefined ? undefined : toolsOf(name, tools);
   let made: Promise<LibAgent<AgentlibContext, O>> | undefined;
   const make = async () =>
     agentlibAgent<AgentlibContext, O>({
@@ -701,7 +610,7 @@ export function agent<P extends string, O = string>({
       name,
       model: refusing(await loadModel()),
       ...(system === undefined ? {} : { instructions: system }),
-      ...(tools === undefined ? {} : { tools }),
+      ...(tools === undefined ? {} : { tools: named }),
       *onHumanApproval(request, { context }) {
         // A call may ask more than once: agentlib names each ask (`<agent>:approval:<call>:<n>`).
         const { call, question, signalName } = request;

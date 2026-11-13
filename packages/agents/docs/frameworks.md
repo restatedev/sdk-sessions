@@ -876,12 +876,18 @@ in a session object: it is the one integration on the classic Restate SDK.
   `steering` event says which it took (`data.steer`): the turn keeps their
   ids in `taken`, which their own `steered` turn checks, and tells the
   companion (`taken`).
-- **Sub-agents**: `agentlib.subagent(agent)` is a `handlerTool` whose call
-  is the generator SDK's `call` of the agent's `chat`, by name (agentlib's
-  `serviceTool` takes the generator SDK's descriptors, which a definition
-  of the classic SDK is not), at `<key>.<task name>`. Restate journals it,
-  and cancels it with the turn: no call records, unlike `subagent()` in a
-  session object.
+- **Tools**: the tools of `@restatedev/agents` carry what they do
+  (`specOf`: a `call`'s typed target and options, a `tool()`'s `run`), and
+  `toolsOf` makes each agentlib's own (`src/agentlib/tools.ts`), its calls
+  the generator SDK's on the invocation's classic context: `call`,
+  `subagent` and `workflow` (start and attach by invocation id, as
+  `runWorkflow`) are journaled calls, which Restate cancels with the turn;
+  `send` a journaled send; `signal` the companion's `wait`; a `tool()`'s
+  `run` a journaled `run`, whose `ctx` has `key` and `request` alone (a
+  `ctx.db` or `ctx.rpc` fails the turn, with agentlib's `RunFailedError`).
+  No call records and no idempotency keys: the journal makes each call
+  once. agentlib's `serviceTool` takes the generator SDK's descriptors,
+  which a definition of the classic SDK is not: `call` is the typed way.
 - **Approvals**: agentlib's `onHumanApproval`, which waits for the signal
   `approval` through the companion's `wait`, by agentlib's own name for the
   ask (`<agent>:approval:<call>:<n>`).
@@ -901,6 +907,7 @@ in a session object: it is the one integration on the classic Restate SDK.
   tools with bounded numbers, so its tools' schemas go without them.
 - **Tests**: [`e2e/agentlib.ts`](../../e2e/agentlib.ts), against a real
   server: a signal's wait, steering, `messages` by page, cursor and
-  summary, `sync`, a denied approval, a stop, a refusal, `clear`, sub-agents
-  both ways (a pi agent's, and of a pi agent: stopped with the turn), and
+  summary, `sync`, a denied approval, a stop, a refusal, `clear`, Restate's
+  tools (`call`, `send`, `workflow` on services of the classic SDK, `tool()`,
+  a `tool()` reaching for `ctx.db`), sub-agents both ways (a pi agent's, and of a pi agent: stopped with the turn), and
   the service killed mid-turn (the model asked once per step).

@@ -19,24 +19,23 @@ any other.
 ## Use
 
 ```ts
-import { asyncTool } from '@restatedev/agentlib';
-import { serve } from '@restatedev/agents';
+import { serve, tool } from '@restatedev/agents';
 import * as agentlib from '@restatedev/agents/agentlib';
 import { z } from 'zod';
 
-const assistant = agentlib.agent({
-  name: 'assistant',
-  system: 'Answer briefly.',
-  tools: {
-    get_weather: asyncTool({
-      description: 'The current weather in a city.',
-      input: z.object({ city: z.string() }),
-      execute: async ({ city }) => `Sunny and 21°C in ${city}`,
-    }),
-  },
+const weather = tool({
+  name: 'get_weather',
+  description: 'The current weather in a city.',
+  input: z.object({ city: z.string() }),
+  run: ({ city }) => `Sunny and 21°C in ${city}`,
 });
+
+const assistant = agentlib.agent({ name: 'assistant', system: 'Answer briefly.', tools: [weather] });
 await serve(assistant);
 ```
+
+The same `weather` works in an agent of any framework here; agentlib's own
+tools work too, beside it.
 
 See [`examples/basic/agentlib.ts`](../../../examples/basic/agentlib.ts),
 with a transfer that waits for an approval.
@@ -46,69 +45,53 @@ npm install @restatedev/agents @restatedev/agentlib@0.1.0 @restatedev/restate-sd
   @restatedev/restate-sdk@1.18.2 @ai-sdk/openai   # or @ai-sdk/anthropic
 ```
 
-| Option        | What                                                                                                                                                                                                                                                                              |
-| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`       | `openai/model-id` or `anthropic/model-id` (with `@ai-sdk/openai` or `@ai-sdk/anthropic`), or else `MODEL`, or else `openai/gpt-6-sol`; or a model of agentlib (`aiModel` of `@restatedev/agentlib/provider` for any provider of the AI SDK, `journaledModel` for one of your own) |
-| `system`      | The instructions (the system prompt): a text, or agentlib's function of the run's context that gives one                                                                                                                                                                          |
-| `tools`       | agentlib's tools, by the name the model calls them: `tool`, `asyncTool`, `serviceTool`, `handlerTool`, `agentTool`, `handoff`, MCP's (`mcpTools`)... and `agentlib.signal`'s                                                                                                      |
-| `output`      | A zod schema: the answer as data, which `chat` answers with                                                                                                                                                                                                                       |
-| `description` | What it is, for the UI, and for a parent's model: `subagent(agent)` tells it                                                                                                                                                                                                      |
-| `background`  | It works unwatched (a subagent, say): its turn tells its companion at its end only, and takes no steered messages                                                                                                                                                                 |
-| `options`     | Options of the object, beside the ones set here (its `retryPolicy`, as every agent's; its state preloads only `meta` and `taken`)                                                                                                                                                 |
+| Option        | What                                                                                                                                                                                                                                                                                     |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`       | `openai/model-id` or `anthropic/model-id` (with `@ai-sdk/openai` or `@ai-sdk/anthropic`), or else `MODEL`, or else `openai/gpt-6-sol`; or a model of agentlib (`aiModel` of `@restatedev/agentlib/provider` for any provider of the AI SDK, `journaledModel` for one of your own)        |
+| `system`      | The instructions (the system prompt): a text, or agentlib's function of the run's context that gives one                                                                                                                                                                                 |
+| `tools`       | The tools of `@restatedev/agents` (`tool()`, `call`, `send`, `workflow`, `signal`, `subagent`), as every agent takes them, and agentlib's own (`asyncTool`, `serviceTool`, `agentTool`, `handoff`, MCP's...) by the name the model calls them: `[weather, { transfer: asyncTool(...) }]` |
+| `output`      | A zod schema: the answer as data, which `chat` answers with                                                                                                                                                                                                                              |
+| `description` | What it is, for the UI, and for a parent's model: `subagent(agent)` tells it                                                                                                                                                                                                             |
+| `background`  | It works unwatched (a subagent, say): its turn tells its companion at its end only, and takes no steered messages                                                                                                                                                                        |
+| `options`     | Options of the object, beside the ones set here (its `retryPolicy`, as every agent's; its state preloads only `meta` and `taken`)                                                                                                                                                        |
 
 Every other option of agentlib's `agent()` goes to it as it is:
 `maxSteps`, `maxToolCalls`, `maxOutputTokens`, `compaction`,
 `contextWindow`, `toolResults`, `skills`, `finalize`, and the guardrails
 `beforeRun`, `beforeStep`, `beforeTool`, `afterTool` and `afterRun`.
 
-The tools of `@restatedev/agents` (`tool()`, `call`, `send`, `workflow`,
-`signal`, `subagent`) are for session objects, whose context they take: an
-agentlib agent takes agentlib's own, which do the same in the generator SDK
-(`serviceTool` and `handlerTool` call Restate's handlers, `agentTool`
-another agent of agentlib, in the same invocation). This subpath adds two:
+## Tools
 
-- `agentlib.signal(name, { description, input })` waits for a signal as
-  every agent's `signal()` tool does, which `pending` lists and `signal`
-  resolves.
-- `agentlib.subagent(agent, { description })` hands a task to an agent of
-  any framework (a pi agent, another agentlib agent...), at its key
-  `<this key>.<task name>`, as every agent's `subagent()` does: the same
-  name continues the task. The call is journaled (a crash replays its
-  answer), stopping the turn stops the sub-agent's turn (Restate cancels
-  the call), and a sub-agent that fails for good is the tool's error, which
-  the model sees. The model calls it by its key in `tools`:
+An agentlib agent takes the tools of `@restatedev/agents`, as every agent
+does, and makes each agentlib's own, its calls the generator SDK's on the
+classic SDK's context of its invocation:
 
-  ```ts
-  agentlib.agent({ name: 'lead', tools: { planner: agentlib.subagent(planner) } });
-  ```
+| Tool                                      | In an agentlib agent                                                                                                                                                                              |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `call(target, handler, …)`                | A call of the handler, by its typed definition (a session object's, an agent's, or any of the classic SDK's): journaled, so a crash replays its answer; stopping the turn cancels it              |
+| `send(target, handler, …)`                | A send, journaled: made once                                                                                                                                                                      |
+| `workflow(target, …)`                     | A run of the workflow, to its end: a workflow of its own per tool call, unless `key` gives its id; stopping the turn cancels it                                                                   |
+| `signal(name, …)`                         | A wait for the signal, which `pending` lists and `signal` resolves                                                                                                                                |
+| `subagent(agent)`                         | A task for an agent of any framework (a pi agent, another agentlib agent...), at its key `<this key>.<task name>`: the same name continues the task; stopping the turn stops the sub-agent's turn |
+| `tool({ name, description, input, run })` | `run`, as a journaled step (agentlib's `asyncTool` is one too): a crash replays its result, and an error that is no terminal error fails the attempt, which Restate retries                       |
+
+As in every agent, arguments that do not fit a tool's `input` are the
+model's to fix, and a terminal error (the tool's own, or a handler's it
+calls) is the tool's answer, which the model sees. A `tool()`'s `run` gets
+`ctx.key` and `ctx.request`, its `callId` and `idempotencyKey`, but no
+`ctx.db` (an agentlib agent has no SQL database) and no `ctx.rpc` or
+`ctx.send`: its calls are Restate's tools above, or agentlib's own. A
+`tool()` that reaches for them fails the turn, saying so. A `key` given
+as a function gets that context too, as a journaled step.
 
 An agent of another framework hands an agentlib agent a task with
 `subagent(assistant)`, as any agent; `deliver` and `webhook` send it
 messages as they send any agent's.
 
-agentlib's `serviceTool`, and the generator SDK's typed `client`, take the
-generator SDK's own descriptors (`iface`, `service`, `object`): a session
-object or an agent of `@restatedev/agents`, a definition of the classic SDK,
-is not one. A tool of your own calls one with the generator SDK's `call`,
-by its name, as `agentlib.subagent` does:
-
-```ts
-import { handlerTool, type JsonValue } from '@restatedev/agentlib';
-import { call, serde } from '@restatedev/restate-sdk-gen';
-
-const status = handlerTool({
-  description: 'The status of an order.',
-  input: z.object({ order: z.string() }),
-  call: ({ order }) =>
-    call<{ order: string }, JsonValue>({
-      service: 'orders',
-      method: 'status',
-      parameter: { order },
-      inputSerde: serde.json,
-      outputSerde: serde.json,
-    }),
-});
-```
+agentlib's own `serviceTool`, and the generator SDK's typed `client`, take
+the generator SDK's descriptors (`iface`, `service`, `object`), which a
+definition of the classic SDK (a session object, an agent) is not: for
+those, `call` and `subagent` above.
 
 ## Through crashes
 
@@ -194,7 +177,7 @@ conversation it loaded.
   and tables of your own): there is no SQL database. A long conversation
   is agentlib's to keep within the model's window: `compaction` and
   `contextWindow`.
-- **`tools` of `@restatedev/agents`**: see above.
+- **`ctx.db`, `ctx.rpc` and `ctx.send` in a `tool()`**: see [Tools](#tools).
 - **A killed turn** (out of retries, or killed by an operator) is closed by
   the next message, `Ended: …`, not by the companion as it finds it gone.
 

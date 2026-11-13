@@ -11,9 +11,12 @@
 // next turn's model sees ended (with a message steered to it, if it took
 // one); a provider's refusal (424), and a model's
 // failure that is none (500); a sub-agent of a pi agent, and a pi agent (and
-// another agentlib agent) as a sub-agent of one, stopped with its turn; `clear`, whose
+// another agentlib agent) as a sub-agent of one, stopped with its turn; the
+// tools of @restatedev/agents (a call, a send and a workflow of the classic SDK's,
+// by their typed definitions, a tool(), one reaching for ctx.db); `clear`, whose
 // ids go on; and a crash of the service process mid-turn, after which the
-// turn is replayed: the model is asked no second time for a step it answered.
+// turn is replayed: the model is asked no second time for a step it answered,
+// nor a tool() run again.
 //
 //   pnpm --filter e2e agentlib   (RESTATE_SERVER=/path/to/restate-server to use another)
 import assert from 'node:assert/strict';
@@ -22,15 +25,19 @@ import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as restate from '@restatedev/restate-sdk';
-import { asyncTool, journaledModel, tool, type Message, type ModelResponse } from '@restatedev/agentlib';
+import { asyncTool, journaledModel, tool as libTool, type Message, type ModelResponse } from '@restatedev/agentlib';
 import { sleep as genSleep } from '@restatedev/restate-sdk-gen';
 import { createModels } from '@earendil-works/pi-ai/models';
 import {
+  call,
   CANCELLED,
+  send,
   served,
   signal,
   subagent,
+  tool,
   UNANSWERED,
+  workflow,
   type Messages,
   type Status,
   type Waiting,
@@ -55,7 +62,7 @@ const lines = (messages: Messages['messages']) =>
 /** What a tool message says to the scripted model. */
 const said = (m: Extract<Message, { role: 'tool' }>) =>
   m.result.status === 'success'
-    ? JSON.stringify(m.result.output).replaceAll('"', '')
+    ? (typeof m.result.output === 'string' ? m.result.output : JSON.stringify(m.result.output)).replaceAll('"', '')
     : m.result.status === 'error'
       ? `error: ${m.result.message}`
       : m.result.status;
@@ -83,6 +90,14 @@ function script(messages: readonly Message[]): ModelResponse {
     return { type: 'final', text: steered.length > 0 ? `${done}, and: ${steered.join(' / ')}` : done };
   }
   const text = (prompt as { content: string }).content;
+  // "Use <tool> <input as JSON>": calls the tool.
+  const use = /^Use (\w+) (.*)$/s.exec(text);
+  if (use) {
+    return {
+      type: 'tool_calls',
+      calls: [{ id: `call_${messages.length}`, name: use[1]!, input: JSON.parse(use[2]!) }],
+    };
+  }
   // "Ask <tool>: <task name>: <task>": hands the task to a sub-agent.
   const ask = /^Ask (\w+): ([a-z0-9-]+): (.*)$/s.exec(text);
   if (ask) {
@@ -95,8 +110,14 @@ function script(messages: readonly Message[]): ModelResponse {
     return { type: 'tool_calls', calls: [{ id: `call_${messages.length}`, name: 'wait_for_approval', input: {} }] };
   if (text.startsWith('Transfer'))
     return { type: 'tool_calls', calls: [{ id: `call_${messages.length}`, name: 'transfer', input: { amount: 500 } }] };
-  if (text.startsWith('Nap'))
-    return { type: 'tool_calls', calls: [{ id: `call_${messages.length}`, name: 'nap', input: {} }] };
+  if (text.startsWith('Nap')) {
+    // A note (a tool() of @restatedev/agents) and a nap, at once.
+    const calls = [
+      { id: `call_${messages.length}_note`, name: 'note', input: {} },
+      { id: `call_${messages.length}`, name: 'nap', input: {} },
+    ];
+    return { type: 'tool_calls', calls };
+  }
   // As agentlib's aiModel fails for a provider's 4xx, and for a model of its own that breaks.
   if (text.startsWith('Refuse')) throw new restate.TerminalError('Incorrect API key provided', { errorCode: 401 });
   if (text.startsWith('Break')) throw new restate.TerminalError('the model broke', { errorCode: 500 });
@@ -124,15 +145,18 @@ const model = journaledModel(
 const planner = agentlib.agent({
   name: 'planner',
   model,
-  tools: {
-    wait_for_approval: agentlib.signal('approval', { description: 'Wait for a manager' }),
-    transfer: asyncTool({
-      description: 'Move money',
-      input: z.object({ amount: z.number() }),
-      needsApproval: true,
-      execute: async ({ amount }) => `moved ${amount}`,
-    }),
-  },
+  // The tools of @restatedev/agents, as every agent takes them, beside agentlib's own, by name.
+  tools: [
+    signal('approval', { description: 'Wait for a manager' }),
+    {
+      transfer: asyncTool({
+        description: 'Move money',
+        input: z.object({ amount: z.number() }),
+        needsApproval: true,
+        execute: async ({ amount }) => `moved ${amount}`,
+      }),
+    },
+  ],
 });
 
 // An agent of another framework (pi), whose tool hands the agentlib agent a task.
@@ -165,22 +189,80 @@ const helper = pi.agent({
 const lead = agentlib.agent({
   name: 'lead',
   model,
-  tools: { helper: agentlib.subagent(helper), planner: agentlib.subagent(planner) },
+  tools: [subagent(helper), subagent(planner)],
+});
+
+// Restate's tools of @restatedev/agents in an agentlib agent, on services of the classic SDK, by their
+// typed definitions; and tools of your own, one of which reaches for what an agentlib agent lacks.
+const orders = restate.service({
+  name: 'orders',
+  handlers: {
+    status: async (_ctx: restate.Context, { order }: { order: string }) => ({ order, status: 'shipped' }),
+  },
+});
+const ledger = restate.object({
+  name: 'ledger',
+  handlers: {
+    add: async (ctx: restate.ObjectContext, { entry }: { entry: string }) => {
+      ctx.set('entries', [...((await ctx.get<string[]>('entries')) ?? []), entry]);
+    },
+    entries: restate.handlers.object.shared(
+      async (ctx: restate.ObjectSharedContext) => (await ctx.get<string[]>('entries')) ?? [],
+    ),
+  },
+});
+const refund = restate.workflow({
+  name: 'refund',
+  handlers: { run: async (_ctx: restate.WorkflowContext, { order }: { order: string }) => `refunded ${order}` },
+});
+const clerk = agentlib.agent({
+  name: 'clerk',
+  model,
+  tools: [
+    call(orders, 'status', { description: 'The status of an order', input: z.object({ order: z.string() }) }),
+    send(ledger, 'add', { description: 'Note an entry', input: z.object({ entry: z.string() }), key: 'main' }),
+    workflow(refund, { description: 'Refund an order', input: z.object({ order: z.string() }) }),
+    tool({
+      name: 'weather',
+      description: 'The weather in a city',
+      input: z.object({ city: z.string() }),
+      run: async ({ city }, { ctx, callId, idempotencyKey }) =>
+        `Sunny in ${city} (${ctx.key}, ${idempotencyKey === `${ctx.request.id}:${callId}`})`,
+    }),
+    tool({
+      name: 'remember',
+      description: 'Remember something',
+      input: z.object({}),
+      run: async (_input, { ctx }) => ctx.db.execute('SELECT 1'),
+    }),
+  ],
 });
 
 const napper = agentlib.agent({
   name: 'napper',
   model,
-  tools: {
-    nap: tool({
-      description: 'Nap',
+  tools: [
+    // Each run logged to TOOL_LOG: a crash replays its result rather than run it again.
+    tool({
+      name: 'note',
+      description: 'Take a note',
       input: z.object({}),
-      *execute() {
-        yield* genSleep({ seconds: 3 });
-        return 'a nap';
+      run: () => {
+        if (process.env.TOOL_LOG) appendFileSync(process.env.TOOL_LOG, 'note\n');
+        return 'noted';
       },
     }),
-  },
+    {
+      nap: libTool({
+        description: 'Nap',
+        input: z.object({}),
+        *execute() {
+          yield* genSleep({ seconds: 3 });
+          return 'a nap';
+        },
+      }),
+    },
+  ],
 });
 
 if (process.argv[2] === 'serve') {
@@ -194,13 +276,17 @@ if (process.argv[2] === 'serve') {
   });
   let child: ReturnType<typeof spawn> | undefined;
   const log = join(dir, 'model.log');
+  const toolLog = join(dir, 'tool.log');
   const serveChild = () =>
     (child = spawn(process.execPath, [import.meta.filename, 'serve'], {
-      env: { ...process.env, MODEL_LOG: log },
+      env: { ...process.env, MODEL_LOG: log, TOOL_LOG: toolLog },
       stdio: ['ignore', 'ignore', 'inherit'],
     }));
   try {
-    await restate.serve({ services: served([planner, boss, helper, lead]), port: PORT });
+    await restate.serve({
+      services: served([planner, boss, helper, lead, clerk, orders, ledger, refund]),
+      port: PORT,
+    });
     serveChild();
     for (
       let i = 0;
@@ -432,6 +518,36 @@ if (process.argv[2] === 'serve') {
       ['assistant', UNANSWERED],
     ]);
 
+    // Restate's tools in an agentlib agent: a call, a send, a workflow, by their typed definitions; a tool of
+    // your own, with the key and an idempotency key; arguments that do not fit, for the model to fix; and a
+    // tool that reaches for a session's database, which fails the turn.
+    assert.equal(
+      await post('clerk/rita/chat', 'Use orders_status {"order":"103"}'),
+      'Done with {order:103,status:shipped}',
+    );
+    assert.equal(
+      await post('clerk/rita/chat', 'Use ledger_add {"entry":"hello"}'),
+      'Done with sent to ledger/main/add',
+    );
+    for (let i = 0; JSON.stringify(await post('ledger/main/entries')) !== '["hello"]'; i++) {
+      if (i > 300) throw new Error('the send did not arrive');
+      await sleep(100);
+    }
+    assert.equal(await post('clerk/rita/chat', 'Use refund {"order":"103"}'), 'Done with refunded 103');
+    assert.equal(
+      await post('clerk/rita/chat', 'Use weather {"city":"Lisbon"}'),
+      'Done with Sunny in Lisbon (rita, true)',
+    );
+    assert.match(
+      (await post('clerk/rita/chat', 'Use orders_status {"nope":1}')) as string,
+      /^Done with error: the arguments do not fit the tool's input/,
+    );
+    const misuse = await request('clerk/rita/chat', 'Use remember {}');
+    assert.equal(misuse.status, 500, await misuse.text());
+    const [role, note] = (await conversation('clerk/rita')).at(-1)!;
+    assert.equal(role, 'assistant');
+    assert.match(note!, /^Failed: the tool remember: not in an agentlib agent: ctx\.db/);
+
     // Cleared: the conversation starts over, its ids going on.
     await post('planner/erin/chat', 'Hi');
     assert.deepEqual(await post('planner/erin/clear'), { stopped: null });
@@ -445,18 +561,20 @@ if (process.argv[2] === 'serve') {
     );
 
     // A crash mid-turn: the service process is killed while the tool naps,
-    // and served again; the turn is replayed, and the model asked once per step.
+    // and served again; the turn is replayed, and the model asked once per
+    // step, and the note (a tool() of @restatedev/agents) run once.
     const nap = (await post('napper/frank/chat/send', 'Nap now')) as { invocationId: string };
-    // Once its tool call shows, the model's reply is in the journal: the run went on past it.
-    for (let i = 0; (await conversation('napper/frank')).length < 2; i++) {
-      if (i > 300) throw new Error('napper did not call its tool');
+    // Once the note's result shows, it is in the journal, and so is the model's reply.
+    for (let i = 0; !JSON.stringify(await conversation('napper/frank')).includes('note: noted'); i++) {
+      if (i > 300) throw new Error('napper did not take its note');
       await sleep(50);
     }
     child!.kill('SIGKILL');
     await sleep(500);
     serveChild();
     assert.equal(await (await attach(nap.invocationId)).json(), 'Done with a nap');
-    assert.deepEqual(readFileSync(log, 'utf8').trim().split('\n'), ['1', '3']);
+    assert.deepEqual(readFileSync(log, 'utf8').trim().split('\n'), ['1', '4']);
+    assert.deepEqual(readFileSync(toolLog, 'utf8').trim().split('\n'), ['note']);
     console.log('ok');
   } finally {
     child?.kill('SIGKILL');
