@@ -1,0 +1,161 @@
+// The agentlib agent's pure parts (src/agentlib/parts.ts), without a Restate
+// server: a turn's messages as clients read them, the tools' schemas as
+// Anthropic takes them, a provider's refusals, and what approves a call.
+// The agent itself runs against a real server: e2e/agentlib.ts.
+import type { Message } from '@restatedev/agentlib';
+import { sdk as restate } from '@restatedev/sessions/internal';
+import { describe, expect, it } from 'vitest';
+import * as agentlib from '../src/agentlib/index.ts';
+import { approves, refused, render, withoutBounds } from '../src/agentlib/parts.ts';
+
+const steering = (message: string) => JSON.stringify({ source: 'agent-runtime', type: 'steering', message });
+
+describe('render', () => {
+  it('gives each reply its tool calls, with their results, and marks the prompt and the answer', () => {
+    const turn: Message[] = [
+      { role: 'user', content: 'Plan my week' },
+      {
+        role: 'assistant',
+        content: 'Let me look',
+        calls: [
+          { id: 'c1', name: 'calendar', input: { week: 1 } },
+          { id: 'c2', name: 'weather', input: {} },
+        ],
+      },
+      { role: 'tool', callId: 'c1', name: 'calendar', result: { status: 'success', output: { free: ['Mon'] } } },
+      { role: 'tool', callId: 'c2', name: 'weather', result: { status: 'error', code: 'down', message: 'no data' } },
+      { role: 'user', content: steering('Skip Friday') },
+      { role: 'assistant', content: 'Monday it is' },
+    ];
+    expect(render(turn)).toEqual([
+      { role: 'user', parts: [{ type: 'text', text: 'Plan my week' }], prompt: true },
+      {
+        role: 'assistant',
+        parts: [
+          { type: 'text', text: 'Let me look' },
+          { type: 'tool', id: 'c1', name: 'calendar', input: { week: 1 }, output: '{"free":["Mon"]}' },
+          { type: 'tool', id: 'c2', name: 'weather', input: {}, output: 'Error: no data', error: true },
+        ],
+      },
+      { role: 'user', parts: [{ type: 'text', text: 'Skip Friday' }] },
+      { role: 'assistant', parts: [{ type: 'text', text: 'Monday it is' }], answer: true },
+    ]);
+  });
+
+  it('says how a call was denied or cancelled, and leaves a pending one without output', () => {
+    const [, reply] = render([
+      { role: 'user', content: 'Go' },
+      {
+        role: 'assistant',
+        content: '',
+        calls: [
+          { id: 'a', name: 'transfer', input: {} },
+          { id: 'b', name: 'slow', input: {} },
+          { id: 'c', name: 'job', input: {} },
+        ],
+      },
+      { role: 'tool', callId: 'a', name: 'transfer', result: { status: 'denied', message: 'not approved' } },
+      { role: 'tool', callId: 'b', name: 'slow', result: { status: 'cancelled', message: 'stopped' } },
+      { role: 'tool', callId: 'c', name: 'job', result: { status: 'pending', operationId: 'op' } },
+    ]);
+    expect(reply!.parts).toEqual([
+      { type: 'tool', id: 'a', name: 'transfer', input: {}, output: 'Denied: not approved', error: true },
+      { type: 'tool', id: 'b', name: 'slow', input: {}, output: 'Cancelled: stopped', error: true },
+      { type: 'tool', id: 'c', name: 'job', input: {} },
+    ]);
+  });
+
+  it("keeps a user's text that looks like JSON, and an empty answer", () => {
+    expect(
+      render([
+        { role: 'user', content: '{"order": 103}' },
+        { role: 'assistant', content: '' },
+      ]),
+    ).toEqual([
+      { role: 'user', parts: [{ type: 'text', text: '{"order": 103}' }], prompt: true },
+      { role: 'assistant', parts: [{ type: 'text', text: '' }], answer: true },
+    ]);
+  });
+});
+
+describe('withoutBounds', () => {
+  it('drops the bounds of numbers, at any depth, and keeps every other keyword', () => {
+    const schema = {
+      type: 'object',
+      properties: {
+        offset: { type: ['integer', 'null'], minimum: 0 },
+        limit: { type: 'integer', exclusiveMinimum: 0, maximum: 100, multipleOf: 5, description: 'how many' },
+        ref: { type: 'string', minLength: 1 },
+        items: { type: 'array', items: { type: 'number', maximum: 1 }, maxItems: 3 },
+      },
+      required: ['ref'],
+    };
+    expect(withoutBounds(schema)).toEqual({
+      type: 'object',
+      properties: {
+        offset: { type: ['integer', 'null'] },
+        limit: { type: 'integer', description: 'how many' },
+        ref: { type: 'string', minLength: 1 },
+        items: { type: 'array', items: { type: 'number' }, maxItems: 3 },
+      },
+      required: ['ref'],
+    });
+  });
+});
+
+describe('refused', () => {
+  it("is a model's own terminal error for a 4xx, or a missing API key", () => {
+    expect(refused(new restate.TerminalError('Incorrect API key provided', { errorCode: 401 }))).toBe(true);
+    expect(refused(new restate.TerminalError('model not found', { errorCode: 404 }))).toBe(true);
+    expect(refused(new restate.TerminalError('OpenAI API key is missing.'))).toBe(true);
+  });
+
+  it('is not an outage that ran out of retries, a cancellation, an error of its own class, or a retryable one', () => {
+    expect(refused(new restate.TerminalError('503 Service Unavailable'))).toBe(false);
+    expect(refused(new restate.CancelledError())).toBe(false);
+    class Overflow extends restate.TerminalError {}
+    expect(refused(new Overflow('too long', { errorCode: 413 }))).toBe(false);
+    expect(refused(new Error('fetch failed'))).toBe(false);
+  });
+});
+
+describe('approves', () => {
+  it('takes true, { approved: true }, or a text that says so; anything else denies', () => {
+    for (const value of [true, { approved: true }, 'approved', ' Yes ', 'ok', 'allow'])
+      expect(approves(value)).toBe(true);
+    for (const value of [false, null, undefined, 'no', 'approved later', { approved: 'yes' }, 1]) {
+      expect(approves(value)).toBe(false);
+    }
+  });
+});
+
+describe('agent', () => {
+  it('refuses a model it cannot take, as it is defined', () => {
+    expect(() => agentlib.agent({ name: 'a', model: 'gpt' })).toThrow('is not provider/model-id');
+    expect(() => agentlib.agent({ name: 'a', model: 'deepseek/deepseek-flash' })).toThrow(
+      'takes openai/… and anthropic/… models by name',
+    );
+  });
+
+  it('is a virtual object with the handlers and views of every agent, and its companion', () => {
+    const assistant = agentlib.agent({ name: 'assistant', model: 'openai/gpt-6-sol' });
+    expect(assistant.name).toBe('assistant');
+    expect(Object.keys((assistant as unknown as { object: object }).object).toSorted()).toEqual(
+      [
+        'chat',
+        'clear',
+        'erase',
+        'messages',
+        'notifications',
+        'pending',
+        'signal',
+        'status',
+        'steer',
+        'steered',
+        'stop',
+        'sync',
+        'watch',
+      ].toSorted(),
+    );
+  });
+});

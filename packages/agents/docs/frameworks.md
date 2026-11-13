@@ -838,3 +838,62 @@ and its ask never settles. An ask of no tool call is denied.
   attempt killed at a turn's end (the stored final reply answers, once);
   `test/opencode-spike.test.ts`, `db.ts` alone; the e2e crash test's
   `OpenCodeAgent`, kills included.
+
+## agentlib
+
+`@restatedev/agentlib` 0.1.0, on `@restatedev/restate-sdk-gen` 1.18.2.
+[`src/agentlib/`](../src/agentlib). Not on the conversation of turns, nor
+in a session object: it is the one integration on the classic Restate SDK.
+
+### As built: a journaled object
+
+- **The object**: a virtual object of the SDK that @restatedev/sessions
+  pins (its `sdk`), named as the agent; `chat` runs agentlib's `run` with
+  `execute(ctx, …)` of the generator SDK. Restate journals what the run
+  does (each model call, a `run`; each tool's I/O; its calls and signals)
+  and replays it after a crash, a suspension or a deployment: jobs 2 and 3
+  are Restate's own, and the integration stores nothing for them.
+- **The conversation**: agentlib's `Conversation`, in the object's state:
+  its messages in chunks of 32 (`t/<n>`), loaded at each turn's start, and
+  appended when the run saves its turn (at its end). Beside them, the
+  messages as clients read them, one key each (`c/<id>`), with the cursor
+  of their last change, and `meta` (the counts, the cursor, the turn being
+  answered). An invocation preloads `meta` and `taken` alone: a view such
+  as `status` is not sent the conversation. The turn being answered is written from the run's progress
+  events (a tool call's start and end, a steered message) as they come,
+  then rewritten from the messages the run saves, under the same ids, each
+  with a new cursor: so `messages` by cursor scans back only to the first
+  message of an ended turn that did not change.
+- **The views**: shared handlers that ask the companion (`status`,
+  `pending`, `signal`, `steer`, `watch`, `notifications`) or read the state
+  (`messages`); `sync` calls `messages` as an invocation of its own, after
+  the revision, so that its page has what the revision counts.
+- **Steering**: the companion's inbox, as for every agent; the turn learns
+  of messages at each publish (after a progress event that changed what
+  clients read), and hands all those waiting to agentlib's
+  `controls.steering`, as one update, through a channel of the generator
+  SDK, at the run's next event once it asks for more. agentlib's
+  `steering` event says which it took (`data.steer`): the turn keeps their
+  ids in `taken`, which their own `steered` turn checks, and tells the
+  companion (`taken`).
+- **Approvals**: agentlib's `onHumanApproval`, which waits for the signal
+  `approval` through the companion's `wait`, by agentlib's own name for the
+  ask (`<agent>:approval:<call>:<n>`).
+- **Endings**: a cancelled turn (`stop`), a refused one (a terminal error
+  of the model's, made a 424 by the model's wrapper) or a failed one stores
+  its message, the messages steered to it that it took, and a note
+  (`Cancelled`, `Unanswered`, `Failed: …`) in the conversation, without
+  the turn's tool calls, whose results may be missing; a killed turn is closed by the next message, `Ended`. A retried
+  attempt's errors (anything but a terminal error) fail the attempt, and
+  the replay goes on.
+- **Models**: `openai/…` and `anthropic/…` are `aiModel` on the AI SDK's
+  providers, loaded with the first message, with no retry limit of their
+  own (`retry: {}`): an outage fails the attempt, and the object's retry
+  policy (every agent's) retries it; a 4xx, or a missing API key, is a
+  refusal (424). agentlib 0.1.0's `aiModel`
+  asks for strict tools where the schema allows; Anthropic refuses strict
+  tools with bounded numbers, so its tools' schemas go without them.
+- **Tests**: [`e2e/agentlib.ts`](../../e2e/agentlib.ts), against a real
+  server: a signal's wait, steering, `messages` by page, cursor and
+  summary, `sync`, a denied approval, a stop, a refusal, `clear`, and the
+  service killed mid-turn (the model asked once per step).

@@ -9,7 +9,8 @@ TypeScript SDK:
   separate database to run.
 - **[`@restatedev/agents`](packages/agents/README.md)** runs AI agents inside
   sessions, with each conversation stored in its session's database. It
-  supports pi, LangGraph, Claude, the DeepSeek Harness and OpenCode.
+  supports pi, LangGraph, Claude, the DeepSeek Harness and OpenCode, and
+  agentlib, Restate's own agent library, on a journaled virtual object.
 
 If you are new to this, start with [the tutorial](packages/template/README.md).
 It builds a wallet one idea per file, from a plain virtual object up to an

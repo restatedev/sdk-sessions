@@ -1,8 +1,9 @@
 # @restatedev/agents
 
-Durable agents on Restate: an agent of one of five frameworks (pi,
-LangGraph, Claude, the DeepSeek Harness, OpenCode) in a Restate virtual
-object, its conversation in the object's own SQL database. A crash, a restart or a
+Durable agents on Restate: an agent of one of six frameworks (pi,
+LangGraph, Claude, the DeepSeek Harness, OpenCode, agentlib) in a Restate virtual
+object, its conversation in the object's own SQL database (agentlib's, in
+its key/value state, journaled). A crash, a restart or a
 person who takes a day to approve changes nothing: each message is answered
 once, and each tool call is made once.
 
@@ -86,6 +87,7 @@ the handler `chat` (a message in, the answer out), and the views
 | [`@restatedev/agents/claude`](src/claude/README.md)       | the Anthropic SDK's tool runner | You want Claude with nothing in between: the lightest, the API's own messages                 |
 | [`@restatedev/agents/deepseek`](src/deepseek/README.md)   | DeepSeek Harness                | You want DeepSeek's harness: DeepSeek's models, or any pi-ai knows                            |
 | [`@restatedev/agents/opencode`](src/opencode/README.md)   | OpenCode                        | You want OpenCode's agent: its own coding tools in a workspace, any provider it serves        |
+| [`@restatedev/agents/agentlib`](src/agentlib/README.md)   | agentlib (Restate's own)        | You want Restate's agent library: its tools, journaled on the classic Restate SDK, not in SQL |
 
 Each framework's packages are optional peer dependencies of
 @restatedev/agents: a project installs @restatedev/agents, whose required peers
@@ -104,6 +106,8 @@ npm install @restatedev/agents @earendil-works/pi-ai@1.5.2 @deepseek-ai/cordis \
   @deepseek-ai/{dsh-system-prompt,dsh-tools,dsh-tool-executor-native,dsh-user-approval}@0.2.2-rc.2 \
   @deepseek-ai/{dsh-commands,dsh-compaction,dsh-compaction-basic,dsh-compaction-tool-result-pruner,dsh-token-meter}@0.2.2-rc.2   # DeepSeek
 npm install @restatedev/agents @opencode/{core,sdk,server,plugin}@2.2.7 effect@4.1.0                     # OpenCode, on Node 24
+npm install @restatedev/agents @restatedev/agentlib@0.1.0 @restatedev/restate-sdk-gen@1.18.2 \
+  @restatedev/restate-sdk@1.18.2 @ai-sdk/openai  # agentlib, and the provider of its models: or @ai-sdk/anthropic
 ```
 
 pi's packages are on 1.5 (`~1.5.2`): pi changes its API in minor releases
@@ -134,6 +138,15 @@ is denied, or, with `approval: true`, waits for a person's approval. A
 provider's outage is asked again as pi does (its `retry` option), and
 never ends the turn. Not there yet: a change of `model` for a key that has
 a session already ([its README](src/opencode/README.md)).
+
+**agentlib** runs on the classic Restate SDK, not in a session object: its
+`chat` is journaled, and a crash replays it, so that a model call or a tool
+call that finished is not made again; its conversation is in the object's
+key/value state. It has every agent's handlers and views, and their
+companion, but takes agentlib's own tools (`asyncTool`, `serviceTool`,
+`agentTool`, MCP's...), not those of `@restatedev/agents` below, which are for
+session objects; and neither `schema`, `window` nor `budget`, which are
+the SQL database's ([its README](src/agentlib/README.md)).
 
 Every agent takes these too, beside its framework's options:
 
