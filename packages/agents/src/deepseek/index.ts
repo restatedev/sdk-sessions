@@ -82,7 +82,7 @@ import { tookSteers } from '../steering.ts';
 import { conversationView } from '../messages.ts';
 import { type Answer, withChecked } from '../output.ts';
 import { type Definition, sessionObject } from '../object.ts';
-import { isTool, jsonSchemaOf, type Tool as AnyTool, waitFor } from '../tools.ts';
+import { type Approval, isTool, jsonSchemaOf, type Tool as AnyTool, waitFor } from '../tools.ts';
 import type { z } from 'zod';
 import { SqlSessionPersistence } from './persistence.ts';
 
@@ -284,8 +284,7 @@ const native = (t: AnyTool, ctx: restate.SessionContext): ToolDefinition =>
 /** The signal that a tool call waits for, to the agent, when it needs a person's approval (`approval`). */
 export const APPROVAL = 'approval';
 
-/** Which tool calls wait for a person's approval: the names of their tools, or a function of a call that says whether it does. */
-export type Approval = readonly string[] | ((call: { name: string; args: unknown }) => boolean);
+export type { Approval };
 
 /** What the value of an {@link APPROVAL} signal decides about its tool call (see `approves`): approved once, or rejected. */
 const decided = (value: unknown): ApprovalOutcome => (approves(value) ? 'allowed-once' : 'rejected');

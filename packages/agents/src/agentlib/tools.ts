@@ -23,6 +23,7 @@ import { sdk as restate } from '@restatedev/sessions/internal';
 import type { z } from 'zod';
 import type { Configure } from '../common.ts';
 import {
+  type Approval,
   isTool,
   keyed,
   sentTo,
@@ -59,11 +60,7 @@ export type Tools =
   | ReadonlyArray<Tool | Record<string, AgentlibTool>>
   | Record<string, AgentlibTool | Tool>;
 
-/**
- * Which of an agent's tools wait for a person's approval before they run:
- * their names, or a function of a call that says whether it does.
- */
-export type Approval = readonly string[] | ((call: { name: string; args: unknown }) => boolean);
+export type { Approval };
 
 /**
  * Gives each tool its name, turning the tools of `@restatedev/agents` into

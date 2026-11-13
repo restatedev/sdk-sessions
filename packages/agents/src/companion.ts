@@ -273,8 +273,9 @@ const shown = (turn: Started | null | undefined): Answering | null =>
  * The message the agent answers; the waits, in the order they started, each
  * with its awakeable; the signals kept for the next wait; and the
  * conversation's revision, with the `watch`es waiting for a newer one.
+ * Exported for the declarations of the companion's client, which name it.
  */
-interface State {
+export interface State {
   /** The message the agent answers, from its turn's start to its close. */
   turn: Started;
   waiting: (Waiting & { awakeable: string })[];

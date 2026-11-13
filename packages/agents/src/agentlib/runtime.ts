@@ -58,8 +58,10 @@ export class Runtime<O> {
     this.history = history;
     this.loadModel = modelLoader(name, model);
     if (history) checkHistory(name, history);
-    // Restate's tools become agentlib's here, so that two tools of one name fail now.
-    if (tools !== undefined) this.tools = toolsOf(name, tools, approval);
+    // Restate's tools become agentlib's here, so that a mistake fails now: two tools of one
+    // name, or an approval of a tool the agent does not have (with no tools at all, too).
+    const named = toolsOf(name, tools ?? [], approval);
+    if (tools !== undefined) this.tools = named;
   }
 
   /** Answers `text` in the turn of `ctx`'s invocation. */

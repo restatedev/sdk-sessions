@@ -236,6 +236,8 @@ describe('toolsOf', () => {
     expect(() => toolsOf('a', [weather, own], ['get_weather'])).not.toThrow();
     expect(() => toolsOf('a', [weather, own], ['echo'])).toThrow('a: approval names echo');
     expect(() => toolsOf('a', [weather], ['nope'])).toThrow('a: approval names nope');
+    const noTools = { name: 'a', model: 'openai/gpt-6-sol', approval: ['transfer'] };
+    expect(() => agentlib.agent(noTools)).toThrow('a: approval names transfer');
   });
 
   it('refuses two tools of one name', () => {
