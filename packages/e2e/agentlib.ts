@@ -25,7 +25,13 @@ import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as restate from '@restatedev/restate-sdk';
-import { asyncTool, journaledModel, tool as libTool, type Message, type ModelResponse } from '@restatedev/agentlib';
+import {
+  asyncTool,
+  journaledModel,
+  tool as libTool,
+  type Message,
+  type ModelResponse,
+} from '@restatedev/agentlib';
 import { sleep as genSleep } from '@restatedev/restate-sdk-gen';
 import { createModels } from '@earendil-works/pi-ai/models';
 import {
@@ -57,97 +63,122 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Messages as lines: each one's role, and its texts and tool calls with their outputs. */
 const lines = (messages: Messages['messages']) =>
-  messages.map((m) => [m.role, ...m.parts.map((p) => (p.type === 'text' ? p.text : `${p.name}: ${p.output}`))]);
+  messages.map((m) => [
+    m.role,
+    ...m.parts.map((p) => (p.type === 'text' ? p.text : `${p.name}: ${p.output}`)),
+  ]);
 
-/** What a tool message says to the scripted model. */
-const said = (m: Extract<Message, { role: 'tool' }>) =>
-  m.result.status === 'success'
-    ? (typeof m.result.output === 'string' ? m.result.output : JSON.stringify(m.result.output)).replaceAll('"', '')
-    : m.result.status === 'error'
-      ? `error: ${m.result.message}`
-      : m.result.status;
+type ToolMessage = Extract<Message, { role: 'tool' }>;
+type UserMessage = Extract<Message, { role: 'user' }>;
+
+/** What a tool's result says to the scripted model. */
+function said({ result }: ToolMessage): string {
+  if (result.status === 'error') return `error: ${result.message}`;
+  if (result.status !== 'success') return result.status;
+  const output = typeof result.output === 'string' ? result.output : JSON.stringify(result.output);
+  return output.replaceAll('"', '');
+}
+
+/** A reply that calls the tools `calls` (name and input), with ids unique in the conversation. */
+function calling(messages: readonly Message[], ...calls: [string, unknown][]): ModelResponse {
+  const id = (i: number) => (i === 0 ? `call_${messages.length}` : `call_${messages.length}_${i}`);
+  const toolCalls = calls.map(([name, input], i) => ({ id: id(i), name, input: input as never }));
+  return { type: 'tool_calls', calls: toolCalls };
+}
+
+/** A final reply. */
+const answering = (text: string): ModelResponse => ({ type: 'final', text });
+
+/** The messages that agentlib's steering notes in `messages` carry. */
+function steeredIn(messages: readonly Message[]): string[] {
+  const notes = messages.filter((m): m is UserMessage => m.role === 'user');
+  return notes.map((m) => (JSON.parse(m.content) as { message: string }).message);
+}
 
 /**
- * The model: "Plan" waits for an approval, "Transfer" moves money (which
- * needs approval), "Nap" naps, "Refuse" is refused; after a tool's result,
- * it says what it did with, and with the message steered after it, if any;
- * anything else it answers as it is, saying how the turn before ended if it
- * did not answer.
+ * The scripted model's reply to the user's message `text`:
+ * - "Use <tool> <input as JSON>" calls the tool;
+ * - "Ask <tool>: <task name>: <task>" hands a task to a sub-agent;
+ * - "Plan" waits for an approval, "Transfer" moves money (which needs an approval);
+ * - "Nap" takes a note and naps;
+ * - "Refuse" is refused (a 401), and "Break" breaks (a 500);
+ * - anything else is answered as it is.
+ */
+function replyTo(messages: readonly Message[], text: string): ModelResponse {
+  const use = /^Use (\w+) (.*)$/s.exec(text);
+  if (use) return calling(messages, [use[1]!, JSON.parse(use[2]!)]);
+
+  const ask = /^Ask (\w+): ([a-z0-9-]+): (.*)$/s.exec(text);
+  if (ask) return calling(messages, [ask[1]!, { name: ask[2]!, task: ask[3]! }]);
+
+  if (text.startsWith('Plan')) return calling(messages, ['wait_for_approval', {}]);
+  if (text.startsWith('Transfer')) return calling(messages, ['transfer', { amount: 500 }]);
+  if (text.startsWith('Nap')) return calling(messages, ['note', {}], ['nap', {}]);
+
+  // As agentlib's aiModel fails for a provider's 4xx, and for a model of its own that breaks.
+  if (text.startsWith('Refuse')) {
+    throw new restate.TerminalError('Incorrect API key provided', { errorCode: 401 });
+  }
+  if (text.startsWith('Break')) {
+    throw new restate.TerminalError('the model broke', { errorCode: 500 });
+  }
+  return answering(`Answered: ${text}${context(messages)}`);
+}
+
+/**
+ * What the scripted model says of the conversation before the message: how
+ * the turn before ended if it was stopped, with a message steered to it, and
+ * the summary of the conversation, if there is one.
+ */
+function context(messages: readonly Message[]): string {
+  let notes = '';
+  const before = messages.at(-2);
+  if (before?.role === 'assistant' && before.content.startsWith('Cancelled')) {
+    notes += ` (after: ${before.content})`;
+    const noted = messages.at(-3);
+    if (noted?.role === 'user' && noted.content.startsWith('{')) {
+      notes += ` [steered: ${steeredIn([noted])[0]}]`;
+    }
+  }
+  const first = messages[0];
+  if (first?.role === 'user' && first.content.includes('"conversation-summary"')) {
+    notes += ` [summary: ${(JSON.parse(first.content) as { summary: string }).summary}]`;
+  }
+  return notes;
+}
+
+/**
+ * The scripted model. After a round of tool calls, it says what it did with
+ * the last result, and with the messages steered after it ("Wait again"
+ * waits for an approval again); otherwise it replies to the user's message.
  */
 function script(messages: readonly Message[]): ModelResponse {
   const at = messages.findLastIndex((m) => m.role === 'tool');
+  const afterTools = at >= 0 && messages.slice(at).every((m) => m.role !== 'assistant');
+  if (afterTools) {
+    const steered = steeredIn(messages.slice(at + 1));
+    if (steered.includes('Wait again')) return calling(messages, ['wait_for_approval', {}]);
+    const done = `Done with ${said(messages[at] as ToolMessage)}`;
+    return answering(steered.length > 0 ? `${done}, and: ${steered.join(' / ')}` : done);
+  }
   const prompt = messages.findLast((m) => m.role === 'user' && !m.content.startsWith('{'));
-  if (at >= 0 && messages.slice(at).every((m) => m.role !== 'assistant')) {
-    const steered = messages
-      .slice(at + 1)
-      .filter((m): m is Extract<Message, { role: 'user' }> => m.role === 'user')
-      .map((m) => (JSON.parse(m.content) as { message: string }).message);
-    // Steered to wait again: it does.
-    if (steered.includes('Wait again')) {
-      return { type: 'tool_calls', calls: [{ id: `call_${messages.length}`, name: 'wait_for_approval', input: {} }] };
-    }
-    const done = `Done with ${said(messages[at] as Extract<Message, { role: 'tool' }>)}`;
-    return { type: 'final', text: steered.length > 0 ? `${done}, and: ${steered.join(' / ')}` : done };
-  }
-  const text = (prompt as { content: string }).content;
-  // "Use <tool> <input as JSON>": calls the tool.
-  const use = /^Use (\w+) (.*)$/s.exec(text);
-  if (use) {
-    return {
-      type: 'tool_calls',
-      calls: [{ id: `call_${messages.length}`, name: use[1]!, input: JSON.parse(use[2]!) }],
-    };
-  }
-  // "Ask <tool>: <task name>: <task>": hands the task to a sub-agent.
-  const ask = /^Ask (\w+): ([a-z0-9-]+): (.*)$/s.exec(text);
-  if (ask) {
-    return {
-      type: 'tool_calls',
-      calls: [{ id: `call_${messages.length}`, name: ask[1]!, input: { name: ask[2]!, task: ask[3]! } }],
-    };
-  }
-  if (text.startsWith('Plan'))
-    return { type: 'tool_calls', calls: [{ id: `call_${messages.length}`, name: 'wait_for_approval', input: {} }] };
-  if (text.startsWith('Transfer'))
-    return { type: 'tool_calls', calls: [{ id: `call_${messages.length}`, name: 'transfer', input: { amount: 500 } }] };
-  if (text.startsWith('Nap')) {
-    // A note (a tool() of @restatedev/agents) and a nap, at once.
-    const calls = [
-      { id: `call_${messages.length}_note`, name: 'note', input: {} },
-      { id: `call_${messages.length}`, name: 'nap', input: {} },
-    ];
-    return { type: 'tool_calls', calls };
-  }
-  // As agentlib's aiModel fails for a provider's 4xx, and for a model of its own that breaks.
-  if (text.startsWith('Refuse')) throw new restate.TerminalError('Incorrect API key provided', { errorCode: 401 });
-  if (text.startsWith('Break')) throw new restate.TerminalError('the model broke', { errorCode: 500 });
-  const before = messages.at(-2);
-  const ended =
-    before?.role === 'assistant' && before.content.startsWith('Cancelled') ? ` (after: ${before.content})` : '';
-  // A message steered to the turn before, which it took, kept with it.
-  const noted = ended ? messages.at(-3) : undefined;
-  const kept =
-    noted?.role === 'user' && noted.content.startsWith('{')
-      ? ` [steered: ${(JSON.parse(noted.content) as { message: string }).message}]`
-      : '';
-  // The conversation summarized before the turn (see `history`): the summary comes first.
-  const first = messages[0];
-  const summary =
-    first?.role === 'user' && first.content.includes('"conversation-summary"')
-      ? ` [summary: ${(JSON.parse(first.content) as { summary: string }).summary}]`
-      : '';
-  return { type: 'final', text: `Answered: ${text}${ended}${kept}${summary}` };
+  return replyTo(messages, (prompt as UserMessage).content);
 }
 
-/** The scripted model, journaled as agentlib's models are; each ask, logged to MODEL_LOG if set. */
+/** The reply to a request to summarize the conversation (`history`): how many messages it got. */
+function summarized(request: { messages: Message[] }): ModelResponse {
+  const { content } = request.messages[0] as UserMessage;
+  const { messages } = JSON.parse(content) as { messages: unknown[] };
+  return answering(`${messages.length} messages`);
+}
+
+/** The scripted model, journaled as agentlib's models are. Each ask goes to MODEL_LOG, if set. */
 const model = journaledModel(
   async (request) => {
-    if (process.env.MODEL_LOG) appendFileSync(process.env.MODEL_LOG, `${request.messages.length}\n`);
-    // Asked to summarize the earliest of a conversation (`history`): how many messages it got.
-    if (request.instructions?.startsWith('Summarize')) {
-      const { messages } = JSON.parse((request.messages[0] as { content: string }).content) as { messages: unknown[] };
-      return { type: 'final', text: `${messages.length} messages` };
+    if (process.env.MODEL_LOG) {
+      appendFileSync(process.env.MODEL_LOG, `${request.messages.length}\n`);
     }
+    if (request.instructions?.startsWith('Summarize')) return summarized(request);
     return script(request.messages);
   },
   { name: 'Ask model', retry: { maxAttempts: 1 } },
@@ -181,14 +212,17 @@ models.setProvider(
 );
 const boss = pi.agent({ name: 'boss', model: 'script/script', models, tools: [subagent(planner)] });
 
-// The other way: an agentlib agent whose tools hand tasks to a pi agent, which waits when asked to, and to
+// The other way: an agentlib agent whose tools hand tasks to a pi agent, which waits when asked to,
+// and to
 // the agentlib planner.
 models.setProvider(
   fakeProvider('helper', 'helper', ({ messages }) => {
     const last = messages.at(-1)!;
     if (last.role === 'toolResult') return say(`Pi waited: ${textOf(last.content)}`);
     const text = textOf(last.content);
-    return text.startsWith('Wait') ? callTools([['wait_for_approval', {}]]) : say(`Pi says: ${text}`);
+    return text.startsWith('Wait')
+      ? callTools([['wait_for_approval', {}]])
+      : say(`Pi says: ${text}`);
   }),
 );
 const helper = pi.agent({
@@ -203,12 +237,16 @@ const lead = agentlib.agent({
   tools: [subagent(helper), subagent(planner)],
 });
 
-// Restate's tools of @restatedev/agents in an agentlib agent, on services of the classic SDK, by their
+// Restate's tools of @restatedev/agents in an agentlib agent, on services of the classic SDK, by
+// their
 // typed definitions; and tools of your own, one of which reaches for what an agentlib agent lacks.
 const orders = restate.service({
   name: 'orders',
   handlers: {
-    status: async (_ctx: restate.Context, { order }: { order: string }) => ({ order, status: 'shipped' }),
+    status: async (_ctx: restate.Context, { order }: { order: string }) => ({
+      order,
+      status: 'shipped',
+    }),
   },
 });
 const ledger = restate.object({
@@ -224,14 +262,23 @@ const ledger = restate.object({
 });
 const refund = restate.workflow({
   name: 'refund',
-  handlers: { run: async (_ctx: restate.WorkflowContext, { order }: { order: string }) => `refunded ${order}` },
+  handlers: {
+    run: async (_ctx: restate.WorkflowContext, { order }: { order: string }) => `refunded ${order}`,
+  },
 });
 const clerk = agentlib.agent({
   name: 'clerk',
   model,
   tools: [
-    call(orders, 'status', { description: 'The status of an order', input: z.object({ order: z.string() }) }),
-    send(ledger, 'add', { description: 'Note an entry', input: z.object({ entry: z.string() }), key: 'main' }),
+    call(orders, 'status', {
+      description: 'The status of an order',
+      input: z.object({ order: z.string() }),
+    }),
+    send(ledger, 'add', {
+      description: 'Note an entry',
+      input: z.object({ entry: z.string() }),
+      key: 'main',
+    }),
     workflow(refund, { description: 'Refund an order', input: z.object({ order: z.string() }) }),
     tool({
       name: 'weather',
@@ -250,7 +297,11 @@ const clerk = agentlib.agent({
 });
 
 // A conversation kept short: past 4 messages, the earliest are summarized, and the latest 2 stay.
-const chatty = agentlib.agent({ name: 'chatty', model, history: { maxMessages: 4, retainMessages: 2 } });
+const chatty = agentlib.agent({
+  name: 'chatty',
+  model,
+  history: { maxMessages: 4, retainMessages: 2 },
+});
 
 const napper = agentlib.agent({
   name: 'napper',
@@ -347,10 +398,13 @@ if (process.argv[2] === 'serve') {
         await sleep(100);
       }
     };
-    const conversation = async (object: string) => lines(((await post(`${object}/messages`)) as Messages).messages);
+    const conversation = async (object: string) =>
+      lines(((await post(`${object}/messages`)) as Messages).messages);
 
     // A tool that waits for a signal, and a message steered to its turn.
-    const plan = (await post('planner/alice/chat/send', 'Plan my week')) as { invocationId: string };
+    const plan = (await post('planner/alice/chat/send', 'Plan my week')) as {
+      invocationId: string;
+    };
     const wait = await waiting('planner/alice');
     assert.equal(wait.name, 'approval');
     assert.ok(wait.id.startsWith(`${plan.invocationId}:`));
@@ -361,7 +415,9 @@ if (process.argv[2] === 'serve') {
       ['user', 'Plan my week'],
       ['assistant', 'wait_for_approval: undefined'],
     ]);
-    const steered = (await post('planner/alice/steer', 'Skip Friday', { 'idempotency-key': 'steer-1' })) as Steered;
+    const steered = (await post('planner/alice/steer', 'Skip Friday', {
+      'idempotency-key': 'steer-1',
+    })) as Steered;
     assert.equal(steered.turn, plan.invocationId);
     assert.deepEqual(
       ((await post('planner/alice/status')) as Status).steering?.map((m) => m.id),
@@ -369,8 +425,12 @@ if (process.argv[2] === 'serve') {
     );
     const { cursor } = (await post('planner/alice/messages')) as Messages;
     await post('planner/alice/signal', { id: wait.id, value: 'approved' });
-    assert.equal(await (await attach(plan.invocationId)).json(), 'Done with approved, and: Skip Friday');
-    // The steered message's own turn finds it taken, and does nothing: the next message is answered after it.
+    assert.equal(
+      await (await attach(plan.invocationId)).json(),
+      'Done with approved, and: Skip Friday',
+    );
+    // The steered message's own turn finds it taken, and does nothing: the next message is answered
+    // after it.
     assert.equal(await post('planner/alice/chat', 'Thanks'), 'Answered: Thanks');
     const all = (await post('planner/alice/messages')) as Messages;
     assert.deepEqual(lines(all.messages), [
@@ -414,7 +474,11 @@ if (process.argv[2] === 'serve') {
 
     // No turn running: a steered message is a turn of its own (its `steered`).
     assert.deepEqual(
-      ((await post('planner/gina/steer', 'Hello there', { 'idempotency-key': 'steer-2' })) as Steered).turn,
+      (
+        (await post('planner/gina/steer', 'Hello there', {
+          'idempotency-key': 'steer-2',
+        })) as Steered
+      ).turn,
       null,
     );
     for (let i = 0; (await conversation('planner/gina')).length < 2; i++) {
@@ -427,18 +491,25 @@ if (process.argv[2] === 'serve') {
     ]);
 
     // A call that needs approval, denied.
-    const transfer = (await post('planner/bob/chat/send', 'Transfer 500')) as { invocationId: string };
+    const transfer = (await post('planner/bob/chat/send', 'Transfer 500')) as {
+      invocationId: string;
+    };
     const approval = await waiting('planner/bob');
     assert.deepEqual(approval.input, { tool: 'transfer', input: { amount: 500 } });
     await post('planner/bob/signal', { name: 'approval', value: 'no' });
     assert.equal(await (await attach(transfer.invocationId)).json(), 'Done with denied');
 
     // Stopped: the turn ends cancelled, and the next turn's model sees it.
-    const stopped = (await post('planner/carol/chat/send', 'Plan my week')) as { invocationId: string };
+    const stopped = (await post('planner/carol/chat/send', 'Plan my week')) as {
+      invocationId: string;
+    };
     await waiting('planner/carol');
     assert.deepEqual(await post('planner/carol/stop'), { stopped: stopped.invocationId });
     assert.equal((await attach(stopped.invocationId)).ok, false);
-    assert.equal(await post('planner/carol/chat', 'Hello'), `Answered: Hello (after: ${CANCELLED})`);
+    assert.equal(
+      await post('planner/carol/chat', 'Hello'),
+      `Answered: Hello (after: ${CANCELLED})`,
+    );
     assert.deepEqual(await conversation('planner/carol'), [
       ['user', 'Plan my week'],
       ['assistant', `wait_for_approval: ${CANCELLED}`],
@@ -448,11 +519,18 @@ if (process.argv[2] === 'serve') {
     ]);
     assert.deepEqual(await post('planner/carol/pending'), []);
 
-    // Stopped after it took a steered message: the next turn's model sees the message, with how the turn ended.
-    const month = (await post('planner/ivan/chat/send', 'Plan my month')) as { invocationId: string };
+    // Stopped after it took a steered message: the next turn's model sees the message, with how the
+    // turn ended.
+    const month = (await post('planner/ivan/chat/send', 'Plan my month')) as {
+      invocationId: string;
+    };
     const first = await waiting('planner/ivan');
     assert.equal(
-      ((await post('planner/ivan/steer', 'Wait again', { 'idempotency-key': 'steer-3' })) as Steered).turn,
+      (
+        (await post('planner/ivan/steer', 'Wait again', {
+          'idempotency-key': 'steer-3',
+        })) as Steered
+      ).turn,
       month.invocationId,
     );
     await post('planner/ivan/signal', { id: first.id, value: 'approved' });
@@ -493,17 +571,28 @@ if (process.argv[2] === 'serve') {
       ['assistant', 'Failed: the model broke'],
     ]);
 
-    // A sub-agent of an agent of another framework: pi's `subagent` tool hands it a task, at its own key.
-    assert.equal(await post('boss/henry/chat', 'Hello from the boss'), 'Boss heard: Answered: Hello from the boss');
+    // A sub-agent of an agent of another framework: pi's `subagent` tool hands it a task, at its
+    // own key.
+    assert.equal(
+      await post('boss/henry/chat', 'Hello from the boss'),
+      'Boss heard: Answered: Hello from the boss',
+    );
     assert.deepEqual(await conversation('planner/henry.greeting'), [
       ['user', 'Hello from the boss'],
       ['assistant', 'Answered: Hello from the boss'],
     ]);
 
-    // The other way: an agentlib agent hands a pi agent a task, at its key `<key>.<task name>`; the same name
+    // The other way: an agentlib agent hands a pi agent a task, at its key `<key>.<task name>`; the
+    // same name
     // continues it.
-    assert.equal(await post('lead/olga/chat', 'Ask helper: greeting: hello'), 'Done with Pi says: hello');
-    assert.equal(await post('lead/olga/chat', 'Ask helper: greeting: again'), 'Done with Pi says: again');
+    assert.equal(
+      await post('lead/olga/chat', 'Ask helper: greeting: hello'),
+      'Done with Pi says: hello',
+    );
+    assert.equal(
+      await post('lead/olga/chat', 'Ask helper: greeting: again'),
+      'Done with Pi says: again',
+    );
     assert.deepEqual(await conversation('helper/olga.greeting'), [
       ['user', 'hello'],
       ['assistant', 'Pi says: hello'],
@@ -515,7 +604,9 @@ if (process.argv[2] === 'serve') {
       ['assistant', 'helper: Pi says: hello'],
     ]);
     // Stopping the agentlib turn stops the pi turn it waits for.
-    const chores = (await post('lead/pete/chat/send', 'Ask helper: chores: Wait for it')) as { invocationId: string };
+    const chores = (await post('lead/pete/chat/send', 'Ask helper: chores: Wait for it')) as {
+      invocationId: string;
+    };
     await waiting('helper/pete.chores');
     assert.deepEqual(await post('lead/pete/stop'), { stopped: chores.invocationId });
     for (let i = 0; ((await post('helper/pete.chores/status')) as Status).answering !== null; i++) {
@@ -532,8 +623,10 @@ if (process.argv[2] === 'serve') {
       ['assistant', UNANSWERED],
     ]);
 
-    // Restate's tools in an agentlib agent: a call, a send, a workflow, by their typed definitions; a tool of
-    // your own, with the key and an idempotency key; arguments that do not fit, for the model to fix; and a
+    // Restate's tools in an agentlib agent: a call, a send, a workflow, by their typed definitions;
+    // a tool of
+    // your own, with the key and an idempotency key; arguments that do not fit, for the model to
+    // fix; and a
     // tool that reaches for a session's database, which fails the turn.
     assert.equal(
       await post('clerk/rita/chat', 'Use orders_status {"order":"103"}'),
@@ -547,7 +640,10 @@ if (process.argv[2] === 'serve') {
       if (i > 300) throw new Error('the send did not arrive');
       await sleep(100);
     }
-    assert.equal(await post('clerk/rita/chat', 'Use refund {"order":"103"}'), 'Done with refunded 103');
+    assert.equal(
+      await post('clerk/rita/chat', 'Use refund {"order":"103"}'),
+      'Done with refunded 103',
+    );
     assert.equal(
       await post('clerk/rita/chat', 'Use weather {"city":"Lisbon"}'),
       'Done with Sunny in Lisbon (rita, true)',
@@ -562,9 +658,11 @@ if (process.argv[2] === 'serve') {
     assert.equal(role, 'assistant');
     assert.match(note!, /^Failed: the tool remember: not in an agentlib agent: ctx\.db/);
 
-    // The conversation kept short: the fourth turn's model gets a summary of the first two turns, and the
+    // The conversation kept short: the fourth turn's model gets a summary of the first two turns,
+    // and the
     // third as it was; `messages` keeps every turn.
-    for (const n of [1, 2, 3]) assert.equal(await post('chatty/sven/chat', `Hi ${n}`), `Answered: Hi ${n}`);
+    for (const n of [1, 2, 3])
+      assert.equal(await post('chatty/sven/chat', `Hi ${n}`), `Answered: Hi ${n}`);
     assert.equal(await post('chatty/sven/chat', 'Hi 4'), 'Answered: Hi 4 [summary: 4 messages]');
     assert.equal(await post('chatty/sven/chat', 'Hi 5'), 'Answered: Hi 5 [summary: 4 messages]');
     assert.equal(((await post('chatty/sven/messages')) as Messages).messages.length, 10);
@@ -586,7 +684,11 @@ if (process.argv[2] === 'serve') {
     // step, and the note (a tool() of @restatedev/agents) run once.
     const nap = (await post('napper/frank/chat/send', 'Nap now')) as { invocationId: string };
     // Once the note's result shows, it is in the journal, and so is the model's reply.
-    for (let i = 0; !JSON.stringify(await conversation('napper/frank')).includes('note: noted'); i++) {
+    for (
+      let i = 0;
+      !JSON.stringify(await conversation('napper/frank')).includes('note: noted');
+      i++
+    ) {
       if (i > 300) throw new Error('napper did not take its note');
       await sleep(50);
     }

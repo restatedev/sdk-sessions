@@ -2,5 +2,18 @@
   "$schema": "./node_modules/oxfmt/configuration_schema.json",
   "printWidth": 120,
   "singleQuote": true,
-  "ignorePatterns": ["**/node_modules", "**/.venv", "**/target", "**/dist", "**/pnpm-lock.yaml"]
+  "ignorePatterns": ["**/node_modules", "**/.venv", "**/target", "**/dist", "**/pnpm-lock.yaml"],
+  "overrides": [
+    {
+      "files": [
+        "packages/agents/src/agentlib/**",
+        "packages/agents/test/agentlib.test.ts",
+        "packages/e2e/agentlib.ts",
+        "packages/examples/basic/agentlib.ts"
+      ],
+      "options": {
+        "printWidth": 100
+      }
+    }
+  ]
 }

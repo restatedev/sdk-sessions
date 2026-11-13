@@ -14,7 +14,8 @@
  *   curl localhost:8080/agentlib_assistant/alice/chat -d 'Hi, I am Alice. Is it warm in Lisbon?'
  *   curl localhost:8080/agentlib_assistant/alice/chat/send -d 'Send 50 euros to Bob'
  *   curl localhost:8080/agentlib_assistant/alice/pending                 # the transfer waits
- *   curl localhost:8080/agentlib_assistant/alice/signal --json '{"name": "approval", "value": "approved"}'
+ *   curl localhost:8080/agentlib_assistant/alice/signal \
+ *     --json '{"name": "approval", "value": "approved"}'
  *   curl localhost:8080/agentlib_assistant/alice/messages
  */
 import { asyncTool } from '@restatedev/agentlib';
@@ -43,7 +44,8 @@ const assistant = agentlib.agent({
         input: z.object({ to: z.string(), euros: z.number() }),
         // Waits for the signal `approval`: `pending` lists it, `signal` approves or denies it.
         needsApproval: true,
-        execute: async ({ to, euros }, { callId }) => `Sent ${euros} euros to ${to} (transfer ${callId})`,
+        execute: async ({ to, euros }, { callId }) =>
+          `Sent ${euros} euros to ${to} (transfer ${callId})`,
       }),
     },
   ],

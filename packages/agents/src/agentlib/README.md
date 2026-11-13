@@ -30,7 +30,11 @@ const weather = tool({
   run: ({ city }) => `Sunny and 21°C in ${city}`,
 });
 
-const assistant = agentlib.agent({ name: 'assistant', system: 'Answer briefly.', tools: [weather] });
+const assistant = agentlib.agent({
+  name: 'assistant',
+  system: 'Answer briefly.',
+  tools: [weather],
+});
 await serve(assistant);
 ```
 
@@ -172,7 +176,10 @@ summary is kept, and the turns after build on it, so the model's input
 stays bounded, and so does what each turn loads. `history` sets it:
 
 ```ts
-agentlib.agent({ name: 'assistant', history: { maxMessages: 200, maxChars: 200_000, retainMessages: 40 } });
+agentlib.agent({
+  name: 'assistant',
+  history: { maxMessages: 200, maxChars: 200_000, retainMessages: 40 },
+});
 agentlib.agent({ name: 'assistant', history: false }); // the whole conversation, every turn
 ```
 

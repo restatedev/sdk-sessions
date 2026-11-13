@@ -1,4 +1,4 @@
-// The agentlib agent's pure parts (src/agentlib/parts.ts), without a Restate
+// The agentlib agent's pure parts (messages.ts, model.ts, tools.ts), without a Restate
 // server: a turn's messages as clients read them, the tools' schemas as
 // Anthropic takes them, a provider's refusals, and what approves a call.
 // The agent itself runs against a real server: e2e/agentlib.ts.
@@ -6,17 +6,19 @@ import type { Message } from '@restatedev/agentlib';
 import { sdk, sdk as restate } from '@restatedev/sessions/internal';
 import { describe, expect, it } from 'vitest';
 import * as agentlib from '../src/agentlib/index.ts';
-import { refused, render, withoutBounds } from '../src/agentlib/parts.ts';
+import { render } from '../src/agentlib/messages.ts';
+import { refused, withoutBounds } from '../src/agentlib/model.ts';
 import { approves } from '../src/common.ts';
 import { toolsOf } from '../src/agentlib/tools.ts';
 import { call, signal, subagent, tool } from '../src/index.ts';
 import { asyncTool } from '@restatedev/agentlib';
 import { z } from 'zod';
 
-const steering = (message: string) => JSON.stringify({ source: 'agent-runtime', type: 'steering', message });
+const steering = (message: string) =>
+  JSON.stringify({ source: 'agent-runtime', type: 'steering', message });
 
 describe('render', () => {
-  it('gives each reply its tool calls, with their results, and marks the prompt and the answer', () => {
+  it('gives each reply its tool calls and their results, and marks prompt and answer', () => {
     const turn: Message[] = [
       { role: 'user', content: 'Plan my week' },
       {
@@ -27,8 +29,18 @@ describe('render', () => {
           { id: 'c2', name: 'weather', input: {} },
         ],
       },
-      { role: 'tool', callId: 'c1', name: 'calendar', result: { status: 'success', output: { free: ['Mon'] } } },
-      { role: 'tool', callId: 'c2', name: 'weather', result: { status: 'error', code: 'down', message: 'no data' } },
+      {
+        role: 'tool',
+        callId: 'c1',
+        name: 'calendar',
+        result: { status: 'success', output: { free: ['Mon'] } },
+      },
+      {
+        role: 'tool',
+        callId: 'c2',
+        name: 'weather',
+        result: { status: 'error', code: 'down', message: 'no data' },
+      },
       { role: 'user', content: steering('Skip Friday') },
       { role: 'assistant', content: 'Monday it is' },
     ];
@@ -38,8 +50,21 @@ describe('render', () => {
         role: 'assistant',
         parts: [
           { type: 'text', text: 'Let me look' },
-          { type: 'tool', id: 'c1', name: 'calendar', input: { week: 1 }, output: '{"free":["Mon"]}' },
-          { type: 'tool', id: 'c2', name: 'weather', input: {}, output: 'Error: no data', error: true },
+          {
+            type: 'tool',
+            id: 'c1',
+            name: 'calendar',
+            input: { week: 1 },
+            output: '{"free":["Mon"]}',
+          },
+          {
+            type: 'tool',
+            id: 'c2',
+            name: 'weather',
+            input: {},
+            output: 'Error: no data',
+            error: true,
+          },
         ],
       },
       { role: 'user', parts: [{ type: 'text', text: 'Skip Friday' }] },
@@ -59,12 +84,29 @@ describe('render', () => {
           { id: 'c', name: 'job', input: {} },
         ],
       },
-      { role: 'tool', callId: 'a', name: 'transfer', result: { status: 'denied', message: 'not approved' } },
-      { role: 'tool', callId: 'b', name: 'slow', result: { status: 'cancelled', message: 'stopped' } },
+      {
+        role: 'tool',
+        callId: 'a',
+        name: 'transfer',
+        result: { status: 'denied', message: 'not approved' },
+      },
+      {
+        role: 'tool',
+        callId: 'b',
+        name: 'slow',
+        result: { status: 'cancelled', message: 'stopped' },
+      },
       { role: 'tool', callId: 'c', name: 'job', result: { status: 'pending', operationId: 'op' } },
     ]);
     expect(reply!.parts).toEqual([
-      { type: 'tool', id: 'a', name: 'transfer', input: {}, output: 'Denied: not approved', error: true },
+      {
+        type: 'tool',
+        id: 'a',
+        name: 'transfer',
+        input: {},
+        output: 'Denied: not approved',
+        error: true,
+      },
       { type: 'tool', id: 'b', name: 'slow', input: {}, output: 'Cancelled: stopped', error: true },
       { type: 'tool', id: 'c', name: 'job', input: {} },
     ]);
@@ -89,7 +131,13 @@ describe('withoutBounds', () => {
       type: 'object',
       properties: {
         offset: { type: ['integer', 'null'], minimum: 0 },
-        limit: { type: 'integer', exclusiveMinimum: 0, maximum: 100, multipleOf: 5, description: 'how many' },
+        limit: {
+          type: 'integer',
+          exclusiveMinimum: 0,
+          maximum: 100,
+          multipleOf: 5,
+          description: 'how many',
+        },
         ref: { type: 'string', minLength: 1 },
         items: { type: 'array', items: { type: 'number', maximum: 1 }, maxItems: 3 },
       },
@@ -110,12 +158,14 @@ describe('withoutBounds', () => {
 
 describe('refused', () => {
   it("is a model's own terminal error for a 4xx, or a missing API key", () => {
-    expect(refused(new restate.TerminalError('Incorrect API key provided', { errorCode: 401 }))).toBe(true);
+    expect(
+      refused(new restate.TerminalError('Incorrect API key provided', { errorCode: 401 })),
+    ).toBe(true);
     expect(refused(new restate.TerminalError('model not found', { errorCode: 404 }))).toBe(true);
     expect(refused(new restate.TerminalError('OpenAI API key is missing.'))).toBe(true);
   });
 
-  it('is not an outage that ran out of retries, a cancellation, an error of its own class, or a retryable one', () => {
+  it('is not an outage, a cancellation, a subclass of its own, or a retryable error', () => {
     expect(refused(new restate.TerminalError('503 Service Unavailable'))).toBe(false);
     expect(refused(new restate.CancelledError())).toBe(false);
     class Overflow extends restate.TerminalError {}
@@ -135,7 +185,11 @@ describe('approves', () => {
 });
 
 describe('toolsOf', () => {
-  const planner = agentlib.agent({ name: 'planner', description: 'Plans work', model: 'openai/gpt-6-sol' });
+  const planner = agentlib.agent({
+    name: 'planner',
+    description: 'Plans work',
+    model: 'openai/gpt-6-sol',
+  });
   const orders = sdk.service({
     name: 'orders',
     handlers: { status: async (_ctx: sdk.Context, _input: unknown) => 'ok' },
@@ -146,9 +200,11 @@ describe('toolsOf', () => {
     input: z.object({ city: z.string() }),
     run: ({ city }) => `Sunny in ${city}`,
   });
-  const own = { echo: asyncTool({ description: 'Echo', input: z.object({}), execute: async () => 'echo' }) };
+  const own = {
+    echo: asyncTool({ description: 'Echo', input: z.object({}), execute: async () => 'echo' }),
+  };
 
-  it("names Restate's tools as every agent does, beside agentlib's own, in a list or by name", () => {
+  it("names Restate's tools as every agent does, beside agentlib's own", () => {
     const tools = toolsOf('a', [
       weather,
       call(orders, 'status', { description: 'An order', input: z.object({ order: z.string() }) }),
@@ -156,7 +212,13 @@ describe('toolsOf', () => {
       subagent(planner),
       own,
     ]);
-    expect(Object.keys(tools)).toEqual(['get_weather', 'orders_status', 'wait_for_approval', 'planner', 'echo']);
+    expect(Object.keys(tools)).toEqual([
+      'get_weather',
+      'orders_status',
+      'wait_for_approval',
+      'planner',
+      'echo',
+    ]);
     expect(tools.echo).toBe(own.echo);
     expect(tools.planner!.description).toBe(
       'Hand a task to the planner agent (Plans work), and get its answer. ' +
@@ -171,7 +233,9 @@ describe('toolsOf', () => {
   });
 
   it('refuses two tools of one name', () => {
-    expect(() => toolsOf('a', [weather, { get_weather: own.echo }])).toThrow('a: two tools are named get_weather');
+    expect(() => toolsOf('a', [weather, { get_weather: own.echo }])).toThrow(
+      'a: two tools are named get_weather',
+    );
   });
 });
 
@@ -184,13 +248,15 @@ describe('agent', () => {
   });
 
   it('refuses history bounds that are no positive integers, as it is defined', () => {
-    expect(() => agentlib.agent({ name: 'a', model: 'openai/gpt-6-sol', history: { retainMessages: 0 } })).toThrow(
-      'a: history.retainMessages must be a positive integer, not 0',
-    );
-    expect(() => agentlib.agent({ name: 'a', model: 'openai/gpt-6-sol', history: { maxChars: 1.5 } })).toThrow(
-      'a: history.maxChars must be a positive integer, not 1.5',
-    );
-    expect(() => agentlib.agent({ name: 'a', model: 'openai/gpt-6-sol', history: { maxMessages: 200 } })).not.toThrow();
+    expect(() =>
+      agentlib.agent({ name: 'a', model: 'openai/gpt-6-sol', history: { retainMessages: 0 } }),
+    ).toThrow('a: history.retainMessages must be a positive integer, not 0');
+    expect(() =>
+      agentlib.agent({ name: 'a', model: 'openai/gpt-6-sol', history: { maxChars: 1.5 } }),
+    ).toThrow('a: history.maxChars must be a positive integer, not 1.5');
+    expect(() =>
+      agentlib.agent({ name: 'a', model: 'openai/gpt-6-sol', history: { maxMessages: 200 } }),
+    ).not.toThrow();
   });
 
   it('is a virtual object with the handlers and views of every agent, and its companion', () => {
