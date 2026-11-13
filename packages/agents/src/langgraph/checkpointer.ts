@@ -11,7 +11,11 @@
 //   savers (a count and a random part): a thread forked from an earlier
 //   checkpoint takes the same counts again, and its values must not replace
 //   those of the branch it forked from.
-// - `restate_langgraph_writes`: the pending writes of each checkpoint's tasks.
+// - `restate_langgraph_writes`: the pending writes of each checkpoint's tasks,
+//   with each task's path, and read back in LangGraph's order for them
+//   (`writesSortKey`: path, task id, index), the order live execution applies
+//   a step's writes in. A write without a path (graph input, a `Command`)
+//   comes first.
 //
 // Each `put` and `putWrites` is one SQL transaction, so a step is stored whole,
 // in order with everything else the handler does. Operations run one at a
@@ -36,7 +40,9 @@ import {
   copyCheckpoint,
   maxChannelVersion,
   TASKS,
+  compareWritesSortKeys,
   WRITES_IDX_MAP,
+  writesSortKey,
   type ChannelVersions,
   type Checkpoint,
   type CheckpointListOptions,
@@ -78,6 +84,7 @@ export const SCHEMA = new Schema('restate-agents.langgraph', [
     channel TEXT NOT NULL,
     type TEXT NOT NULL,
     value BLOB NOT NULL,
+    task_path TEXT,
     PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
   )`,
 ]);
@@ -260,10 +267,15 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
     // A checkpoint of an earlier format (v < 4) keeps its pending sends as
     // writes of its parent.
     if (checkpoint.v < 4 && parentId !== null) await this.#migratePendingSends(checkpoint, threadId, ns, parentId);
-    const writes = await this.#db.values(
-      'SELECT task_id, channel, type, value FROM restate_langgraph_writes WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ? ORDER BY rowid',
-      [threadId, ns, checkpointId],
-    );
+    const writes = (
+      (await this.#db.values(
+        'SELECT task_id, channel, type, value, task_path, idx FROM restate_langgraph_writes WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?',
+        [threadId, ns, checkpointId],
+      )) as [string, string, string, Uint8Array, string | null, number][]
+    )
+      .map((row) => ({ row, key: writesSortKey(row[4] ?? '', row[0], row[5]) }))
+      .sort((a, b) => compareWritesSortKeys(a.key, b.key))
+      .map(({ row }) => row);
     const config = (id: string) => ({ configurable: { thread_id: threadId, checkpoint_ns: ns, checkpoint_id: id } });
     return {
       config: config(checkpointId),
@@ -271,13 +283,11 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
       metadata: await this.serde.loadsTyped(type, metadata),
       parentConfig: parentId === null ? undefined : config(parentId),
       pendingWrites: await Promise.all(
-        (writes as [string, string, string, Uint8Array][]).map(
-          async ([taskId, channel, writeType, value]): Promise<CheckpointPendingWrite> => [
-            taskId,
-            channel,
-            await this.serde.loadsTyped(writeType, value),
-          ],
-        ),
+        writes.map(async ([taskId, channel, writeType, value]): Promise<CheckpointPendingWrite> => [
+          taskId,
+          channel,
+          await this.serde.loadsTyped(writeType, value),
+        ]),
       ),
     };
   }
@@ -428,7 +438,7 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
     });
   }
 
-  putWrites(config: RunnableConfig, writes: PendingWrite[], taskId: string): Promise<void> {
+  putWrites(config: RunnableConfig, writes: PendingWrite[], taskId: string, taskPath?: string): Promise<void> {
     return this.#serial(async () => {
       const { thread_id, checkpoint_ns = '', checkpoint_id } = config.configurable ?? {};
       if (!thread_id) throw new Error('Missing thread_id field in config.configurable.');
@@ -447,13 +457,14 @@ export class SqlCheckpointSaver extends BaseCheckpointSaver {
             channel,
             type,
             stored,
+            taskPath ?? null,
           ];
         }),
       );
       await this.#db.transaction(async (tx) => {
         for (const row of rows) {
           await tx.execute(
-            `${verb} INTO restate_langgraph_writes (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, value) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            `${verb} INTO restate_langgraph_writes (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, value, task_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             row,
           );
         }

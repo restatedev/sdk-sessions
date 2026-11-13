@@ -123,7 +123,7 @@ background agent takes none.
 
 ## Claude
 
-The Anthropic SDK's tool runner (`@anthropic-ai/sdk` 0.133.0).
+The Anthropic SDK's tool runner (`@anthropic-ai/sdk` 1.8.0, without the API's message thread).
 [`src/claude/`](../src/claude).
 
 ### Today
@@ -240,8 +240,8 @@ The Anthropic SDK's tool runner (`@anthropic-ai/sdk` 0.133.0).
 
 ## LangGraph
 
-`@langchain/langgraph` 1.4.18, `@langchain/langgraph-checkpoint` 1.1.5,
-`@langchain/core` 1.2.12. [`src/langgraph/`](../src/langgraph).
+`@langchain/langgraph` 1.7.3, `@langchain/langgraph-checkpoint` 1.2.2,
+`@langchain/core` 1.4.0. [`src/langgraph/`](../src/langgraph).
 
 ### Today
 
@@ -368,7 +368,7 @@ The Anthropic SDK's tool runner (`@anthropic-ai/sdk` 0.133.0).
 
 ## DeepSeek Harness
 
-`@deepseek-ai/dsh-*` 0.2.1-rc.2, `@deepseek-ai/cordis` 4.0.5.
+`@deepseek-ai/dsh-*` 0.2.2-rc.2 (with `dsh-tool-executor-native`), `@deepseek-ai/cordis` 4.1.0.
 [`src/deepseek/`](../src/deepseek).
 
 ### Today
@@ -654,7 +654,7 @@ and its ask never settles, so the harness stores no decision.
 
 ## OpenCode
 
-`@opencode/core`, `sdk`, `server` and `plugin` 2.2.6, with `effect` 4.1.0,
+`@opencode/core`, `sdk`, `server` and `plugin` 2.2.7, with `effect` 4.1.0,
 pinned exactly; OpenCode needs Node 24. [`src/opencode/`](../src/opencode).
 The research behind it (what OpenCode does, the alternatives weighed, the
 spike, the steps) is in [OpenCode's return](opencode.md).

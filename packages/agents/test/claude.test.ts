@@ -366,7 +366,7 @@ describe('the Claude agent', () => {
       // As the API: only the last message may be empty.
       const empty = messages
         .slice(0, -1)
-        .some((m) => (typeof m.content === 'string' ? !m.content.trim() : m.content.length === 0));
+        .some((m) => (typeof m.content === 'string' ? !m.content.trim() : !m.content?.length));
       if (empty) throw new HttpError(400, 'invalid_request_error', 'all messages must have non-empty content');
       return messages.length === 1 ? { ...reply(messages), content: [] } : reply(messages);
     };

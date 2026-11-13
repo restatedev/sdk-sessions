@@ -286,7 +286,7 @@ async function cancelledAt(at: (statements: [string, unknown[]][]) => boolean) {
 
 /** What each item says: a tool call, a result, or text. */
 const shown = (items: MessageParam[]) =>
-  items.map(({ content }) =>
+  items.map(({ content = [] }) =>
     typeof content === 'string'
       ? content
       : content

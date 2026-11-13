@@ -99,11 +99,11 @@ npm install @restatedev/agents @anthropic-ai/sdk                                
 npm install @restatedev/agents @langchain/core @langchain/langgraph @langchain/langgraph-checkpoint \
   @langchain/openai                       # LangGraph, and the provider of its models: or @langchain/anthropic
 npm install @restatedev/agents @earendil-works/pi-ai@1.5.2 @deepseek-ai/cordis \
-  @deepseek-ai/{dsh-agent,dsh-agent-loop,dsh-llm,dsh-llm-deepseek-api-key,dsh-llm-pi-ai,dsh-session}@0.2.1-rc.2 \
-  @deepseek-ai/{dsh-session-checkpoint-policy,dsh-session-persistence,dsh-session-projection}@0.2.1-rc.2 \
-  @deepseek-ai/{dsh-system-prompt,dsh-tools,dsh-user-approval}@0.2.1-rc.2 \
-  @deepseek-ai/{dsh-commands,dsh-compaction,dsh-compaction-basic,dsh-compaction-tool-result-pruner,dsh-token-meter}@0.2.1-rc.2   # DeepSeek
-npm install @restatedev/agents @opencode/{core,sdk,server,plugin}@2.2.6 effect@4.1.0                     # OpenCode, on Node 24
+  @deepseek-ai/{dsh-agent,dsh-agent-loop,dsh-llm,dsh-llm-deepseek-api-key,dsh-llm-pi-ai,dsh-session}@0.2.2-rc.2 \
+  @deepseek-ai/{dsh-session-checkpoint-policy,dsh-session-persistence,dsh-session-projection}@0.2.2-rc.2 \
+  @deepseek-ai/{dsh-system-prompt,dsh-tools,dsh-tool-executor-native,dsh-user-approval}@0.2.2-rc.2 \
+  @deepseek-ai/{dsh-commands,dsh-compaction,dsh-compaction-basic,dsh-compaction-tool-result-pruner,dsh-token-meter}@0.2.2-rc.2   # DeepSeek
+npm install @restatedev/agents @opencode/{core,sdk,server,plugin}@2.2.7 effect@4.1.0                     # OpenCode, on Node 24
 ```
 
 pi's packages are on 1.5 (`~1.5.2`): pi changes its API in minor releases
