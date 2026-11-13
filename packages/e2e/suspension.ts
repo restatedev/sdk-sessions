@@ -22,7 +22,7 @@ import { mkdtempSync, openSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RESTATE_SERVER as SERVER } from './restate-server.ts';
-import { assertNoneSuspendedOnCancellationAlone } from './suspensions.ts';
+import { assertNoneSuspendedOnCancellationAlone, suspensions } from './suspensions.ts';
 
 const INGRESS = 'http://127.0.0.1:8080';
 const ADMIN = 'http://127.0.0.1:9070';
@@ -46,8 +46,8 @@ const helper = restate.service({
 interface Work {
   /** How long it works outside Restate. */
   ms: number;
-  /** What it awaits of Restate's after that: a call, or the call raced with its cancellation. */
-  after?: 'call' | 'race';
+  /** What it awaits of Restate's after that: a call, a call that takes four inactivity timeouts, or the call raced with its cancellation. */
+  after?: 'call' | 'longCall' | 'race';
   /** A call it makes first and never awaits, which takes this long. */
   pending?: number;
   /** Works on its first attempt only: later ones go straight on. */
@@ -82,6 +82,10 @@ const work =
     if (pending !== undefined) void call('pending', pending).catch(() => {});
     let stopped = await Promise.race([watched, sleep(once && n > 1 ? 0 : ms).then(() => false)]);
     if (!stopped && after === 'call') await call('then', 50);
+    // Raced with the watch, as a tool's call is: the attempt that a cancellation resumes stops.
+    if (!stopped && after === 'longCall') {
+      stopped = await Promise.race([watched, call('long', 4 * INACTIVITY).then(() => false)]);
+    }
     if (!stopped && after === 'race') stopped = await Promise.race([watched, call('then', 50).then(() => false)]);
     return { stopped, attempts: attempts.get(id)! };
   };
@@ -325,6 +329,28 @@ await check('work that Restate aborts after its abort timeout is retried, with t
   assert.deepEqual({ ...plain, ms: 0 }, { stopped: false, attempts: 2, ms: 0 });
   assert.deepEqual({ ...watching, ms: 0 }, { stopped: false, attempts: 2, ms: 0 });
   for (const id of ids) assert.equal(ended.get(id), 2, 'the aborted attempt ended, and the one that answered');
+});
+
+await check('a watching handler that awaits a long call is suspended on it, until the call ends', async () => {
+  // The watch does not hold the invocation: what it waits for does, and Restate suspends it on that.
+  const p = await start('watching', { ms: 0, after: 'longCall' });
+  await sleep(2 * INACTIVITY);
+  assert.equal(await statusOf(p.id), 'suspended');
+  const on = (await suspensions(ADMIN)).filter((s) => s.id === p.id).at(-1);
+  assert.deepEqual(on?.awaited.map((leaf) => Object.keys(leaf)[0]).toSorted(), ['CompletionId', 'SignalIndex']);
+  const outcome = await p.outcome();
+  assert.deepEqual({ ...outcome, ms: 0 }, { stopped: false, attempts: 2, ms: 0 });
+  assert.ok(outcome.ms >= 4 * INACTIVITY, `${outcome.ms} ms`);
+});
+
+await check('suspended on a long call, it resumes for a cancellation, and stops', async () => {
+  const p = await start('watching', { ms: 0, after: 'longCall' });
+  await sleep(2 * INACTIVITY);
+  assert.equal(await statusOf(p.id), 'suspended');
+  await p.cancel();
+  const outcome = await p.outcome();
+  assert.equal(outcome.stopped, true);
+  assert.ok(outcome.ms < 3.5 * INACTIVITY, `${outcome.ms} ms`);
 });
 
 // --- Its cancellation
