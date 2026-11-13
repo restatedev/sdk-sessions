@@ -8,7 +8,7 @@
 // that id, so a tool call run again after a crash makes the same call, once.
 // A workflow's `run` is the exception: it runs once per workflow id, and
 // Restate refuses a second call of it whatever its idempotency key, so the
-// tool sends to it and waits for the run the send started ({@link runWorkflow}).
+// tool waits for the run by its invocation id ({@link runWorkflow}).
 import * as restate from '@restatedev/sessions';
 import { attach, start } from '@restatedev/sessions/internal';
 import { z } from 'zod';
@@ -168,15 +168,16 @@ const invoke = (
 
 /**
  * Run workflow `service` (its `run` handler) with id `key` and `input` to its
- * end, and resolve to its result: a send to it, then a wait for the run the
- * send started. A workflow's `run` runs once per id: Restate refuses a call
- * of it once its run started, whatever the call's idempotency key, while a
- * send to it starts nothing, and gets the id of the run that started. So a
+ * end, and resolve to its result: a call of it, whose result it does not wait
+ * for, then a wait for the run by the call's invocation id. A workflow's
+ * `run` runs once per id: Restate refuses a second call of it, whatever the
+ * call's idempotency key, but that call's invocation id is the run's. So a
  * new attempt (after a crash, or a suspension while the run went on) that
  * makes the call again waits for the run an earlier attempt started, and
  * only the first starts one; and a fixed id that ran before gets its run's
- * result. The run is the workflow's own, not a call of the attempt: stopping
- * the turn does not cancel it. The Python SDK's `run_workflow`.
+ * result. It is a call, not a send: stopping the turn cancels the run, as it
+ * cancels the turn's other calls (`cancelCalls`). The Python SDK's
+ * `run_workflow` sends instead, and so leaves the run going.
  */
 export const runWorkflow = async (
   ctx: restate.SessionContext,

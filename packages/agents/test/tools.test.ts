@@ -38,15 +38,13 @@ function context(state = new Map<string, Uint8Array>()) {
   const sdk = {
     key: 'alice',
     request: () => ({ id: 'inv1', target: { service: 'assistant', handler: 'chat', key: 'alice' } }),
-    genericCall: async (c: Record<string, unknown>) => {
+    // A call's invocation is the workflow run's of its key, as Restate's is.
+    genericCall: ((c: Record<string, unknown>) => {
       made.push({ kind: 'call', ...c });
-      return c.method === 'wait' ? 'approved' : `${String(c.method)} done`;
-    },
-    // A send's invocation is the workflow run's of its key, as Restate's is.
-    genericSend: (c: Record<string, unknown>) => {
-      made.push({ kind: 'send', ...c });
-      return { invocationId: Promise.resolve(`inv_${String(c.service)}_${String(c.key)}`) };
-    },
+      const result = Promise.resolve(c.method === 'wait' ? 'approved' : `${String(c.method)} done`);
+      return Object.assign(result, { invocationId: Promise.resolve(`inv_${String(c.service)}_${String(c.key)}`) });
+    }) as (c: Record<string, unknown>) => Promise<unknown>,
+    genericSend: (c: Record<string, unknown>) => void made.push({ kind: 'send', ...c }),
     invocation: (id: string) => ({
       attach: async () => {
         made.push({ kind: 'attach', id });
@@ -129,15 +127,15 @@ describe('send', () => {
 });
 
 describe('workflow', () => {
-  it('runs a workflow of its own per tool call, to its result: sent, then waited for', async () => {
+  it('runs a workflow of its own per tool call, to its result: called, then waited for by its invocation id', async () => {
     const t = workflow(refund, { description: 'Refund', input: z.object({ order: z.string() }) });
     expect(t.name).toBe('refund');
     const { result, made } = await run(t, { order: '103' });
     expect(result).toBe('run done');
-    // A send, not a call: Restate refuses a second call of a run, which a
-    // new attempt makes, and a send gets the id of the run that started.
+    // Its result is not awaited: Restate refuses a second call of a run,
+    // which a new attempt makes, but its invocation id is the run's.
     expect(made).toMatchObject([
-      { kind: 'send', service: 'refund', method: 'run', key: 'alice-call_1', parameter: { order: '103' } },
+      { kind: 'call', service: 'refund', method: 'run', key: 'alice-call_1', parameter: { order: '103' } },
       { kind: 'attach', id: 'inv_refund_alice-call_1' },
     ]);
     expect(made[0]?.idempotencyKey).toBeUndefined();
@@ -151,7 +149,7 @@ describe('workflow', () => {
     const again = context(state);
     await t.run({ order: '103' }, { ctx: again.ctx, callId: 'call_1' });
     expect(again.made).toMatchObject([
-      { kind: 'send', key: 'alice-call_1' },
+      { kind: 'call', key: 'alice-call_1' },
       { kind: 'attach', id: 'inv_refund_alice-call_1' },
     ]);
   });
@@ -161,7 +159,7 @@ describe('workflow', () => {
     const { result, made } = await run(t, { key: 'r1', order: '103' });
     expect(result).toBe('run done');
     expect(made).toMatchObject([
-      { kind: 'send', service: 'refund', method: 'run', key: 'r1', parameter: { order: '103' } },
+      { kind: 'call', service: 'refund', method: 'run', key: 'r1', parameter: { order: '103' } },
       { kind: 'attach', id: 'inv_refund_r1' },
     ]);
   });
@@ -209,7 +207,7 @@ describe("Restate's tools", () => {
     // An attempt makes the call, and ends (a crash, a suspension) before it answers.
     const first = context(state);
     const made = Promise.withResolvers<void>();
-    first.sdk.genericCall = (() => (made.resolve(), new Promise(() => {}))) as never;
+    first.sdk.genericCall = () => (made.resolve(), new Promise(() => {}));
     void t.run({ order: '103' }, { ctx: first.ctx, callId: 'call_1' });
     // Stored before it is made.
     await made.promise;

@@ -167,6 +167,35 @@ const patient = sessionObject({
   options: { inactivityTimeout: { milliseconds: 100 } },
 });
 
+// A workflow that runs until it is cancelled, and an agent whose tool runs it
+// under the id `hold-<key>`: stopping its turn cancels the run.
+const hold = restate.workflow({
+  name: 'hold',
+  handlers: {
+    run: async (ctx: restate.WorkflowContext) => {
+      await ctx.sleep({ minutes: 10 });
+      return 'held';
+    },
+  },
+});
+const holderModels = createModels();
+holderModels.setProvider(
+  fakeProvider('holder', 'holder', ({ messages }) => {
+    const results = messages.filter((m) => m.role === 'toolResult').map((m) => textOf(m.content));
+    return results.length === 0 ? callTools([['hold', {}]]) : say(results.join(' / '));
+  }),
+);
+const holder = sessionObject({
+  name: 'holder',
+  handlers: {
+    chat: pi.chat({
+      model: 'holder/holder',
+      models: holderModels,
+      tools: [workflow(hold, { description: 'Hold', key: (ctx) => `hold-${ctx.key}` })],
+    }),
+  },
+});
+
 // An agent on LangGraph, which stores a tool's result before it publishes the step: asked to audit, its
 // model (the teller) waits for a manager's approval, then reports it.
 const auditor = langgraph.agent({
@@ -205,7 +234,21 @@ const server = spawn(SERVER, ['--base-dir', dir], {
 });
 try {
   await restate.serve({
-    services: [orders, refund, support, auditor, triage, hooks, signals, slow, slowRefund, clerk, patient],
+    services: [
+      orders,
+      refund,
+      support,
+      auditor,
+      triage,
+      hooks,
+      signals,
+      slow,
+      slowRefund,
+      clerk,
+      patient,
+      hold,
+      holder,
+    ],
     port: PORT,
   });
   for (
@@ -563,6 +606,31 @@ try {
     'found 103 / found 104 / refunded 103 slowly / refunded 105 slowly',
   );
   assert.ok(patientAttempts > 4, `the turn was not suspended: ${patientAttempts} attempts`);
+
+  // Stopping a turn cancels the workflow run its tool waits for, as it
+  // cancels the turn's other calls: the tool calls the run (and waits for it
+  // by its invocation id), rather than send to it, which no cancellation
+  // reaches.
+  const statuses = async (target: string) => {
+    const response = await fetch(`${ADMIN}/query`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify({ query: `SELECT status FROM sys_invocation WHERE target = '${target}'` }),
+    });
+    return ((await response.json()) as { rows: { status: string }[] }).rows.map((r) => r.status);
+  };
+  const held = await ingress.objectSendClient(agent('holder'), 'ann').chat('Hold');
+  for (let i = 0; (await statuses('hold/hold-ann/run')).length === 0; i++) {
+    if (i > 100) throw new Error('the run did not start');
+    await sleep(100);
+  }
+  assert.deepEqual(await ingress.objectClient(agent('holder'), 'ann').stop(), { stopped: held.invocationId });
+  const run = await fetch(`${INGRESS}/restate/workflow/hold/hold-ann/attach`, {
+    signal: AbortSignal.timeout(20_000),
+  }).catch((error: unknown) => {
+    throw new Error(`the stopped turn's run was not cancelled: ${String(error)}`);
+  });
+  assert.equal(run.status, 409, `${run.status} ${await run.text()}`);
 
   // A handler's terminal error is the tool's answer, for the model.
   assert.equal(await post('support/dave/chat', 'Refund order 999'), 'Error: no order 999');

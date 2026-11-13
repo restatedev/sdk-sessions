@@ -379,25 +379,31 @@ function scopeOfHandler(ctx: SessionContext, of: string) {
 }
 
 /**
- * Start an invocation of `target` by a send, made at once as `ctx.send`
- * makes it, and resolve to its id (`inv_1f…`): for a library that waits for
- * what it sent ({@link attach}). A send to a workflow's `run` whose run of
- * that id started already starts nothing: its id is that run's. So a new
- * attempt that sends again gets the id of the run an earlier one started,
- * where a call (`ctx.rpc`) would fail, as a workflow's `run` runs once.
+ * Call `target`, and resolve to the id of the call's invocation (`inv_1f…`),
+ * not waiting for its result: for a library that waits for it by
+ * {@link attach}. It is a call, not a send: a handler with
+ * `explicitCancellation` whose `cancelCalls` cancels the calls of its
+ * attempt cancels this one too, as a send's would not be.
+ *
+ * Its result is left as it comes. A call of a workflow's `run` whose run of
+ * that id started already fails ("the workflow method was already
+ * invoked"), whatever its idempotency key, but its invocation id is that
+ * run's: so a new attempt that calls again gets the id of the run an
+ * earlier one started, and its `cancelCalls` cancels that run.
  */
 export async function start(ctx: SessionContext, target: Target & CallOptions): Promise<string> {
   const { service, key, handler, input, inputSerde, idempotencyKey, headers } = target;
-  const sent = scopeOfHandler(ctx, 'start').sdk.genericSend({
+  const called = scopeOfHandler(ctx, 'start').sdk.genericCall({
     service,
     method: handler,
     key,
     parameter: input,
     inputSerde: inputSerde ?? restate.serde.json,
+    outputSerde: restate.serde.binary,
     idempotencyKey,
     headers,
   });
-  return String(await sent.invocationId);
+  return String(await called.invocationId);
 }
 
 /**
