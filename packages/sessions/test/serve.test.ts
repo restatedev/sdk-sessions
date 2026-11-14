@@ -1,3 +1,4 @@
+// oxlint-disable eslint/no-underscore-dangle -- the SDK's names, as `remote` carries them
 // What `restate.serve` serves: the services given, each with what it needs
 // beside it (a library's own objects), once, or those RESTATE_SERVE_ONLY names.
 import * as restate from '@restatedev/sessions';
