@@ -32,11 +32,12 @@ export const serve = (...services: Service[]) =>
  * `connect`, with the services it needs beside them, each once (the SDK's
  * own leaves them out, so an agent would run without its companion).
  *
- *   await restate.connect({ services: [notes, orders], name: 'notes-v1' });
+ *   restate.connect({ services: [notes, orders], name: 'notes-v1' });
  *
  * `name` is the deployment you register (`connect://notes-v1`); the key is
  * RESTATE_CONNECT_KEY. RESTATE_SERVE_ONLY applies as it does to
- * {@link serve}.
+ * {@link serve}. It returns the SDK's `Connection` and does not wait for
+ * the handshake: `await restate.connect(…).ready` is what waits.
  */
 export const connect = (options: ConnectOptions) =>
   restate.connect({ ...options, services: served(options.services, process.env.RESTATE_SERVE_ONLY) });

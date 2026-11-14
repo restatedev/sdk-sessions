@@ -66,11 +66,12 @@ as the companion each @restatedev/agents agent brings with it).
 connects out rather than being called in:
 
 ```ts
-await restate.connect({ services: [notes, orders], name: 'notes-v1' });
+restate.connect({ services: [notes, orders], name: 'notes-v1' });
 ```
 
 `name` is the deployment you register (`connect://notes-v1`), and the key
-is `RESTATE_CONNECT_KEY`. Use this one, not the SDK's own `connect`: the
+is `RESTATE_CONNECT_KEY`. It returns at once, with the SDK's `Connection`;
+`await restate.connect(…).ready` waits for the first handshake. Use this one, not the SDK's own `connect`: the
 SDK's binds only the services you list, leaving out what they need beside
 them, so an agent would run without its companion.
 
