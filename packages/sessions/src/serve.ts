@@ -55,9 +55,12 @@ export interface Serving {
  */
 export function serving(services: Service[], env: Record<string, string | undefined> = process.env): Serving {
   const bound = served(services, env.RESTATE_SERVE_ONLY);
-  if (env.RESTATE_CONNECT_KEY === undefined) return { services: bound, port: Number(env.PORT ?? 9080) };
+  // Blank counts as unset, as it does in the SDK (its `readEnv` maps '' to
+  // undefined): `RESTATE_CONNECT_KEY=` in a .env, or `${RESTATE_CONNECT_KEY:-}`
+  // in a compose file, would otherwise connect out and fail for want of a key.
+  if (!env.RESTATE_CONNECT_KEY) return { services: bound, port: Number(env.PORT ?? 9080) };
   const name = env.RESTATE_CONNECT_NAME;
-  return { services: bound, connect: name === undefined ? {} : { name } };
+  return { services: bound, connect: name ? { name } : {} };
 }
 
 /**

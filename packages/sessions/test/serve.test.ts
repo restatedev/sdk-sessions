@@ -51,6 +51,16 @@ describe('serving', () => {
     expect(serving([agent], { RESTATE_CONNECT_KEY: 'a-key' }).connect).toEqual({});
   });
 
+  it('counts a blank key as none, as the SDK does, so a .env template still listens', () => {
+    const plan = serving([agent], { RESTATE_CONNECT_KEY: '', PORT: '9090' });
+    expect(plan.connect).toBeUndefined();
+    expect(plan.port).toBe(9090);
+  });
+
+  it('counts a blank name as none, leaving the SDK its own fallbacks', () => {
+    expect(serving([agent], { RESTATE_CONNECT_KEY: 'a-key', RESTATE_CONNECT_NAME: '' }).connect).toEqual({});
+  });
+
   it('serves only what RESTATE_SERVE_ONLY names when it connects out, too', () => {
     const other = restate.sessionObject({ name: 'lists', handlers: { add: async () => {} } });
     const plan = serving([agent, other], { RESTATE_CONNECT_KEY: 'a-key', RESTATE_SERVE_ONLY: 'notes' });
