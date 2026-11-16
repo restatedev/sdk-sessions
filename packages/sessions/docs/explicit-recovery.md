@@ -422,10 +422,24 @@ this itself is the better end state.
   `CancelledError` and compensates with a write sees that write fail too. The
   other end of the same knot: a handler that only reads never sees the
   cancellation at all, because a read is answered in the addon without a wait
-  on Restate for the carry to land on. Both want one carry owned by
-  `VmInner`, taken by whichever side waits next, in place of two decided
-  apart. Implicit cancellation only: a handler with `explicitCancellation`
-  returns before either carry, which is every handler in @restatedev/agents.
+  on Restate for the carry to land on. Implicit cancellation only: a handler
+  with `explicitCancellation` returns before either carry, which is every
+  handler in @restatedev/agents.
+
+  **One carry owned by `VmInner`, taken by whichever side waits next, is the
+  obvious fix and it is not enough** — tried, and reverted. The store's own
+  machinery waits through the same `issue_and_wait`: opening the database
+  reads its head, and a flush waits for its head's ack (`node.rs`'s `wait`
+  and `write_acked`). None of that is a wait the handler made. A single carry
+  is consumed by the first of them, so the handler's own next await succeeds
+  and the cancellation is lost — the same shape as a send's invocation id
+  swallowing it on the driver's side, one layer down. The two tests that
+  cover a carried cancellation reaching a call's result both go red that way.
+
+  A fix has to tell a wait the handler is owed from one the session makes for
+  itself, on both sides of the boundary — `Waits` does it for the driver, and
+  the store would need the same — and only then share one carry between
+  them.
 
 - **A Restate below protocol v7 cannot serve a session object at all.** It
   once reached the SDK's VM through the selector. With the selector gone
