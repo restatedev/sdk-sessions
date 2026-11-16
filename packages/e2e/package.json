@@ -17,7 +17,8 @@
     "packaging": "node packaging.ts",
     "agentlib": "node agentlib.ts",
     "explicit-recovery": "node explicit-recovery.ts",
-    "leak": "node --expose-gc leak.ts"
+    "leak": "node --expose-gc leak.ts",
+    "identity": "node identity.ts"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "1.5.2",

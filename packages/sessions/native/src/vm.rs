@@ -229,6 +229,40 @@ impl VmInner {
     }
 }
 
+/// Restate's signature on a request, as the SDK verifies it before dispatch.
+///
+/// This package runs a session object's invocation ahead of that handler, so
+/// it verifies the signature itself: a deployment with identity keys, which
+/// every `connect` has, would otherwise go unchecked (`src/endpoint.ts`).
+#[napi]
+pub struct Identity(restate_sdk_shared_core::IdentityVerifier);
+
+#[napi]
+impl Identity {
+    /// The v1 public keys a deployment accepts (`publickeyv1_…`).
+    #[napi(constructor)]
+    pub fn new(keys: Vec<String>) -> Result<Self> {
+        let borrowed: Vec<&str> = keys.iter().map(String::as_str).collect();
+        restate_sdk_shared_core::IdentityVerifier::new(&borrowed)
+            .map(Self)
+            .map_err(|error| Error_::new(Status::InvalidArg, error.to_string()))
+    }
+
+    /// Nothing if `headers` carry a signature of `path` by one of the keys,
+    /// and why not otherwise.
+    #[napi]
+    pub fn verify(&self, path: String, headers: Vec<VmHeader>) -> Option<String> {
+        let headers: Vec<(String, String)> = headers
+            .into_iter()
+            .map(|header| (header.key, header.value))
+            .collect();
+        self.0
+            .verify_identity(&headers, &path)
+            .err()
+            .map(|error| error.to_string())
+    }
+}
+
 /// The attempt's state machine, shared by JavaScript and the database's store.
 #[napi]
 pub struct Vm(pub(crate) Arc<Mutex<VmInner>>);

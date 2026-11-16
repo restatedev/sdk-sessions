@@ -160,6 +160,27 @@ interface VmConstructor {
 export const Vm = (addon as { Vm: VmConstructor }).Vm;
 
 /**
+ * Restate's signature on a request, as the SDK verifies it before dispatch.
+ * This package runs a session object's invocation ahead of that handler, so it
+ * verifies the signature itself.
+ */
+export interface Identity {
+  /**
+   * `null` if the headers carry a signature of `path` by one of the keys, and
+   * why not otherwise. It is `null` and not `undefined`: the addon answers
+   * `None`, which is how that crosses the boundary.
+   */
+  verify(path: string, headers: VmHeader[]): string | null;
+}
+
+interface IdentityConstructor {
+  /** The v1 public keys a deployment accepts (`publickeyv1_…`). */
+  new (keys: string[]): Identity;
+}
+
+export const Identity = (addon as { Identity: IdentityConstructor }).Identity;
+
+/**
  * What the database's store's waits fail with, as the addon's errors carry it:
  * the text crosses the boundary, the class does not (`native/src/vm.rs`).
  */

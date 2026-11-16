@@ -83,39 +83,11 @@ Two hops per _write_ survived the first cut, and both are gone:
 A read the VM can answer locally is routed under the lock that issued it, so it
 never costs a turn of the event loop either.
 
-**Measured**, three ways, so that the store's share is its own. `pnpm --filter
-e2e bench` runs the workload; `BENCH_VM=1` serves through this package.
-
-- **selector** — the SDK's VM and journaled context, the store in JavaScript;
-- **VM + JS store** — this branch at `e3db16a`, the commit before `VmStore`:
-  the explicit recovery VM and the driver, but the store still JavaScript's;
-- **VM + Rust store** — this branch.
-
-Medians of three runs each, p50 in milliseconds:
-
-| phase                              | calls | selector | VM + JS store | VM + Rust store | the store  | in all |
-| ---------------------------------- | ----- | -------- | ------------- | --------------- | ---------- | ------ |
-| insert, new key, 32 at once        | 2000  | 120.8    | 117.0         | 86.1            | **−26.4%** | −28.7% |
-| insert 2 KiB, 16 keys, 16 at once  | 4000  | 41.2     | 42.3          | 29.8            | **−29.6%** | −27.7% |
-| read, 16 keys, warm                | 1600  | 55.9     | 57.6          | 49.9            | **−13.4%** | −10.7% |
-| count, one key, sequential         | 500   | 10.2     | 10.9          | 10.1            | −7.3%      | −1.0%  |
-| bulk 200 rows, one key, sequential | 50    | 32.4     | 33.9          | 32.1            | −5.3%      | −0.9%  |
-| 10 MB: update a row, warm          | 200   | 9.8      | 10.2          | 10.2            | 0.0%       | +4.1%  |
-| 10 MB: read a row, warm            | 200   | 7.2      | 7.7           | 7.6             | −1.3%      | +5.6%  |
-| 10 MB: read a row, view            | 50    | 8.6      | 8.6           | 9.0             | +4.7%      | +4.7%  |
-
-**Nearly all of it is the store.** The middle column is level with the
-selector, or a little behind it: moving to the VM buys correctness and drops
-the SDK pin, not speed. The gain is in concurrency, where the hops cost most —
-with many pages moving at once, two thread hops and two copies saved per page
-compound, and about a third of the latency goes. Sequential work on one key has
-no queue to shorten and shows nothing either way.
-
-The three small databases' single-row phases cost about 0.4 ms more on 7 to 10
-ms, and the middle column places that with the **VM**, not the store: 7.2 to
-7.7 ms before the store moved, 7.6 after. Three runs cannot tell a cost of that
-size from the machine, and it is worth a closer look before anyone quotes a
-figure for one sequential read.
+**Why it is in Rust at all.** Every page the store moves through JavaScript
+costs two thread hops and two copies: the runtime's thread to the event loop
+and back, and the bytes marshalled each way. On a flush with many pages in
+flight those compound, which is the case the store is built for. Keeping the
+store on the VM removes them.
 
 **The race the GIL hides.** sdk-python#314 issues a command and registers the
 waiter for its handle in two separate borrows of the VM. That is safe there
@@ -152,14 +124,11 @@ the store of one is refused rather than quietly served by the JavaScript store,
 which would test the other path under the name of this one; the tests that wrap
 give their attempts no VM.
 
-### 4. `serve` now; `connect` once the SDK can
+### 4. One seam: `NodeEndpoint.prototype`, so every transport runs on the VM
 
-The SDK exports `.`, `./fetch`, `./lambda` and `./node`. The dispatch that
-builds the VM is a module-private class, so a different VM cannot be
-substituted through any supported seam. `serve` is ours to write, so session
-objects run on the new VM there.
-
-`connect` cannot: its tunnel builds the handler itself, from `services`.
+~~Superseded.~~ This decision first read "`serve` now; `connect` once the SDK
+can", and left `connect` on the selector because its tunnel builds the handler
+itself, from `services`:
 
 ```js
 // endpoint/tunnel/engine.js
@@ -167,35 +136,50 @@ const sdkHandler = withOptions(new NodeEndpoint(), { services: options.services,
   .handler({ bidirectional: resolvedOptions.bidirectional });
 ```
 
-It would take patching `NodeEndpoint.prototype` — the same class the tunnel
-constructs — which trades one fragile patch for another. Decided (by the
-repository's owner, 2026-11-16) to leave `connect` on the selector until
-`@restatedev/restate-sdk` can hand sessions the invocation, and to ask for that
-upstream. Two paths meanwhile.
+The conclusion drawn from that — leave `connect` on the selector — was wrong in
+one respect that matters: the tunnel constructs `NodeEndpoint`, so patching
+that prototype reaches it. `endpoint.ts` wraps `handler`, `http2Handler`,
+`http1Handler` and `listen` on it, which is the one place every transport
+passes through. `restate.endpoint()`, `restate.serve` and `connect` all run a
+session object's invocation on the VM now, and the selector is what is left
+over rather than what anything depends on.
 
-### 5. Fronting `serve` bypasses no identity verification, because it can set none
+`handler` dispatches per request rather than per build, so the bidirectional
+rule is taken per request from `httpVersionMajor`: HTTP/2 unless told
+otherwise, HTTP/1.1 only when asked, which is what the SDK's own two handlers
+mean.
 
-An earlier draft of this document claimed the router runs after the SDK's
-verification. It does not: fronting the handler runs _before_ it. What makes
-that safe is narrower, and worth stating exactly.
+### 5. This package verifies the request signature itself
 
-`restate.serve({ port, ...options })` passes `options.identityKeys` to
-`withOptions`, which calls `withIdentityV1` only when keys are given. They come
-from the caller, never from the environment. @restatedev/sessions' own `serve`
-takes services and nothing else:
+~~Superseded.~~ This decision first read "fronting `serve` bypasses no identity
+verification, because it can set none". That held only while `sessions.serve`
+was the one way onto the VM and took no identity keys. Decision 4 put every
+transport on the VM, `connect` with them — and a `connect` deployment _always_
+verifies: its connect key carries the signing key, and the SDK refuses a key
+that does not (`connect/env.js`). Fronting the SDK's handler would then skip
+the verification the SDK does inside it, and a signature would go unchecked.
 
-```ts
-export const serve = (...services: Service[]) =>
-  restate.serve({ services: served(services, process.env.RESTATE_SERVE_ONLY), port: ... });
-```
+So this package verifies before it dispatches, with the verifier shared-core
+already has — the same one the server's own SDKs use. `native/src/vm.rs` binds
+it as `Identity` (shared-core's `request_identity` and `rust_crypto`
+features); `endpoint.ts` builds one from `endpoint.builder.keySet` and refuses
+an invocation it will not verify with a 401, before the handler runs. An
+invocation of a journaled object is handed to the SDK untouched, signature and
+all, so the SDK goes on verifying what it serves.
 
-So a deployment served by `sessions.serve` has no request signature verification
-today, with or without this change, and fronting it takes nothing away.
+The path is passed whole: shared-core's `normalise_path` strips a deployment
+prefix itself, so a deployment registered under one verifies the same.
 
-Verification is for the user who builds their own endpoint with `served()` and
-`withIdentityV1`. That endpoint is the SDK's throughout, so it keeps the SDK's
-verification _and_ stays on the selector. If `serve` ever takes identity keys,
-it must delegate to the SDK path whenever keys are set, or verify them itself.
+**The trap, and why the first test passed for the wrong reason.** `verify`
+returns `Option<String>` — the reason it refused, or nothing. Across napi,
+`None` is **`null`**, not `undefined`, so an `unsigned !== undefined` check was
+true for every request and refused all of them, signed or not. The first
+version of the check only asserted that an _unsigned_ request gets a 401, and
+an unsigned request is refused before any signature is read, so it passed
+against a deployment that would have answered 401 to everything — `connect`
+included. `packages/e2e/identity.ts` now signs with a key made for the run and
+asserts the half that can only pass for the right reason: a signed invocation
+runs and answers. A refusal-only test of a verifier proves nothing.
 
 ### 6. A heartbeat while the handler works, and only then
 
@@ -351,11 +335,12 @@ caller is awaiting one.
 
 ## What this change adds to the public surface
 
-- **`http2Handler(...services)`**, exported beside `serve` and `served`, for a
-  server of your own. `serve` is written in terms of it. It exists because
-  `serve` no longer delegates to the SDK's `listen`, and a user who built their
-  own server with `endpoint().http2Handler()` would otherwise have no way onto
-  the VM.
+- **Nothing, for getting onto the VM.** An earlier draft exported an
+  `http2Handler(...services)` beside `serve` and `served`, because `serve` had
+  stopped delegating to the SDK's `listen`. Decision 4 removed the need: the
+  seam is on `NodeEndpoint.prototype`, so a server built with
+  `endpoint().http2Handler()` is already on the VM and `serve` delegates to the
+  SDK again.
 - **`RESTATE_SESSIONS_HEARTBEAT`** (milliseconds), see 8 above.
 
 ## What differs from the SDK's path, beyond the VM
@@ -380,7 +365,9 @@ caller is awaiting one.
 
 ## The issue to open on sdk-typescript
 
-Not opened from here: drafted for a person to send.
+Not opened from here: drafted for a person to send. It is no longer a blocker —
+decision 4 found a seam — but the seam is a prototype patch, and the SDK doing
+this itself is the better end state.
 
 > **Let an SDK handler run on `ExplicitRecoveryVM`**
 >
@@ -391,32 +378,45 @@ Not opened from here: drafted for a person to send.
 > own promises — so such a handler can await concurrently, with no journal and
 > no single await point.
 >
-> @restatedev/sessions runs session objects on it today, but only for
-> deployments it serves itself, because there is no supported way to give the
-> SDK a different VM for an invocation:
+> @restatedev/sessions runs session objects on it today, but there is no
+> supported way to give the SDK a different VM for an invocation: the dispatch
+> that constructs the VM is module-private, and the package exports only `.`,
+> `./fetch`, `./lambda` and `./node`. So the package patches
+> `NodeEndpoint.prototype` — the class `restate.endpoint()`, `restate.serve`
+> and `connect`'s tunnel all build theirs from — and routes a session object's
+> invocation ahead of the SDK's handler. That works, and it is still a patch on
+> a class the SDK is free to change.
 >
-> - the dispatch that constructs the VM is module-private, and the package
->   exports only `.`, `./fetch`, `./lambda` and `./node`;
-> - `connect`'s tunnel builds its handler internally from `services`
->   (`endpoint/tunnel/engine.js`), so it cannot be handed one at all.
->
-> So `sessions.serve` is on the new VM and `sessions.connect` is stuck on a
-> selector that patches `promisesExecutor.doProgress` and five private fields,
-> pinned to `@restatedev/restate-sdk` 1.18.2.
->
-> Either of these would retire that patch:
+> Two things would retire it:
 >
 > 1. the SDK runs `explicitRecovery()` handlers on `ExplicitRecoveryVM`
 >    itself — the better end state, and it would serve every transport; or
-> 2. `connect` accepts a request handler, the way `serve` effectively does
->    through `endpoint().http2Handler()`, so an SDK-built handler can be
->    wrapped.
+> 2. an endpoint accepts a handler for an invocation it does not want to serve
+>    itself, so no prototype needs patching.
 >
 > sdk-python did (1) in restatedev/sdk-python#314.
+>
+> Routing ahead of the SDK's handler also moves request signature verification
+> out of it, so the package has to verify itself (shared-core's
+> `IdentityVerifier`, which it already depends on). (1) would make that
+> unnecessary too.
 
 ## Open
 
-- **The `connect` path**, above.
+- ~~**The `connect` path.**~~ Fixed by decision 4: `connect` runs session
+  objects on the VM through the same seam as every other transport.
+- **The selector is still in the tree.** Nothing routes onto it any more, and
+  it is to be deleted with what only exists to drive it: `src/selector.ts`,
+  `hookSelector` in `object.ts` and its exports from `internal.ts`,
+  `test/selector.test.ts`, `e2e/suspension.ts` (it drives the selector's
+  `failpoints`), the `E2E_SDK_SERVE` and `BENCH_VM` switches and their CI
+  lines. `wire.ts`'s `attempt()` still builds a fetch endpoint through
+  `createEndpointHandler`, which the prototype patch does not cover, so
+  `suspension-wire.test.ts` exercises the selector until it moves to the
+  patched class. Deleting it also unpins `@restatedev/restate-sdk` 1.18.2.
+- **`crash` has no VM variant.** `e2e/serve.ts` injects faults with
+  `withFaults`, and a VM attempt refuses a wrapped store (decision 3), so the
+  fault injection has to reach `VmStore` before that e2e covers this path.
 - ~~**foyer's debug print.**~~ Fixed. shared-core#117 pinned foyer 0.22.6,
   whose `foyer-storage/src/io/device/file.rs:103` had a stray
   `println!("==========> {capacity}")`, so every process that opened a disk

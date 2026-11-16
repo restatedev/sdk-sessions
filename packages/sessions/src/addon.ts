@@ -7,6 +7,7 @@ import { PLATFORMS, platform } from './platform.ts';
 interface Addon {
   open(namespace: string, store: unknown, reader: boolean): Promise<unknown>;
   Vm: unknown;
+  Identity: unknown;
 }
 
 /** The addon of this machine's platform, from its package (see platform.ts). */

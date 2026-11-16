@@ -18,6 +18,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as restate from '@restatedev/restate-sdk';
 import { servedHere, serveSession, type Stream } from './handler.ts';
 import { isSessionObject } from './object.ts';
+import { Identity, type VmHeader } from './vm.ts';
 
 /** Marks the prototype this package has already wrapped. */
 const PATCHED = Symbol.for('restate-sessions.endpoint-patched') as unknown as string;
@@ -50,18 +51,19 @@ function sessionsOf(endpoint: Endpoint): Map<string, { name: string }> {
  */
 function refuseWhatTheVmCannotServe(endpoint: Endpoint, sessions: Map<string, unknown>): void {
   if (sessions.size === 0) return;
-  if (endpoint.builder.keySet.length > 0) {
-    throw new Error(
-      '@restatedev/sessions: request identity verification (withIdentityV1) is not supported for session objects yet: ' +
-        'the SDK verifies in the handler this package routes ahead of, so a signature would go unchecked',
-    );
-  }
   if (endpoint.builder.journalValueCodecProvider !== undefined) {
     throw new Error(
       '@restatedev/sessions: a journal value codec is not supported for session objects: ' +
         'their attempts are never replayed, and nothing of theirs is journaled to encode',
     );
   }
+}
+
+/** The request's headers, as the verifier takes them. */
+function headersOf(headers: Readonly<Record<string, string | string[] | undefined>>): VmHeader[] {
+  return Object.entries(headers).flatMap(([key, value]) =>
+    value === undefined ? [] : [{ key, value: Array.isArray(value) ? (value[0] ?? '') : value }],
+  );
 }
 
 /** One invocation over HTTP/2, as {@link Stream}. */
@@ -92,10 +94,15 @@ export function invokeRoute(url: string): { service: string; handler: string } |
 function routing(
   endpoint: Endpoint,
   sdk: (request: never, response: never) => void,
-  bidirectional: boolean,
+  bidirectional: (request: { httpVersionMajor?: number }) => boolean,
 ): (request: Http2ServerRequest | IncomingMessage, response: Http2ServerResponse | ServerResponse) => void {
   const sessions = sessionsOf(endpoint);
   refuseWhatTheVmCannotServe(endpoint, sessions);
+  // The SDK verifies a request's signature in the handler this routes ahead
+  // of, so an invocation that goes to the VM is verified here instead. Every
+  // `connect` has keys: its key carries the signing key, and the SDK refuses
+  // one that does not.
+  const identity = endpoint.builder.keySet.length > 0 ? new Identity(endpoint.builder.keySet) : undefined;
   return (request, response) => {
     const route = sessions.size === 0 ? undefined : invokeRoute(request.url ?? '');
     const definition = route === undefined ? undefined : sessions.get(route.service);
@@ -103,8 +110,18 @@ function routing(
       sdk(request as never, response as never);
       return;
     }
+    const path = new URL(request.url ?? '', 'http://invoke').pathname;
+    // `null` is a verified request, as the addon answers `None` with: a
+    // deployment without keys verifies nothing, and stands for the same.
+    const unsigned = identity === undefined ? null : identity.verify(path, headersOf(request.headers));
+    if (unsigned !== null) {
+      // What the SDK answers, and the handler never runs.
+      (response as Http2ServerResponse).writeHead(401, { 'content-type': 'text/plain' });
+      response.end('Unauthorized');
+      return;
+    }
     serveSession(definition, route.handler, streamOf(request as Http2ServerRequest, response as Http2ServerResponse), {
-      bidirectional,
+      bidirectional: bidirectional(request),
     }).catch((error: unknown) => {
       // The attempt could not be served at all: the VM wrote nothing.
       if (!response.headersSent) (response as Http2ServerResponse).writeHead(500, { 'content-type': 'text/plain' });
@@ -134,13 +151,19 @@ export function patchEndpoint(): void {
 
   // The SDK's own defaults: HTTP/2 is bidirectional unless told otherwise,
   // HTTP/1.1 only when asked.
-  const wrap = (method: 'handler' | 'http2Handler' | 'http1Handler', mode: (set?: boolean) => boolean) => {
+  const wrap = (
+    method: 'handler' | 'http2Handler' | 'http1Handler',
+    mode: (set: boolean | undefined, request: { httpVersionMajor?: number }) => boolean,
+  ) => {
     const original = prototype[method] as Endpoint['handler'];
     prototype[method] = function (this: Endpoint, options?: { bidirectional?: boolean }) {
-      return routing(this, original.call(this, options), mode(options?.bidirectional)) as never;
+      const sdk = original.call(this, options);
+      return routing(this, sdk, (request) => mode(options?.bidirectional, request)) as never;
     };
   };
-  wrap('handler', (set) => set !== false);
+  // `handler` dispatches per request, so the rule is the one for that
+  // request's protocol; a handler built for one protocol knows it already.
+  wrap('handler', (set, request) => ((request.httpVersionMajor ?? 2) >= 2 ? set !== false : set === true));
   wrap('http2Handler', (set) => set !== false);
   wrap('http1Handler', (set) => set === true);
 
