@@ -1,14 +1,13 @@
 // A session object's handler served on the explicit recovery VM
 // (`src/handler.ts`), with Restate's side played by wire bytes: no SDK
-// endpoint, no selector, and a real `ctx.db` over the object's state.
+// endpoint, and a real `ctx.db` over the object's state.
 //
-// This is what proves the new path ran. Both paths coexist while `connect`
-// waits for the SDK, so a fallback would be silent: the assertions name what
-// only this path does — the state read and written in the addon, a commit
-// whose head write carries its own sync, and no run in the journal.
+// The assertions name what only this path does — the state read and written
+// in the addon, a commit whose head write carries its own sync, and no run in
+// the journal.
 import { describe, expect, it } from 'vitest';
 import * as restate from '@restatedev/sessions';
-import { database, start } from '@restatedev/sessions/internal';
+import { database, HEAD_KEY, start } from '@restatedev/sessions/internal';
 import { CancelledError } from '@restatedev/restate-sdk';
 import { serveSession, servedHere, type Stream } from '../src/handler.ts';
 import { bytes, decode, field, frame, uint } from './wire.ts';
@@ -101,6 +100,14 @@ function restateSide(state = new Map<string, Uint8Array>(), { cancelOnCommit = f
       // A retry of a cancelled invocation: the signal is among the entries of
       // the earlier attempts, so the VM knows before the handler starts.
       if (cancelAtStart) toSdk.push(frame(TYPE.signal, [...uint(2, 1), ...bytes(4, [])]));
+    },
+    /**
+     * Restate cancels the invocation now. Called while the handler works
+     * outside Restate, nothing of the attempt is waiting and the
+     * cancellation is carried to its next wait.
+     */
+    cancel() {
+      toSdk.push(frame(TYPE.signal, [...uint(2, 1), ...bytes(4, [])]));
     },
     /**
      * Answer what the attempt asks for until it ends, then close the request
@@ -228,6 +235,23 @@ const notes = restate.sessionObject({
         }
       };
       return `${await once()},${await once()}`;
+    },
+    /**
+     * A commit, work outside Restate long enough for a cancellation to land
+     * with nothing waiting, then another commit.
+     */
+    twoCommits: async (ctx: restate.SessionContext) => {
+      const commit = async (body: string) => {
+        try {
+          await ctx.db.execute('INSERT INTO notes (body) VALUES (?)', [body]);
+          return 'ok';
+        } catch (error) {
+          return error instanceof CancelledError ? 'CancelledError' : (error as Error).name;
+        }
+      };
+      const first = await commit('a');
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      return `${first},${await commit('b')}`;
     },
     /**
      * The same, with calls of Restate instead of the database: a carried
@@ -382,6 +406,41 @@ describe('a session object served on the explicit recovery VM', () => {
     const output = r.sent().find((m) => m.type === TYPE.output);
     const answered = decode(output!.fields.get(14)![0] as Uint8Array);
     expect(text(answered.get(1)![0] as Uint8Array)).toBe('"CancelledError,ok"');
+  }, 30_000);
+
+  it('a carried cancellation fails the next commit without putting its head write out', async () => {
+    // The head is what makes a commit visible, so a commit reported cancelled
+    // must not leave one behind: a handler that compensates on
+    // `CancelledError` would otherwise be compensating for a write that did
+    // happen. Issuing the command and only then failing its waiter left
+    // exactly that — the row durable, the `await` rejected.
+    const state = new Map<string, Uint8Array>();
+    const r = restateSide(state);
+    const serving = serveSession(notes, 'twoCommits', r.stream);
+    r.start('kc', null);
+    // While the handler works outside Restate, between its two commits.
+    const landing = setTimeout(() => r.cancel(), 150);
+    await r.settle();
+    clearTimeout(landing);
+    await serving;
+    const output = r.sent().find((m) => m.type === TYPE.output);
+    const answered = decode(output!.fields.get(14)![0] as Uint8Array);
+    expect(text(answered.get(1)![0] as Uint8Array)).toBe('"ok,CancelledError"');
+    // The cancelled commit's pages went out — they are written before its
+    // head, and are harmless without one — but its head never did, so the
+    // commit is invisible, exactly as after a crash mid-commit. Counting
+    // commits would count the schema's too, so this asserts the shape: the
+    // last state command is a page, with no head after it.
+    const written = r
+      .sent()
+      .filter((m) => m.type === TYPE.setState)
+      .map((m) => ({ key: text(m.fields.get(1)![0] as Uint8Array)!, acked: (m.flags & REQUESTED_ACK) !== 0 }));
+    expect(written.at(-1)?.key, 'the cancelled commit wrote no page').toMatch(/^v22\/tail\//);
+    const lastHead = written.findLastIndex((w) => w.key === HEAD_KEY);
+    const lastPage = written.findLastIndex((w) => w.key.startsWith('v22/tail/'));
+    expect(lastHead, 'the cancelled commit put its head write out too').toBeLessThan(lastPage);
+    // Every head write asks for its own ack: that ack is the commit's sync.
+    expect(written.filter((w) => w.key === HEAD_KEY).every((w) => w.acked)).toBe(true);
   }, 30_000);
 
   it("a retry's carried cancellation fails the call's result, not the id it makes first", async () => {

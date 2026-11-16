@@ -362,27 +362,37 @@ impl Vm {
     ) -> std::result::Result<oneshot::Receiver<std::result::Result<Value, Error>>, Error> {
         let (result, scheduler) = {
             let mut vm = lock(inner);
-            let carried = std::mem::take(&mut vm.cancel_next_wait);
-            let result = act(&mut vm.vm).map(|handle| {
+            // A cancellation that found nothing waiting is carried to this
+            // one, and fails it as a wait in flight would have been failed.
+            //
+            // The command is not issued at all. Failing the waiter after
+            // `act` had run left the command out on the wire: a commit's head
+            // write landed and was durable while its `await` reported
+            // `CancelledError`, so a handler compensating on that believed a
+            // write had not happened when it had. Not issuing it is what the
+            // storage already means by a commit that did not finish — the
+            // head is what makes one visible, and a commit without its head
+            // is as if it never started, exactly as after a crash.
+            let result = if std::mem::take(&mut vm.cancel_next_wait) {
                 let (sender, receiver) = oneshot::channel();
-                if carried {
-                    // A cancellation that found nothing waiting: this is the
-                    // next wait, and it fails as one in flight would have.
-                    let _ = sender.send(Err(Error::new(
-                        restate_sdk_shared_core::error::codes::INTERNAL,
-                        CANCELLED.to_owned(),
-                    )));
-                    return receiver;
-                }
-                vm.rust_waiters.insert(handle, sender);
-                // Still under the lock: a result the VM already has — a state
-                // value the invocation knows, or that this attempt wrote —
-                // reaches the waiter here, instead of waiting for a tick to
-                // route it and so taking a turn of JavaScript's event loop to
-                // answer a read that needed nothing.
-                let _ = vm.route();
-                receiver
-            });
+                let _ = sender.send(Err(Error::new(
+                    restate_sdk_shared_core::error::codes::INTERNAL,
+                    CANCELLED.to_owned(),
+                )));
+                Ok(receiver)
+            } else {
+                act(&mut vm.vm).map(|handle| {
+                    let (sender, receiver) = oneshot::channel();
+                    vm.rust_waiters.insert(handle, sender);
+                    // Still under the lock: a result the VM already has — a
+                    // state value the invocation knows, or that this attempt
+                    // wrote — reaches the waiter here, instead of waiting for
+                    // a tick to route it and so taking a turn of JavaScript's
+                    // event loop to answer a read that needed nothing.
+                    let _ = vm.route();
+                    receiver
+                })
+            };
             let scheduler = vm.scheduler.clone();
             (result, scheduler)
         };

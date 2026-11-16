@@ -415,6 +415,18 @@ this itself is the better end state.
   `journalValueCodecProvider`). Unpinning needs those checked against a newer
   SDK, which is its own piece of work.
 
+- **A cancellation can still be delivered twice, and a read never sees one.**
+  The driver carries a cancellation when nothing of its own is waiting, and
+  `cancel_state_waits` carries one when nothing of the store's is —
+  independently, so both can fire, and a handler that catches
+  `CancelledError` and compensates with a write sees that write fail too. The
+  other end of the same knot: a handler that only reads never sees the
+  cancellation at all, because a read is answered in the addon without a wait
+  on Restate for the carry to land on. Both want one carry owned by
+  `VmInner`, taken by whichever side waits next, in place of two decided
+  apart. Implicit cancellation only: a handler with `explicitCancellation`
+  returns before either carry, which is every handler in @restatedev/agents.
+
 - **`crash` has no VM variant.** `e2e/serve.ts` injects faults with
   `withFaults`, and a VM attempt refuses a wrapped store (decision 3), so the
   fault injection has to reach `VmStore` before that e2e covers this path.
