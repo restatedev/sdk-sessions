@@ -195,11 +195,17 @@ on the selector whatever this change does, so none of them exercises the new
 path, and @restatedev/agents has never run on it. A deployment reaches the VM
 only by calling `sessions.serve` or `sessions.http2Handler`.
 
-That matters most for agents: its handlers are session objects, and it
+That mattered most for agents: its handlers are session objects, and it
 classifies cancellation on `restate.CancelledError` in a dozen places
-(`tools.ts`, `companion.ts`, `agentlib/runtime.ts`, `pi/index.ts`). The driver
-rejects with that class for exactly this reason — but it is untested through
-agents.
+(`tools.ts`, `companion.ts`, `agentlib/runtime.ts`, `pi/index.ts`). So
+`pnpm --filter e2e steering` now serves its agents through this package, and
+passes: pi agents with a scripted model, their companions, steering while a
+tool runs, views, and a cancelled `wait`, against a real server.
+`E2E_SDK_SERVE=1` builds the endpoint with the SDK instead and keeps them on
+the selector; both pass. It is the agents library's only coverage of the VM.
+
+The rest of the scripts are still SDK-served, and pointing them here is a
+change to them, not to this package.
 
 ### 8. The heartbeat interval is configurable, because the timeout is
 
@@ -217,6 +223,42 @@ The same run crashed the process. The database's store calls `setState` and
 An attempt that is over cannot send them anyway, and a new attempt writes them
 again, so they are dropped. Reads still reject: they are promises, and the
 caller is awaiting one.
+
+## The issue to open on sdk-typescript
+
+Not opened from here: drafted for a person to send.
+
+> **Let an SDK handler run on `ExplicitRecoveryVM`**
+>
+> shared-core has a state machine for handlers that are never replayed,
+> `ExplicitRecoveryVM` (restatedev/sdk-shared-core#118). It is what
+> `restate.internal.explicitRecovery()` handlers want: commands return
+> notification handles, results come back in any order, and the SDK settles its
+> own promises — so such a handler can await concurrently, with no journal and
+> no single await point.
+>
+> @restatedev/sessions runs session objects on it today, but only for
+> deployments it serves itself, because there is no supported way to give the
+> SDK a different VM for an invocation:
+>
+> - the dispatch that constructs the VM is module-private, and the package
+>   exports only `.`, `./fetch`, `./lambda` and `./node`;
+> - `connect`'s tunnel builds its handler internally from `services`
+>   (`endpoint/tunnel/engine.js`), so it cannot be handed one at all.
+>
+> So `sessions.serve` is on the new VM and `sessions.connect` is stuck on a
+> selector that patches `promisesExecutor.doProgress` and five private fields,
+> pinned to `@restatedev/restate-sdk` 1.18.2.
+>
+> Either of these would retire that patch:
+>
+> 1. the SDK runs `explicitRecovery()` handlers on `ExplicitRecoveryVM`
+>    itself — the better end state, and it would serve every transport; or
+> 2. `connect` accepts a request handler, the way `serve` effectively does
+>    through `endpoint().http2Handler()`, so an SDK-built handler can be
+>    wrapped.
+>
+> sdk-python did (1) in restatedev/sdk-python#314.
 
 ## Open
 
