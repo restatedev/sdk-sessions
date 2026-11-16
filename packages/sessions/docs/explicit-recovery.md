@@ -290,6 +290,23 @@ the deployment they started on, a schema step running once per key, a view of a
 key only the older version wrote, and a rollback and roll-forward. It needs
 Node 24, which the repository requires and this container does not default to.
 
+**The recovery acceptance tests.** `concurrency` runs on both paths now
+(`E2E_SDK_SERVE=1` for the selector), and passes on each: statements and calls
+at once, transactions queueing, a transaction's sends, a cancellation failing
+one await once with the handler compensating after it, and a terminal SQL
+error. The other two cannot follow it yet:
+
+- **`suspension` is a selector test by construction.** It drives
+  `failpoints`, the hooks inside `PromiseSelector`, to close the input or
+  deliver a cancel signal between two passes of that loop. There is no such
+  loop on the VM. It has no VM variant until the selector goes, and should be
+  rewritten or dropped then.
+- **`crash` serves through `e2e/serve.ts`, which wraps its stores with
+  `withFaults`.** A session on the VM has no JavaScript store to wrap, and
+  refuses rather than quietly serving one. Fault injection needs a route into
+  `VmStore` — a hook the addon consults per operation — before `crash` can run
+  on this path, and that is worth designing rather than bolting on.
+
 **What does not run on it, and should before release.** Most of the e2e scripts
 — `serve`, `steering`, `agentlib`, `restate-tools`, `crash`, `concurrency`,
 `suspension`, `bench` — build their endpoint with the SDK's own
