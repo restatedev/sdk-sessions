@@ -257,18 +257,25 @@ const database = restate.sessionObject({
 
     // Cancels itself inside its transaction, then compensates in its database.
     // The cancellation reaches one await of the handler's, once, as in any
-    // handler: whichever of these it reaches, what came before that await is
-    // stored, so the transaction committed and its mark is sent though
-    // nothing invokes this key again, and the compensation is stored too.
+    // handler. A call of the database that it fails did nothing, and one
+    // already under way when it arrives runs to its end: so the transaction,
+    // which issued the cancellation, committed and its mark is sent though
+    // nothing invokes this key again; and the compensation is stored exactly
+    // once, by the call itself or, where the cancellation reached that call,
+    // by making it again. A cancelled call that had landed would show as a
+    // second row.
     // The result: how many awaits failed with the cancellation.
     cancelledCommit: async (ctx, i: number) => {
       let cancellations = 0;
+      /** Whether `step` failed with the cancellation. */
       const counting = async (step: () => Promise<unknown>) => {
         try {
           await step();
+          return false;
         } catch (e) {
           if (!(e instanceof restate.CancelledError)) throw e;
           cancellations++;
+          return true;
         }
       };
       await counting(() => ctx.db.values('SELECT count(*) FROM t'));
@@ -279,7 +286,8 @@ const database = restate.sessionObject({
           ctx.cancel(ctx.request.id);
         }),
       );
-      await counting(() => ctx.db.execute('INSERT INTO t VALUES (?)', [-1 - i]));
+      const compensate = () => ctx.db.execute('INSERT INTO t VALUES (?)', [-1 - i]);
+      if (await counting(compensate)) await compensate();
       await counting(() => pause(ctx, `cancelled-${i}`, 500)); // by now, the cancellation came
       return cancellations;
     },
@@ -500,7 +508,7 @@ await check(
   async () => {
     for (let i = 0; i < 5; i++) {
       assert.equal((await call(`Db/cancelled-${i}/cancelledCommit`, i)).value, 1, `cancelled-${i}: cancellations seen`);
-      // The transaction, and the compensation after the cancellation.
+      // The transaction, and the compensation, once each.
       assert.deepEqual((await call(`Db/cancelled-${i}/committed`)).value, [-1 - i, i], `cancelled-${i}: rows`);
     }
     // Each transaction's send went out, though nothing invoked its key again.
