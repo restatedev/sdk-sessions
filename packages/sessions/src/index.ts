@@ -39,4 +39,4 @@ export { remote } from './calls.ts';
 // In place of the SDK's: the services, on PORT, with what they need beside
 // them; `connect`, the same for Restate Cloud (the SDK's own leaves them out);
 // and `served`, the services with what they need, for an endpoint of your own.
-export { connect, serve, served } from './serve.ts';
+export { connect, http2Handler, serve, served } from './serve.ts';

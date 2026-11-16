@@ -152,11 +152,52 @@ the attempt does not know is read with an ephemeral get, and on V7 with a get
 recorded in the journal. shared-core does both; the unit tests drive V8, and
 the end-to-end tests V7.
 
+## What the end-to-end run proves
+
+`pnpm --filter e2e explicit-recovery` serves a session object through
+`sessions.serve` against a real restate-server and checks, in order:
+
+1. a handler runs on the VM and its commit is acked — **V7 does answer
+   `CommandAck`**, which the whole sync design rests on, and which was the
+   open question here until it was run;
+2. nothing in the journal is a run: no `sync` run, and no `work` run;
+3. the commit syncs with a clear of `v22/sync`;
+4. two reads awaited at once both answer;
+5. work past the inactivity timeout answers;
+6. and it took one attempt, so the heartbeat kept it alive.
+
+The journal of (1), verbatim:
+
+```
+Input · GetLazyState(v22/head) · GetLazyState notification
+      · SetState(v22/tail/1-…/0) · SetState(v22/head) · ClearState(v22/sync)
+      · SetState(v22/tail/2-…/0) · SetState(v22/head) · ClearState(v22/sync)
+      · Output
+```
+
+The read is a journaled `GetLazyState` rather than an ephemeral get, because
+the server negotiated V7. Both are shared-core's; the unit tests drive V8 and
+this drives V7.
+
+### 8. The heartbeat interval is configurable, because the timeout is
+
+The first end-to-end run failed here. 20 seconds is well inside Restate's
+default inactivity timeout of a minute, but the test shortens the timeout to 3
+seconds to stay quick, and the first heartbeat would have come long after the
+attempt was shut down. `RESTATE_SESSIONS_HEARTBEAT` (milliseconds) sets it; a
+deployment that shortens
+`RESTATE_WORKER__INVOKER__INACTIVITY_TIMEOUT` must shorten this with it.
+
+### 9. A write of an attempt that ended is dropped, not thrown
+
+The same run crashed the process. The database's store calls `setState` and
+`clearState` from inside the addon, where a throw reaches no `catch` of ours.
+An attempt that is over cannot send them anyway, and a new attempt writes them
+again, so they are dropped. Reads still reject: they are promises, and the
+caller is awaiting one.
+
 ## Open
 
-- **Does V7 on server 1.8.0 answer `CommandAck`?** A commit's sync is a write
-  that asks to be acked, so the design rests on it. sdk-python#314 ran against
-  1.8.1. Verified end to end before the store's sync depends on it.
 - **The `connect` path**, above.
 - **foyer's debug print.** shared-core#117 pins foyer 0.22.6, whose
   `foyer-storage/src/io/device/file.rs:103` has a stray

@@ -15,7 +15,8 @@
     "bench": "node bench.ts",
     "serve": "node serve.ts",
     "packaging": "node packaging.ts",
-    "agentlib": "node agentlib.ts"
+    "agentlib": "node agentlib.ts",
+    "explicit-recovery": "node explicit-recovery.ts"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "1.5.2",

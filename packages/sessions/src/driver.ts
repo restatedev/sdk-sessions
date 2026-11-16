@@ -30,11 +30,18 @@ const SYNC_KEY = 'v22/sync';
 const KEYS_NAME = 'v22/keys';
 
 /**
- * How often an attempt at work of its own tells Restate it makes progress.
+ * How often an attempt at work of its own tells Restate it makes progress, in
+ * milliseconds: RESTATE_SESSIONS_HEARTBEAT, or 20 seconds.
+ *
  * Restate shuts down an attempt it has heard nothing from for its inactivity
- * timeout, a minute by default; this is well inside it.
+ * timeout, a minute by default, and 20 seconds is well inside that. A
+ * deployment that shortens the timeout
+ * (`RESTATE_WORKER__INVOKER__INACTIVITY_TIMEOUT`) must shorten this with it.
  */
-const HEARTBEAT_MS = 20_000;
+function heartbeatMs(): number {
+  const set = Number(process.env.RESTATE_SESSIONS_HEARTBEAT);
+  return Number.isFinite(set) && set > 0 ? set : 20_000;
+}
 
 /** What a cancelled invocation's awaits fail with. */
 const CANCELLED = 409;
@@ -281,13 +288,7 @@ export class AttemptDriver {
   /** Cancel the invocations this attempt called and that have not answered; returns their ids. */
   cancelPreviousCalls(): string[] {
     const ids = [...this.inFlight.values()];
-    for (const id of ids) {
-      try {
-        this.cancel(id);
-      } catch {
-        // The attempt ended: nothing left to cancel.
-      }
-    }
+    for (const id of ids) this.cancel(id);
     return ids;
   }
 
@@ -319,6 +320,21 @@ export class AttemptDriver {
     );
   }
 
+  /**
+   * A fire-and-forget action, which an attempt that ended simply drops. The
+   * database's store calls these from the addon, where a throw would reach no
+   * `catch` of ours and bring the process down; and a write of an attempt that
+   * is over cannot be sent anyway, since a new attempt writes it again.
+   */
+  private tell(act: (vm: Vm) => unknown): void {
+    if (this.ended !== undefined) return;
+    try {
+      this.act(act);
+    } catch {
+      // The attempt ended under us.
+    }
+  }
+
   /** An action and the promise of its result, in one. */
   private issue(act: (vm: Vm) => number): Promise<unknown> {
     let handle: number;
@@ -340,11 +356,11 @@ export class AttemptDriver {
 
   setState(key: string, value: Uint8Array, name?: string): void {
     // Notified at once: nothing waits for it.
-    this.act((vm) => vm.setState(key, value, name, false));
+    this.tell((vm) => vm.setState(key, value, name, false));
   }
 
   clearState(key: string, name?: string): void {
-    this.act((vm) => vm.clearState(key, name, false));
+    this.tell((vm) => vm.clearState(key, name, false));
   }
 
   stateKeys(): Promise<string[]> {
@@ -435,7 +451,7 @@ export class AttemptDriver {
   }
 
   cancel(invocationId: string, name?: string): void {
-    this.act((vm) => vm.cancelInvocation(invocationId, name, false));
+    this.tell((vm) => vm.cancelInvocation(invocationId, name, false));
   }
 
   // --- Traces, shown in Restate's UI as runs
@@ -458,7 +474,7 @@ export class AttemptDriver {
   // when the answer comes, instead of holding a connection open meanwhile.
 
   /** Start the heartbeats of a running handler. */
-  startHeartbeats(everyMs = HEARTBEAT_MS): void {
+  startHeartbeats(everyMs = heartbeatMs()): void {
     if (this.heartbeats !== undefined || this.ended !== undefined) return;
     this.heartbeats = setInterval(() => {
       if (this.ended !== undefined || this.waiting.size > 0) return;
