@@ -106,9 +106,24 @@ interface Call {
 interface Waiting {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
-  /** Whether it is a call's invocation id: a cancellation leaves those to settle. */
-  invocationId: boolean;
+  /** What it is waiting for, which decides what a cancellation does to it. */
+  waits: Waits;
 }
+
+/**
+ * What a handle's promise is, which decides two things a cancellation does.
+ *
+ * - `result`: what the handler awaits for an answer. A cancellation nothing
+ *   was waiting for is carried to the next of these, and never to the others:
+ *   an id is what a handler is least likely to await, so carrying to one
+ *   would let the action it belongs to run to completion unnoticed.
+ * - `callId`: a call's invocation id, which has to settle even through a
+ *   cancellation, because cancelling the call needs it.
+ * - `sendId`: a send's invocation id. Nothing needs it once the invocation is
+ *   cancelled, so a cancellation rejects it like any other wait — but it is
+ *   usually voided, so it must not take the carry.
+ */
+type Waits = 'result' | 'callId' | 'sendId';
 
 /** What the attempt is of: the target it was invoked on, and how it handles cancellation. */
 export interface AttemptOptions {
@@ -291,19 +306,24 @@ export class AttemptDriver {
     // reject them: the VM fails them, and `database.ts` gives the handler the
     // `CancelledError` the store's own failure gave it on the SDK's path.
     this.vm.cancelStateWaits();
-    this.carriedCancellation = this.waiting.size === 0;
     // The calls in flight are cancelled, which waits for the ids that have not
     // arrived yet: `serveSession` holds the handler's end for it.
     this.cancelling = quiet(this.cancelPreviousCalls().then(() => undefined));
     const failure = new restate.CancelledError();
     // Deleting the entry the loop is on is defined, and a rejection runs its
     // handlers in a later microtask, so nothing is added under the iteration.
+    let failedAResult = false;
     for (const [handle, waiting] of this.waiting) {
       // A call's invocation id still settles: cancelling the call needs it.
-      if (waiting.invocationId) continue;
+      if (waiting.waits === 'callId') continue;
+      if (waiting.waits === 'result') failedAResult = true;
       this.waiting.delete(handle);
       waiting.reject(failure);
     }
+    // Carried only if nothing the handler awaits was failed. A send's id is
+    // in `waiting` and is rejected here, but `genericSend` voided it, so the
+    // handler saw no cancellation and is still owed its one.
+    this.carriedCancellation = !failedAResult;
   }
 
   /** Issuing the cancellations of the calls, if a cancellation started them. */
@@ -366,15 +386,16 @@ export class AttemptDriver {
   }
 
   /** The promise the notification of `handle` settles. */
-  private promise(handle: number, invocationId = false): Promise<unknown> {
+  private promise(handle: number, waits: Waits = 'result'): Promise<unknown> {
     if (this.ended !== undefined) return quiet(Promise.reject(this.ended));
-    if (this.carriedCancellation) {
+    // Only a result takes it: see {@link Waits}.
+    if (this.carriedCancellation && waits === 'result') {
       this.carriedCancellation = false;
       return quiet(Promise.reject(new restate.CancelledError()));
     }
     return quiet(
       new Promise<unknown>((resolve, reject) => {
-        this.waiting.set(handle, { resolve, reject, invocationId });
+        this.waiting.set(handle, { resolve, reject, waits });
       }),
     );
   }
@@ -434,7 +455,7 @@ export class AttemptDriver {
       const rejected = quiet(Promise.reject(error instanceof Error ? error : new Error(String(error))));
       return { result: rejected, invocationId: rejected };
     }
-    const invocationId = quiet(this.promise(handles.invocationId, true).then((id) => String(id)));
+    const invocationId = quiet(this.promise(handles.invocationId, 'callId').then((id) => String(id)));
     const result = quiet(
       this.promise(handles.result).then((value) => (value === undefined ? null : (value as Uint8Array))),
     );
@@ -477,7 +498,7 @@ export class AttemptDriver {
       if (this.ended !== undefined) return quiet(Promise.reject(this.ended));
       throw error;
     }
-    return quiet(this.promise(handle).then((id) => String(id)));
+    return quiet(this.promise(handle, 'sendId').then((id) => String(id)));
   }
 
   /** The result of an invocation, once it ends. */

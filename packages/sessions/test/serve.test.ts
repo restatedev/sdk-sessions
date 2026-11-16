@@ -67,7 +67,9 @@ describe('the path of an invocation', () => {
 
   it('is nothing for what is not an invocation', () => {
     // Listed in the message so a failure says which path broke.
-    for (const path of ['/discover', '/health', '/invoke/Notes', '/invoke//add', '/invoke/Notes/', '/', '']) {
+    // A bare `//` is a URL with an empty host, which `URL` refuses outright:
+    // it has to be nothing here, not a throw in the request listener.
+    for (const path of ['/discover', '/health', '/invoke/Notes', '/invoke//add', '/invoke/Notes/', '/', '', '//']) {
       expect(invokeRoute(path)).toBeUndefined();
     }
   });

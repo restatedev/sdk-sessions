@@ -77,13 +77,31 @@ function streamOf(request: Http2ServerRequest, response: Http2ServerResponse): S
   };
 }
 
-/** The route of an invocation's path, as the SDK reads it: the last three fragments. */
-export function invokeRoute(url: string): { service: string; handler: string } | undefined {
-  const parts = new URL(url, 'http://invoke').pathname.split('/');
+/**
+ * The path of `url` and the route it names, as the SDK reads it: the last
+ * three fragments. Nothing if it names no invocation, or is no path at all —
+ * `//` is a URL with an empty host, which `URL` refuses. Restate sends none
+ * of those, but anything that reaches the port can, and this runs in the
+ * request listener, where a throw is an `uncaughtException`.
+ */
+function parse(url: string): { path: string; service: string; handler: string } | undefined {
+  let path;
+  try {
+    path = new URL(url, 'http://invoke').pathname;
+  } catch {
+    return undefined;
+  }
+  const parts = path.split('/');
   if (parts.length < 3 || parts[parts.length - 3] !== 'invoke') return undefined;
   const service = parts[parts.length - 2]!;
   const handler = parts[parts.length - 1]!;
-  return service === '' || handler === '' ? undefined : { service, handler };
+  return service === '' || handler === '' ? undefined : { path, service, handler };
+}
+
+/** The route of an invocation's path, as the SDK reads it. */
+export function invokeRoute(url: string): { service: string; handler: string } | undefined {
+  const route = parse(url);
+  return route === undefined ? undefined : { service: route.service, handler: route.handler };
 }
 
 /**
@@ -104,13 +122,13 @@ function routing(
   // one that does not.
   const identity = endpoint.builder.keySet.length > 0 ? new Identity(endpoint.builder.keySet) : undefined;
   return (request, response) => {
-    const route = sessions.size === 0 ? undefined : invokeRoute(request.url ?? '');
+    const route = sessions.size === 0 ? undefined : parse(request.url ?? '');
     const definition = route === undefined ? undefined : sessions.get(route.service);
     if (definition === undefined || route === undefined || !servedHere(request.headers)) {
       sdk(request as never, response as never);
       return;
     }
-    const path = new URL(request.url ?? '', 'http://invoke').pathname;
+    const { path } = route;
     // `null` is a verified request, as the addon answers `None` with: a
     // deployment without keys verifies nothing, and stands for the same.
     const unsigned = identity === undefined ? null : identity.verify(path, headersOf(request.headers));

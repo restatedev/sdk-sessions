@@ -229,6 +229,35 @@ const notes = restate.sessionObject({
       };
       return `${await once()},${await once()}`;
     },
+    /**
+     * The same, with calls of Restate instead of the database: a carried
+     * cancellation has to reach the call's result, which is what a handler
+     * awaits, rather than the invocation id it makes first.
+     */
+    callTwice: async (ctx: restate.SessionContext) => {
+      // The signal has to land with nothing in flight, or the first call is
+      // rejected where it waits and the carry is never exercised.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const once = async () => {
+        try {
+          return String(await ctx.rpc({ service: 'Callee', key: 'a', handler: 'echo', input: 'A' }));
+        } catch (error) {
+          return error instanceof CancelledError ? 'CancelledError' : (error as Error).name;
+        }
+      };
+      return `${await once()},${await once()}`;
+    },
+    /** A send first, which makes an invocation id and nothing else: it must
+     * not swallow the carried cancellation that the call after it is owed. */
+    sendThenCall: async (ctx: restate.SessionContext) => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      ctx.send({ service: 'Callee', key: 'a', handler: 'echo', input: 'S' });
+      try {
+        return String(await ctx.rpc({ service: 'Callee', key: 'a', handler: 'echo', input: 'A' }));
+      } catch (error) {
+        return error instanceof CancelledError ? 'CancelledError' : (error as Error).name;
+      }
+    },
     /** A database of its own, beside the object's: its keys are named apart. */
     beside: async (ctx: restate.SessionContext) => {
       const own = database(ctx.db, 'notes2');
@@ -353,6 +382,31 @@ describe('a session object served on the explicit recovery VM', () => {
     const output = r.sent().find((m) => m.type === TYPE.output);
     const answered = decode(output!.fields.get(14)![0] as Uint8Array);
     expect(text(answered.get(1)![0] as Uint8Array)).toBe('"CancelledError,ok"');
+  }, 30_000);
+
+  it("a retry's carried cancellation fails the call's result, not the id it makes first", async () => {
+    // A call makes the invocation id's promise before the result's. Handing
+    // the carry to the id let the call run to completion and the handler see
+    // `ok` — the cancellation lost.
+    const r = restateSide(new Map(), { cancelAtStart: true });
+    const serving = serveSession(notes, 'callTwice', r.stream);
+    r.start('k8', null);
+    await r.settle();
+    await serving;
+    const output = r.sent().find((m) => m.type === TYPE.output);
+    const answered = decode(output!.fields.get(14)![0] as Uint8Array);
+    expect(text(answered.get(1)![0] as Uint8Array)).toBe('"CancelledError,A"');
+  }, 30_000);
+
+  it('a send does not swallow the cancellation the call after it is owed', async () => {
+    const r = restateSide(new Map(), { cancelAtStart: true });
+    const serving = serveSession(notes, 'sendThenCall', r.stream);
+    r.start('k9', null);
+    await r.settle();
+    await serving;
+    const output = r.sent().find((m) => m.type === TYPE.output);
+    const answered = decode(output!.fields.get(14)![0] as Uint8Array);
+    expect(text(answered.get(1)![0] as Uint8Array)).toBe('"CancelledError"');
   }, 30_000);
 
   it('a database beside the object keeps its keys apart, as the addon names them', async () => {
