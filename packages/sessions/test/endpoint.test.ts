@@ -87,8 +87,8 @@ describe('an endpoint the SDK built', () => {
     expect(status).toBe(200);
     expect(answered(sent)).toBe('"hello world"');
     expect(sent.at(-1)?.type).toBe(TYPE.end);
-    // Only the VM's path leaves no run: the SDK's journals one for a commit's
-    // sync, and another for the selector's working run.
+    // Only the VM's path leaves no run: the SDK's journals one for a
+    // commit's sync.
     expect(sent.some((m) => m.type === 0x0411)).toBe(false);
   }, 30_000);
 
@@ -103,5 +103,38 @@ describe('an endpoint the SDK built', () => {
     const { status, sent } = await invoke('/behind/a/prefix/invoke/Probe/greet', 'k2', 'again');
     expect(status).toBe(200);
     expect(answered(sent)).toBe('"hello again"');
+  }, 30_000);
+
+  it('refuses a session object on an endpoint the patch does not reach', async () => {
+    // A fetch endpoint is not built from `NodeEndpoint`, so nothing routes
+    // its invocations to the VM. A session object cannot run on the SDK's
+    // journaled VM, so it is refused rather than half-served.
+    const { createEndpointHandler } = await import('@restatedev/restate-sdk/fetch');
+    const handle = createEndpointHandler({ services: [probe], bidirectional: true });
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          frame(TYPE.start, [...bytes(1, [9, 9, 9, 9]), ...bytes(2, 'inv_fetch'), ...uint(3, 1), ...bytes(6, 'k')]),
+        );
+        controller.enqueue(frame(TYPE.input, bytes(14, value(JSON.stringify('world')))));
+        // Nothing more will be sent: the handler is refused at once, and the
+        // response ends rather than streaming.
+        controller.close();
+      },
+    });
+    const response = await handle(
+      new Request('http://restate.test/invoke/Probe/greet', {
+        method: 'POST',
+        headers: { 'content-type': V8 },
+        body,
+        duplex: 'half',
+      }),
+    );
+    const sent = messages(Buffer.from(await response.arrayBuffer()));
+    // It answered, and what it answered is the refusal, not a greeting.
+    const output = sent.find((m) => m.type === TYPE.output);
+    expect(output, 'the attempt wrote no output').toBeDefined();
+    const failure = decode(output!.fields.get(15)![0] as Uint8Array);
+    expect(new TextDecoder().decode(failure.get(2)![0] as Uint8Array)).toMatch(/runs on the explicit recovery VM/);
   }, 30_000);
 });

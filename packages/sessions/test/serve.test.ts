@@ -59,8 +59,8 @@ describe('the path of an invocation', () => {
   it('is the last three fragments, as the SDK reads it', () => {
     expect(invokeRoute('/invoke/Notes/add')).toEqual({ service: 'Notes', handler: 'add' });
     // A deployment registered under a prefix: the SDK matches these, and
-    // matching only a bare `/invoke/...` would hand them to it without a word,
-    // so a session object would quietly run on the selector instead.
+    // matching only a bare `/invoke/...` would hand them to it without a
+    // word, so a session object would be refused on a path that should work.
     expect(invokeRoute('/behind/a/prefix/invoke/Notes/add')).toEqual({ service: 'Notes', handler: 'add' });
     expect(invokeRoute('/invoke/Notes/add?x=1')).toEqual({ service: 'Notes', handler: 'add' });
   });

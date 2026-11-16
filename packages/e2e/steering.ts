@@ -17,13 +17,11 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import * as restate from '@restatedev/restate-sdk';
 import { createModels } from '@earendil-works/pi-ai/models';
 import {
   CANCELLED,
   chatHandler,
   sessionObject,
-  served,
   serve as sessionsServe,
   signal,
   type Messages,
@@ -86,17 +84,11 @@ const server = spawn(SERVER, ['--base-dir', dir], {
   stdio: 'ignore',
 });
 try {
-  // Through @restatedev/sessions' own serve, so that the agents' session
-  // objects run on the explicit recovery VM; E2E_SDK_SERVE=1 builds the
-  // endpoint with the SDK instead, which keeps them on the selector. Both
-  // are expected to pass, and the agents library has no other coverage of
-  // the VM (see sessions/docs/explicit-recovery.md).
-  if (process.env.E2E_SDK_SERVE === '1') {
-    await restate.serve({ services: served([planner, plain]), port: PORT });
-  } else {
-    process.env.PORT = String(PORT);
-    await sessionsServe(planner, plain);
-  }
+  // The agents' session objects run on the explicit recovery VM, which is
+  // the agents library's coverage of it (see
+  // sessions/docs/explicit-recovery.md).
+  process.env.PORT = String(PORT);
+  await sessionsServe(planner, plain);
   for (
     let i = 0;
     !(await fetch(`${ADMIN}/health`).then(

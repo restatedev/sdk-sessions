@@ -8,10 +8,10 @@
 // handler it hands out. So this wraps that class's four ways of producing one.
 //
 // It is a patch on another package's prototype, which is worth naming plainly.
-// It replaces a larger one: the selector reached into five private fields of
-// the SDK's promise executor and drove its VM by hand. This touches four
-// methods whose contract is "give me a request handler", and the handler it
-// returns is the SDK's own for everything but a session object.
+// It touches four methods whose contract is "give me a request handler", and
+// the handler it returns is the SDK's own for everything but a session
+// object. The alternative it replaced was larger: reaching into five private
+// fields of the SDK's promise executor to drive its VM by hand.
 import * as http2 from 'node:http2';
 import type { Http2ServerRequest, Http2ServerResponse } from 'node:http2';
 import type { IncomingMessage, ServerResponse } from 'node:http';

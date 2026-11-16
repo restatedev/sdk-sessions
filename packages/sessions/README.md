@@ -442,21 +442,26 @@ own reads run concurrently too.
 On its own, the published SDK drives each awaited promise with a loop of its
 own, and lets only one of them wait for the server at a time
 (`ExternalProgressChannel`). A second waiter fails the attempt with
-`awaitNext already pending`, and it is retried forever. So session handlers
-drive every promise they await with a single loop,
-[the selector](src/selector.ts). Before the handler runs, it takes over the
-invocation's `promisesExecutor.doProgress`, and gives it back when the
-attempt ends. These are SDK internals as of 1.18.2, so the package pins that
-version, and refuses to run a handler on an SDK without them.
-[`test/selector.test.ts`](test/selector.test.ts) tests the selector against
-a fake VM and the SDK's single-waiter channel.
+`awaitNext already pending`, and it is retried forever.
+
+A session object does not run on that VM. It runs on shared-core's
+`ExplicitRecoveryVM`, the state machine for handlers that are never replayed
+([`docs/explicit-recovery.md`](docs/explicit-recovery.md)): a command returns
+a notification handle, results come back in any order, and the driver settles
+each promise as its handle is notified. There is no single await point to
+contend for, so a handler awaits whatever it likes.
+
+`src/endpoint.ts` routes a session object's invocation there, by patching
+`NodeEndpoint.prototype` — the class `restate.endpoint()`, `restate.serve`
+and `connect`'s tunnel all build theirs from. That prototype and the
+endpoint's builder are SDK internals as of 1.18.2, so the package pins that
+version. A fetch endpoint is not built from it and cannot serve a session
+object; it is refused rather than half-served.
 
 What you get:
 
-- **One await point.** The loop asks the server about all awaited promises
-  at once. After a suspension, the handler resumes on the first of them to
-  complete, and a promise awaited while the loop waits joins its next check,
-  so a call awaited late isn't held up by a slow call made earlier.
+- **No await point to contend for.** Every awaited promise waits on its own
+  handle, so a call awaited late isn't held up by a slow call made earlier.
 - **An operation starts when you make it.** A call goes out without an
   `await`, and a failure nobody awaits is not an unhandled rejection.
 - **Cancellation reaches every awaited promise**, and each one rejects with

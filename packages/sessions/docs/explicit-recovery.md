@@ -274,42 +274,39 @@ the deployment they started on, a schema step running once per key, a view of a
 key only the older version wrote, and a rollback and roll-forward. It needs
 Node 24, which the repository requires and this container does not default to.
 
-**The recovery acceptance tests.** `concurrency` runs on both paths now
-(`E2E_SDK_SERVE=1` for the selector), and passes on each: statements and calls
-at once, transactions queueing, a transaction's sends, a cancellation failing
-one await once with the handler compensating after it, and a terminal SQL
-error. The other two cannot follow it yet:
+**The recovery acceptance tests.** `concurrency` passes on the VM: statements
+and calls at once, transactions queueing, a transaction's sends, a
+cancellation failing one await once with the handler compensating after it,
+and a terminal SQL error.
 
-- **`suspension` is a selector test by construction.** It drives
-  `failpoints`, the hooks inside `PromiseSelector`, to close the input or
-  deliver a cancel signal between two passes of that loop. There is no such
-  loop on the VM. It has no VM variant until the selector goes, and should be
-  rewritten or dropped then.
-- **`crash` serves through `e2e/serve.ts`, which wraps its stores with
-  `withFaults`.** A session on the VM has no JavaScript store to wrap, and
-  refuses rather than quietly serving one. Fault injection needs a route into
-  `VmStore` — a hook the addon consults per operation — before `crash` can run
-  on this path, and that is worth designing rather than bolting on.
+`suspension` is gone with the selector. It drove `failpoints`, the hooks
+inside `PromiseSelector`, to close the input or deliver a cancel signal
+between two passes of that loop. There is no such loop on the VM, and no
+suspension either: an attempt that hears nothing is shut down and the next one
+runs the handler from the start. It tested machinery that no longer exists, so
+it was deleted rather than ported.
 
-**What does not run on it, and should before release.** Most of the e2e scripts
-— `serve`, `steering`, `agentlib`, `restate-tools`, `crash`, `concurrency`,
-`suspension`, `bench` — build their endpoint with the SDK's own
-`restate.serve` or `restate.endpoint().listen()`, not this package's. They are
-on the selector whatever this change does, so none of them exercises the new
-path, and @restatedev/agents has never run on it. A deployment reaches the VM
-only by calling `sessions.serve` or `sessions.http2Handler`.
+`crash` is the one that still cannot follow. It serves through `e2e/serve.ts`,
+which wraps its stores with `withFaults`; a session on the VM has no
+JavaScript store to wrap, and refuses rather than quietly serving one. Fault
+injection needs a route into `VmStore` — a hook the addon consults per
+operation — before `crash` can run on this path, and that is worth designing
+rather than bolting on.
+
+**Every endpoint reaches the VM now.** Before decision 4, a deployment got
+there only by calling `sessions.serve`, so the e2e scripts that build their
+endpoint with `restate.serve` or `restate.endpoint().listen()` were all on the
+selector and none of them exercised the new path. The seam is on
+`NodeEndpoint.prototype`, so all of them are on the VM however they build
+their endpoint, and the `E2E_SDK_SERVE` and `BENCH_VM` switches that used to
+pick a path were removed: both of their branches now mean the same thing.
 
 That mattered most for agents: its handlers are session objects, and it
 classifies cancellation on `restate.CancelledError` in a dozen places
-(`tools.ts`, `companion.ts`, `agentlib/runtime.ts`, `pi/index.ts`). So
-`pnpm --filter e2e steering` now serves its agents through this package, and
-passes: pi agents with a scripted model, their companions, steering while a
-tool runs, views, and a cancelled `wait`, against a real server.
-`E2E_SDK_SERVE=1` builds the endpoint with the SDK instead and keeps them on
-the selector; both pass. It is the agents library's only coverage of the VM.
-
-The rest of the scripts are still SDK-served, and pointing them here is a
-change to them, not to this package.
+(`tools.ts`, `companion.ts`, `agentlib/runtime.ts`, `pi/index.ts`).
+`pnpm --filter e2e steering` passes — pi agents with a scripted model, their
+companions, steering while a tool runs, views, and a cancelled `wait`, against
+a real server.
 
 **Run the suites on Node 24**, which this repository requires. On Node 22 the
 agents package reports 1172 passed with 2 files skipped; on Node 24 it is 1237
@@ -405,15 +402,19 @@ this itself is the better end state.
 
 - ~~**The `connect` path.**~~ Fixed by decision 4: `connect` runs session
   objects on the VM through the same seam as every other transport.
-- **The selector is still in the tree.** Nothing routes onto it any more, and
-  it is to be deleted with what only exists to drive it: `src/selector.ts`,
-  `hookSelector` in `object.ts` and its exports from `internal.ts`,
-  `test/selector.test.ts`, `e2e/suspension.ts` (it drives the selector's
-  `failpoints`), the `E2E_SDK_SERVE` and `BENCH_VM` switches and their CI
-  lines. `wire.ts`'s `attempt()` still builds a fetch endpoint through
-  `createEndpointHandler`, which the prototype patch does not cover, so
-  `suspension-wire.test.ts` exercises the selector until it moves to the
-  patched class. Deleting it also unpins `@restatedev/restate-sdk` 1.18.2.
+- ~~**The selector.**~~ Gone. `src/selector.ts`, its `internal.ts` exports,
+  `test/selector.test.ts`, `test/suspension-wire.test.ts`, `e2e/suspension.ts`
+  and the `E2E_SDK_SERVE` / `BENCH_VM` switches were deleted. A session object
+  reaching the SDK's handler — which only an endpoint the patch does not cover
+  can do, a fetch endpoint being the one that exists — is now refused with a
+  terminal error rather than half-served on a VM that replays.
+
+  The pin on `@restatedev/restate-sdk` 1.18.2 **stays**. It was first there
+  for the selector's five private fields, but the seam is internal too:
+  `NodeEndpoint.prototype` and the endpoint's `builder` (`keySet`,
+  `journalValueCodecProvider`). Unpinning needs those checked against a newer
+  SDK, which is its own piece of work.
+
 - **`crash` has no VM variant.** `e2e/serve.ts` injects faults with
   `withFaults`, and a VM attempt refuses a wrapped store (decision 3), so the
   fault injection has to reach `VmStore` before that e2e covers this path.

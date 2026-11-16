@@ -23,7 +23,6 @@ import { ensureOf, ensuring, Schema, type Step } from './schema.ts';
 import { patchEndpoint } from './endpoint.ts';
 import { Link } from './link.ts';
 import { holding, Scope, scopeOf } from './scope.ts';
-import { hookSelector } from './selector.ts';
 import { type Database, Attempt, type ObjectConfig, type SqlHost, withAttempt } from './session.ts';
 
 /**
@@ -292,13 +291,26 @@ function attempt({ fn, view, explicit, object }: HandlerEntry, ctx: AttemptConte
   return withAttempt(() => fn(context as never, input as never), session);
 }
 
-/** `entry` as the SDK's handler: one loop drives each attempt's awaits (see selector.ts), until it ends. */
-function wrap(entry: HandlerEntry) {
-  return (ctx: restate.ObjectContext | restate.ObjectSharedContext, input: never) => {
-    const unhook = hookSelector(ctx);
-    const runtime = ctx as unknown as Runtime;
-    runtime.invocationEndPromise.promise.catch(unhook);
-    return attempt(entry, ctx as unknown as AttemptContext, input).finally(unhook);
+/**
+ * `entry` as the SDK's handler, which only a transport `endpoint.ts` does not
+ * reach can call: it routes a session object's invocation to the explicit
+ * recovery VM ahead of this, on every endpoint built from `NodeEndpoint` —
+ * `restate.endpoint()`, `restate.serve` and `connect`'s tunnel alike.
+ *
+ * Reaching here means the endpoint is one the patch does not cover, a fetch
+ * endpoint being the one that exists. A session object cannot run on the
+ * SDK's journaled VM: it is never replayed, and awaiting two things at once
+ * fails the attempt with `awaitNext already pending`. So it is refused, rather
+ * than half-served.
+ */
+function wrap(objectName: string, name: string) {
+  return () => {
+    throw new restate.TerminalError(
+      `@restatedev/sessions: ${objectName}.${name} is a session object's handler, which runs on the explicit ` +
+        'recovery VM. This endpoint does not route to it: serve the object from an endpoint built on the ' +
+        "SDK's node entry point (`restate.endpoint()`, `restate.serve` or `connect`). A fetch endpoint " +
+        'cannot run one.',
+    );
   };
 }
 
@@ -350,7 +362,7 @@ function handlerOf(objectName: string, name: string, entry: unknown, view: boole
     asTerminalError: serdes.asTerminalError,
     object,
   };
-  const sdk = wrap(made) as never;
+  const sdk = wrap(objectName, name) as never;
   const handler = view ? restate.handlers.object.shared(opts, sdk) : restate.handlers.object.exclusive(opts, sdk);
   return { handler, entry: made };
 }
@@ -485,8 +497,8 @@ function explicitOf(ctx: SessionContext, of: string) {
  *
  * It watches for the cancellation, and holds nothing: awaited alone, it does
  * not suspend the invocation, and Restate is not told that the handler waits
- * (see selector.ts: the attempt's journal has a run named `work` instead,
- * for the handler's own work). The cancel signal comes while Restate keeps
+ * (a heartbeat tells Restate the attempt makes progress instead, see
+ * `driver.ts`). The cancel signal comes while Restate keeps
  * the invocation's input open. Once Restate closed it (the handler sent and
  * got nothing for the inactivity timeout), a cancellation resolves this at
  * the handler's next await of Restate's, which suspends the invocation and

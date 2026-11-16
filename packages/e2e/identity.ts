@@ -3,8 +3,9 @@
 //
 // The SDK verifies inside the handler that @restatedev/sessions routes a
 // session object's invocation ahead of, so the verification has to happen
-// there too, or it would not happen at all. shared-core's own verifier does
-// it (`sessions/native/src/vm.rs`, `sessions/src/endpoint.ts`).
+// there too, or it would not happen at all. That is what shared-core's own
+// verifier does here: see `sessions/native/src/vm.rs` and
+// `sessions/src/endpoint.ts`.
 //
 // Signing here as Restate signs, with a key made for the run, checks the two
 // halves that matter: a signed invocation runs, and an unsigned one does not.
@@ -173,13 +174,11 @@ const check = (what: string, ok: boolean, detail = '') => {
 }
 
 // And the refusals: each has to leave the handler alone.
-for (
-  const [what, path, headers] of [
-    ['unsigned', '/invoke/Watched/touch', {}],
-    ['signed for another handler', '/invoke/Watched/touch', signature('/invoke/Watched/other')],
-    ['signed by an expired token', '/invoke/Watched/touch', signature('/invoke/Watched/touch', { expired: true })],
-  ] as const
-) {
+for (const [what, path, headers] of [
+  ['unsigned', '/invoke/Watched/touch', {}],
+  ['signed for another handler', '/invoke/Watched/touch', signature('/invoke/Watched/other')],
+  ['signed by an expired token', '/invoke/Watched/touch', signature('/invoke/Watched/touch', { expired: true })],
+] as const) {
   const was = ran;
   const { status } = await invoke(path, headers, 'no');
   check(`an invocation ${what} is refused`, status === 401, `status ${status}`);
@@ -190,7 +189,11 @@ for (
 // journaled object's invocation straight to it, signature and all.
 {
   const refused = await invoke('/invoke/Plain/ping', {}, 'no');
-  check('an unsigned invocation of a journaled object is refused too', refused.status === 401, `status ${refused.status}`);
+  check(
+    'an unsigned invocation of a journaled object is refused too',
+    refused.status === 401,
+    `status ${refused.status}`,
+  );
 }
 
 client.close();

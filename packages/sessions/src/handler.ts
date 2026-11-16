@@ -1,6 +1,6 @@
 // Serving one invocation of a session object's handler on the explicit
-// recovery VM (`driver.ts`), instead of through the SDK's journaled context
-// with the selector patched into it.
+// recovery VM (`driver.ts`), rather than through the SDK's journaled context,
+// which replays and would hold such a handler to one await at a time.
 //
 // The core takes a stream — the request's headers and body, and where to write
 // the response — so that a test can drive it with wire bytes and `serve.ts`

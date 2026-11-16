@@ -145,8 +145,9 @@ export class AttemptDriver {
   /**
    * A cancellation that found nothing of the driver's waiting, carried to the
    * next wait: a retry of a cancelled invocation knows it was cancelled before
-   * the handler starts, and the selector's path fails its first call all the
-   * same. The addon carries its own, for the database's waits.
+   * the handler starts, and its first call has to fail all the same, rather
+   * than run to completion. The addon carries its own, for the database's
+   * waits.
    */
   private carriedCancellation = false;
   private readonly cancelledPromise: Promise<void>;
@@ -505,9 +506,9 @@ export class AttemptDriver {
   // --- Keeping an attempt at work alive
   //
   // Restate shuts an attempt down once its inactivity timeout passes with
-  // nothing heard. The selector reported a working run to stop that while the
-  // handler worked outside Restate; a heartbeat does it here, on the same
-  // rule: only while nothing of this attempt waits on Restate. With something
+  // nothing heard. A heartbeat stops that while the handler works outside
+  // Restate, on this rule: only while nothing of this attempt waits on
+  // Restate. With something
   // waiting, a shutdown is what should happen — Restate starts a new attempt
   // when the answer comes, instead of holding a connection open meanwhile.
 

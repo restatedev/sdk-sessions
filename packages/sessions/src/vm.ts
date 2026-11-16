@@ -6,7 +6,7 @@
 // a handle, and its result comes back as a notification of that handle
 // (`takeNotification`), which the driver settles a promise with. There is no
 // `do_progress` and no single await point, so a handler awaits what it likes,
-// with its own combinators — which is what the selector had to fake.
+// with its own combinators.
 //
 // The VM is synchronous and does no I/O: every call only buffers output.
 import { addon } from './addon.ts';

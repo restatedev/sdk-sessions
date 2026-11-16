@@ -327,15 +327,11 @@ for (const deadline = Date.now() + 60_000; ; await sleep(200)) {
     break;
   if (Date.now() > deadline) throw new Error('restate-server did not start');
 }
-// Through @restatedev/sessions' own serve, so the session objects run on the
-// explicit recovery VM; E2E_SDK_SERVE=1 builds the endpoint with the SDK
-// instead, which keeps them on the selector. Both are expected to pass.
-if (process.env.E2E_SDK_SERVE === '1') {
-  void (await restate.endpoint().bind(helper).bind(conc).bind(database).listen(PORT));
-} else {
-  process.env.PORT = String(PORT);
-  void (await restate.serve(helper, conc, database));
-}
+// The session objects run on the explicit recovery VM. Any endpoint does:
+// `restate.endpoint()` and `connect` route to it through the same seam this
+// serve does (`sessions/src/endpoint.ts`).
+process.env.PORT = String(PORT);
+void (await restate.serve(helper, conc, database));
 for (const deadline = Date.now() + 60_000; ; await sleep(200)) {
   const registered = await fetch(`${ADMIN}/deployments`, {
     method: 'POST',

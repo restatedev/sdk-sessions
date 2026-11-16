@@ -122,15 +122,10 @@ const ADMIN = 'http://127.0.0.1:9070';
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 if (process.argv[2] === 'serve') {
-  // BENCH_VM=1 serves through @restatedev/sessions, so the attempt runs on the
-  // explicit recovery VM and the database's store lives in the addon; without
-  // it, the SDK serves and the store is JavaScript's.
-  if (process.env.BENCH_VM === '1') {
-    process.env.PORT = String(PORT);
-    await restate.serve(bench);
-  } else {
-    await restate.endpoint().bind(bench).listen(PORT);
-  }
+  // The attempt runs on the explicit recovery VM and the database's store
+  // lives in the addon.
+  process.env.PORT = String(PORT);
+  await restate.serve(bench);
 } else if (process.argv[1] === fileURLToPath(import.meta.url)) {
   await drive(process.argv[2]);
 }
