@@ -8,26 +8,37 @@
 //! so a handler awaits what it likes, with its own combinators, and nothing
 //! has to fake a single await point (see the selector this replaces).
 //!
-//! The database's store is still JavaScript's (`src/session.ts`, through the
-//! dispatcher in [`crate::node`]): its reads and writes are commands like any
-//! other, and their notifications reach the driver with the rest. Moving it
-//! into Rust is a separate change.
+//! The database's store awaits its own handles here, in Rust
+//! ([`Vm::issue_and_wait`]): its reads, its acked writes and its listing of the
+//! keys never reach JavaScript. Every other notification is queued for it.
 //!
-//! The VM is [`Send`] but not `Sync`, and it lives behind a [`Mutex`]: only
-//! JavaScript's thread touches it today, but a store in Rust would reach it
-//! from the runtime's too, where a database call that waits goes on (see
-//! `node::answer`).
+//! Issuing a command and registering the waiter for its handle are one
+//! critical section. They have to be: a notification that is ready at once —
+//! an eager read, a write that asks for no ack — would otherwise be routed to
+//! JavaScript by a tick in between, and the waiter would hang forever.
+//! sdk-python needs no such care, because the GIL does not let its tick run
+//! between the two.
+//!
+//! The VM is [`Send`] but not `Sync`, and it lives behind a [`Mutex`], since
+//! two threads reach it: JavaScript's, which ticks it, and the runtime's,
+//! where a database call that waits for the store goes on (see
+//! `node::answer`). A call from the runtime's thread then asks JavaScript to
+//! tick, through [`Vm::set_scheduler`], so that what it wrote is flushed and
+//! what it waits for can be answered.
 use bytes::Bytes;
+use futures::channel::oneshot;
 use napi::bindgen_prelude::*;
+use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
 use restate_sdk_shared_core::explicit_recovery::{
     AttemptState, CoreExplicitRecoveryVM, ExplicitRecoveryVM, Notification, TraceId,
     request_response_unsupported,
 };
 use restate_sdk_shared_core::{
-    AttachInvocationTarget, Error, Header, NonEmptyValue, Target, TerminalFailure, Value,
+    AttachInvocationTarget, Error, Header, NonEmptyValue, NotificationHandle, Target,
+    TerminalFailure, Value,
 };
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
@@ -162,20 +173,40 @@ fn notification_to_js(handle: u32, value: Value) -> VmNotification {
     js
 }
 
-/// The VM, and the notifications queued for JavaScript.
+/// What JavaScript is asked to do after Rust touches the VM: one tick.
+pub(crate) type Scheduler = ThreadsafeFunction<(), (), (), Status, false, true>;
+
+/// Where Rust waits for the notification of a handle (the database's store).
+pub(crate) type RustWaiter = oneshot::Sender<std::result::Result<Value, Error>>;
+
+/// The VM, the handles Rust waits for, and the notifications queued for JavaScript.
 pub(crate) struct VmInner {
     pub(crate) vm: CoreExplicitRecoveryVM,
+    rust_waiters: HashMap<NotificationHandle, RustWaiter>,
     for_js: VecDeque<Notification>,
+    scheduler: Option<Arc<Scheduler>>,
 }
 
 impl VmInner {
-    /// Take every notification the VM has ready, and queue it for JavaScript.
+    /// Take every notification the VM has ready, handing Rust's to their
+    /// waiters and queueing the rest for JavaScript. Once the attempt is
+    /// closed with an error, every waiter gets it.
     fn route(&mut self) -> std::result::Result<(), Error> {
         loop {
             match self.vm.take_next_notification() {
-                Ok(Some(notification)) => self.for_js.push_back(notification),
+                Ok(Some(notification)) => match self.rust_waiters.remove(&notification.handle) {
+                    Some(waiter) => {
+                        let _ = waiter.send(Ok(notification.value));
+                    }
+                    None => self.for_js.push_back(notification),
+                },
                 Ok(None) => return Ok(()),
-                Err(error) => return Err(error),
+                Err(error) => {
+                    for (_, waiter) in self.rust_waiters.drain() {
+                        let _ = waiter.send(Err(error.clone()));
+                    }
+                    return Err(error);
+                }
             }
         }
     }
@@ -223,12 +254,69 @@ fn target(
     }
 }
 
+/// The lock of a VM: taken briefly, never held across an await.
+pub(crate) fn lock(inner: &Arc<Mutex<VmInner>>) -> MutexGuard<'_, VmInner> {
+    inner
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 impl Vm {
-    /// The lock of the VM: taken briefly, never held across an await.
-    pub(crate) fn lock(&self) -> MutexGuard<'_, VmInner> {
-        self.0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    fn lock(&self) -> MutexGuard<'_, VmInner> {
+        lock(&self.0)
+    }
+
+    /// The VM the database's store acts on.
+    pub(crate) fn inner(&self) -> Arc<Mutex<VmInner>> {
+        self.0.clone()
+    }
+
+    /// Ask JavaScript to tick, so that what Rust just sent is written and what
+    /// it waits for can be answered. Called with the lock released.
+    fn schedule(scheduler: Option<Arc<Scheduler>>) {
+        if let Some(scheduler) = scheduler {
+            scheduler.call((), ThreadsafeFunctionCallMode::NonBlocking);
+        }
+    }
+
+    /// Issue a command with `act` and register the waiter of its handle, in one
+    /// critical section, then ask JavaScript to tick.
+    ///
+    /// The two cannot be separate calls: a notification that is ready the
+    /// moment the command is issued — an eager state read, a write that asks
+    /// for no ack — would be routed to JavaScript by a tick in between, and
+    /// this waiter would wait for a notification that already went elsewhere.
+    pub(crate) fn issue_and_wait(
+        inner: &Arc<Mutex<VmInner>>,
+        act: impl FnOnce(&mut CoreExplicitRecoveryVM) -> std::result::Result<NotificationHandle, Error>,
+    ) -> std::result::Result<oneshot::Receiver<std::result::Result<Value, Error>>, Error> {
+        let (result, scheduler) = {
+            let mut vm = lock(inner);
+            let result = act(&mut vm.vm).map(|handle| {
+                let (sender, receiver) = oneshot::channel();
+                vm.rust_waiters.insert(handle, sender);
+                receiver
+            });
+            let scheduler = vm.scheduler.clone();
+            (result, scheduler)
+        };
+        Self::schedule(scheduler);
+        result
+    }
+
+    /// Act on the VM without waiting for anything, then ask JavaScript to tick.
+    pub(crate) fn act<T>(
+        inner: &Arc<Mutex<VmInner>>,
+        act: impl FnOnce(&mut CoreExplicitRecoveryVM) -> std::result::Result<T, Error>,
+    ) -> std::result::Result<T, Error> {
+        let (result, scheduler) = {
+            let mut vm = lock(inner);
+            let result = act(&mut vm.vm);
+            let scheduler = vm.scheduler.clone();
+            (result, scheduler)
+        };
+        Self::schedule(scheduler);
+        result
     }
 }
 
@@ -252,8 +340,23 @@ impl Vm {
         }
         Ok(Vm(Arc::new(Mutex::new(VmInner {
             vm,
+            rust_waiters: Default::default(),
             for_js: Default::default(),
+            scheduler: None,
         }))))
+    }
+
+    /// What the VM calls, on JavaScript's thread, after Rust acts on it: the
+    /// driver's tick, which writes the output and settles what completed.
+    #[napi(ts_args_type = "scheduler: () => void")]
+    pub fn set_scheduler(&self, scheduler: Function<'_, (), ()>) -> Result<()> {
+        let scheduler = scheduler
+            .build_threadsafe_function()
+            .callee_handled::<false>()
+            .weak::<true>()
+            .build()?;
+        self.lock().scheduler = Some(Arc::new(scheduler));
+        Ok(())
     }
 
     #[napi]

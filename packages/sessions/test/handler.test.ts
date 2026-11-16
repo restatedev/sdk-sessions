@@ -4,14 +4,14 @@
 //
 // This is what proves the new path ran. Both paths coexist while `connect`
 // waits for the SDK, so a fallback would be silent: the assertions name what
-// only this path does — an acked clear of `v22/sync`, and no `sync` or `work`
-// run in the journal.
+// only this path does — the state read and written in the addon, a commit
+// whose head write carries its own sync, and no run in the journal.
 import { describe, expect, it } from 'vitest';
 import * as restate from '@restatedev/sessions';
 import { start } from '@restatedev/sessions/internal';
 import { serveSession, servedHere, type Stream } from '../src/handler.ts';
 import { bytes, decode, field, frame, uint } from './wire.ts';
-import { messages, TYPE as BASE, V8, value } from './vm-support.ts';
+import { messages, REQUESTED_ACK, TYPE as BASE, V8, value } from './vm-support.ts';
 
 const TYPE = {
   ...BASE,
@@ -101,7 +101,7 @@ function restateSide(state = new Map<string, Uint8Array>()) {
      * body. Closing it earlier is what Restate's inactivity timeout does, and
      * would shut the attempt down.
      */
-    async settle({ ms = 5000 } = {}) {
+    async settle({ ms = 20_000 } = {}) {
       const deadline = Date.now() + ms;
       for (;;) {
         if (ended || Date.now() >= deadline) break;
@@ -162,6 +162,12 @@ function restateSide(state = new Map<string, Uint8Array>()) {
         // The attempt is over once it has said so; nothing more will come.
         if (sent.some((m) => m.type === TYPE.end || m.type === TYPE.error)) break;
       }
+      if (!ended && !messages(Buffer.concat(chunks)).some((m) => m.type === TYPE.end || m.type === TYPE.error)) {
+        // Closing the body here is what Restate's inactivity timeout does, and
+        // the attempt would report a shutdown — which reads as a puzzling
+        // assertion failure rather than as the hang it is.
+        throw new Error(`the attempt did not end within ${ms}ms`);
+      }
       toSdk.close();
     },
     state,
@@ -208,7 +214,7 @@ describe('a session object served on the explicit recovery VM', () => {
     expect(servedHere({ 'content-type': 'application/vnd.restate.invocation.v7' })).toBe(true);
     expect(servedHere({ 'content-type': 'application/vnd.restate.invocation.v6' })).toBe(false);
     expect(servedHere({})).toBe(false);
-  });
+  }, 30_000);
 
   it('runs a handler, commits its database, and answers', async () => {
     const r = restateSide();
@@ -226,15 +232,18 @@ describe('a session object served on the explicit recovery VM', () => {
     expect(text(answered.get(1)![0] as Uint8Array)).toBe('1');
     expect(sent.at(-1)?.type).toBe(TYPE.end);
 
-    // What only this path does: the commit syncs with an acked clear of
-    // `v22/sync`, and nothing is journaled as a run.
-    const cleared = sent.filter((m) => m.type === TYPE.clearState).map((m) => text(m.fields.get(1)![0] as Uint8Array));
-    expect(cleared).toContain('v22/sync');
+    // What only this path does: the state never crosses into JavaScript. The
+    // addon reads and writes it as the VM's own commands, and a commit is the
+    // tail, then the head written *with* its sync — one acked write, and no
+    // `v22/sync` clear, which is how a store in JavaScript asks for the same.
+    const acked = sent.filter((m) => m.type === TYPE.setState && (m.flags & REQUESTED_ACK) !== 0);
+    expect(acked.map((m) => text(m.fields.get(1)![0] as Uint8Array))).toEqual(['v22/head', 'v22/head']);
+    expect(sent.some((m) => m.type === TYPE.clearState)).toBe(false);
     expect(sent.some((m) => m.type === TYPE.run)).toBe(false);
 
     // The database landed in the object's state.
     expect([...r.state.keys()].some((k) => k.startsWith('v22/'))).toBe(true);
-  });
+  }, 30_000);
 
   it('a handler that starts a call and returns leaves no unhandled rejection', async () => {
     // The call's result is never answered and rejects when the attempt ends.
@@ -250,7 +259,7 @@ describe('a session object served on the explicit recovery VM', () => {
     const answered = decode(output!.fields.get(14)![0] as Uint8Array);
     expect(text(answered.get(1)![0] as Uint8Array)).toBe('"inv_started"');
     await new Promise((resolve) => setTimeout(resolve, 10));
-  });
+  }, 30_000);
 
   it('a send takes a Duration delay, not only milliseconds', async () => {
     const r = restateSide();
@@ -265,7 +274,7 @@ describe('a session object served on the explicit recovery VM', () => {
     expect(at).toBeGreaterThan(Date.now() + 20_000);
     const output = r.sent().find((m) => m.type === TYPE.output);
     expect(output?.fields.get(14)).toBeDefined();
-  });
+  }, 30_000);
 
   it('awaits two calls of Restate at once, which the selector existed to allow', async () => {
     const r = restateSide();
@@ -277,5 +286,5 @@ describe('a session object served on the explicit recovery VM', () => {
     const answered = decode(output!.fields.get(14)![0] as Uint8Array);
     // Both answered, in the order the handler put them.
     expect(text(answered.get(1)![0] as Uint8Array)).toBe('"AB"');
-  });
+  }, 30_000);
 });

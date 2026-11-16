@@ -69,6 +69,9 @@ export async function serveSession(
     shared: entry.view,
     explicitCancellation: entry.explicit,
   });
+  // The database's store acts on the VM from the runtime's thread, in the
+  // addon; this is how it asks for the tick that writes what it sent.
+  vm.setScheduler(() => driver.scheduleTick());
 
   // The input pump: the only reader of the request body. It runs until the
   // body ends, beside the handler.
@@ -94,7 +97,7 @@ export async function serveSession(
     if (driver.over !== undefined || !driver.isReadyToExecute()) return;
     driver.startHeartbeats();
     const input = entry.inputSerde.deserialize(driver.body);
-    const output = await invoke(definition, name, contextOf(driver, stream.headers), input);
+    const output = await invoke(definition, name, contextOf(driver, stream.headers, vm), input);
     // A cancellation that arrived while the handler ran is still cancelling
     // its calls: they go out before the attempt ends, or not at all.
     await driver.cancellingCalls;
@@ -141,6 +144,7 @@ function endWith(driver: AttemptDriver, error: unknown, asTerminalError?: (error
 function contextOf(
   driver: AttemptDriver,
   attemptHeaders: Readonly<Record<string, string | string[] | undefined>>,
+  vm: Vm,
 ): AttemptContext {
   const headers = new Map(Object.entries(attemptHeaders));
   const request = driver.request(headers);
@@ -210,6 +214,9 @@ function contextOf(
     cancelPreviousCalls: () => driver.cancelPreviousCalls(),
     invocationEndPromise: { promise: ending.promise },
     defaultSerde: restate.serde.json,
+    // The addon reads and writes the object's state on this, rather than
+    // calling back into JavaScript for every page (see `openOnVm`).
+    vm,
   };
   return context as unknown as AttemptContext;
 }

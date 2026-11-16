@@ -179,6 +179,15 @@ export class AttemptDriver {
     return this.vm.isReadyToExecute();
   }
 
+  /**
+   * Schedule a tick from outside: what the VM calls after the database's store
+   * acts on it from the runtime's thread, so that what it wrote is written and
+   * what it waits for is routed to it.
+   */
+  scheduleTick(): void {
+    this.schedule();
+  }
+
   /** Schedule a tick, once per turn of the event loop. */
   private schedule(): void {
     if (this.queued) return;

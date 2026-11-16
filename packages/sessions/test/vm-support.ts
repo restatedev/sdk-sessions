@@ -52,9 +52,14 @@ export function drain(vm: Vm): VmNotification[] {
   return out;
 }
 
-/** One message of an output buffer: its type and its decoded fields. */
+/** The header bit a command sets to ask Restate to ack it once stored. */
+export const REQUESTED_ACK = 0x8000;
+
+/** One message of an output buffer: its type, header flags and decoded fields. */
 export interface Message {
   type: number;
+  /** The header's 16 bits of flags; {@link REQUESTED_ACK} is one of them. */
+  flags: number;
   fields: ReturnType<typeof decode>;
 }
 
@@ -64,8 +69,9 @@ export function messages(output: Uint8Array): Message[] {
   const out: Message[] = [];
   for (let at = 0; at < output.length;) {
     const type = view.getUint16(at);
+    const flags = view.getUint16(at + 2);
     const length = view.getUint32(at + 4);
-    out.push({ type, fields: decode(output.subarray(at + 8, at + 8 + length)) });
+    out.push({ type, flags, fields: decode(output.subarray(at + 8, at + 8 + length)) });
     at += 8 + length;
   }
   return out;

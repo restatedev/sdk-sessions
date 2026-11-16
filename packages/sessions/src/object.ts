@@ -150,6 +150,7 @@ export function host(
     // The explicit recovery VM's context has a sync of its own; the SDK's has
     // none, and `session.ts` falls back to the empty `sync` run.
     sync: (ctx as { sync?: () => PromiseLike<void> }).sync?.bind(ctx),
+    vm: (ctx as { vm?: SqlHost['vm'] }).vm,
     genericSend: (send) => ctx.genericSend(send),
   };
 }

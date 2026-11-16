@@ -145,7 +145,7 @@ check(
   added.text,
 );
 
-// 2. Nothing is journaled as a run, and the sync is a clear of `v22/sync`.
+// 2. Nothing is journaled as a run, and a commit's head write carries its sync.
 const id = (
   await query<{ id: string }>(
     `SELECT id FROM sys_invocation WHERE target_service_name = 'Recovery' AND target_handler_name = 'add' LIMIT 1`,
@@ -160,8 +160,8 @@ const journal =
 console.log('   journal:', journal.map((e) => `${e.entry_type}${e.name ? `(${e.name})` : ''}`).join(' '));
 check('no entry is a run: no `sync` run, and no `work` run', !journal.some((e) => /run/i.test(e.entry_type)));
 check(
-  'the commit synced with a clear of `v22/sync`',
-  journal.some((e) => e.name === 'v22/sync'),
+  'the commit wrote the head with its own sync, and no `v22/sync` clear',
+  journal.some((e) => e.name === 'v22/head') && !journal.some((e) => e.name === 'v22/sync'),
 );
 
 // 3. Two reads of Restate awaited at once, which the selector existed to allow.

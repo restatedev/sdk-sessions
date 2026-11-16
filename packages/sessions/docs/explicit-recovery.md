@@ -49,25 +49,46 @@ takes briefly and never holds across an await.
 
 sdk-python needs none: the GIL serializes its binding.
 
-### 3. The store stays in JavaScript for now
+### 3. The store is in Rust, on the VM
 
-sdk-python#314 moved the database's store into Rust, where it awaits its own
-handles and never troubles Python. That is the better end state, and it is
-**deliberately not** the first step here, for two reasons.
+The database's store reads and writes the object's state as the VM's own
+commands, in the addon (`VmStore` in `native/src/node.rs`), and awaits their
+notifications there. None of it crosses into JavaScript — no dispatch per page
+read, no promise per write.
 
-The first is a race that the GIL hides in Python. Issuing a command and
-registering a waiter for it are two separate lock acquisitions; a tick between
-them routes the notification to the queue for JavaScript, and the waiter hangs
-forever. Eager reads and writes that ask for no ack are ready the moment they
-are issued, so the window is real. Moving the store into Rust must make the
-issue-and-register one critical section.
+**The race the GIL hides.** sdk-python#314 issues a command and registers the
+waiter for its handle in two separate borrows of the VM. That is safe there
+only because the GIL will not run its tick in between. Behind a `Mutex` it is
+not: a notification that is ready the moment the command is issued — an eager
+state read, a write that asks for no ack — would be routed to JavaScript by a
+tick between the two, and the waiter would wait for something that had already
+gone elsewhere. So [`Vm::issue_and_wait`] does both under one lock.
 
-The second is that keeping the store in JavaScript keeps the dispatcher,
-`withStoreWrapper`, the fault-injection tests and the `invoke` fakes valid, and
-keeps the VM on one thread while the driver is new.
+**The flush.** The store runs on the runtime's thread (`node::answer`), where
+nothing writes the response. `Vm::set_scheduler` takes the driver's tick, and
+every act of the store asks for one once the lock is released, so what it sent
+is written and what it waits for is routed.
 
-The cost is one extra command per commit. The store moves into Rust as its own
-later change.
+**A commit's sync is its head write.** shared-core's `KvStore::put_and_sync`
+lets a flush write its head and sync in one: Restate acks a write only after
+the writes before it, so that ack _is_ the sync. The `v22/sync` clear is gone,
+and a commit is one command shorter than the store in JavaScript made it:
+
+```
+SetState(v22/tail/1-…/0) · SetState(v22/head, requested_ack)
+```
+
+**JavaScript is still called at one point.** A committing transaction's sends
+are made between the commit's head write and the wait for its ack. That is the
+store's `sync`, which `database.ts`'s boundary uses to run what the transaction
+gave `withCommit` — the same hook sdk-python#314 spends its `COMMIT` op on.
+
+**When the JavaScript store is still used.** `open` is unchanged and still
+takes one, for the tests that bring their own (fault injection through
+`withStoreWrapper`, the in-memory stores of `database.test.ts`), and for an
+attempt with no VM. A session takes the VM path only when its host has a VM
+_and_ no wrapper is set — a wrapper has nothing to wrap otherwise, and silently
+ignoring it would turn the fault tests green for the wrong reason.
 
 ### 4. `serve` now; `connect` once the SDK can
 
@@ -169,7 +190,8 @@ the end-to-end tests V7.
    `CommandAck`**, which the whole sync design rests on, and which was the
    open question here until it was run;
 2. nothing in the journal is a run: no `sync` run, and no `work` run;
-3. the commit syncs with a clear of `v22/sync`;
+3. the commit's head write carries its own sync, and there is no
+   `v22/sync` clear;
 4. two **calls** awaited at once both answer — two `ctx.db` reads would not
    show this, since the database runs its calls one at a time and they never
    wait on Restate together;
@@ -181,8 +203,8 @@ The journal of (1), verbatim:
 
 ```
 Input · GetLazyState(v22/head) · GetLazyState notification
-      · SetState(v22/tail/1-…/0) · SetState(v22/head) · ClearState(v22/sync)
-      · SetState(v22/tail/2-…/0) · SetState(v22/head) · ClearState(v22/sync)
+      · SetState(v22/tail/1-…/0) · SetState(v22/head)
+      · SetState(v22/tail/2-…/0) · SetState(v22/head)
       · Output
 ```
 

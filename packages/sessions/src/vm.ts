@@ -65,6 +65,13 @@ export type VmState = 'starting' | 'running' | 'closed';
  * is notified once Restate stores it, and at once without.
  */
 export interface Vm {
+  /**
+   * What the VM calls, on this thread, after the addon acts on it from the
+   * runtime's — the database's store reading or writing the object's state.
+   * It is the driver's tick: it writes the output and settles what completed.
+   */
+  setScheduler(scheduler: () => void): void;
+
   getResponseHead(): VmResponseHead;
 
   notifyInput(buffer: Uint8Array): void;

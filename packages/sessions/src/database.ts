@@ -5,6 +5,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { Buffer } from 'node:buffer';
 import { addon as loaded } from './addon.ts';
+import type { Vm } from './vm.ts';
 
 /** An SQL value. Integers come back as numbers, or as bigints beyond 2^53. */
 export type SqlValue = null | number | bigint | string | Uint8Array;
@@ -111,6 +112,7 @@ export interface Store {
 /** The addon (`native/src/node.rs`). */
 interface Addon {
   open(namespace: string, store: Store, reader: boolean): Promise<NativeSession>;
+  openOnVm(namespace: string, store: Store, vm: Vm, name: string | undefined, reader: boolean): Promise<NativeSession>;
 }
 
 /**
@@ -144,6 +146,28 @@ export async function open(namespace: string, store: Store, { reader = false } =
   const boundary = new Boundary(store);
   try {
     return new Connection(await addon.open(namespace, boundary, reader), boundary);
+  } catch (error) {
+    throw boundary.failed?.error ?? error;
+  }
+}
+
+/**
+ * Open the database of `namespace` over the attempt's VM: the state is read
+ * and written as the VM's own commands, in the addon, so none of it crosses
+ * into JavaScript. `store` is called at one point only — its `sync`, which the
+ * boundary uses to run what the committing transaction gave
+ * {@link ConnectionTransaction.withCommit} — so its `get`, `set` and `clear`
+ * are never reached. `name` names a database beside the object's own.
+ */
+export async function openOnVm(
+  namespace: string,
+  store: Store,
+  vm: Vm,
+  { name, reader = false }: { name?: string; reader?: boolean } = {},
+): Promise<Connection> {
+  const boundary = new Boundary(store);
+  try {
+    return new Connection(await addon.openOnVm(namespace, boundary, vm, name, reader), boundary);
   } catch (error) {
     throw boundary.failed?.error ?? error;
   }

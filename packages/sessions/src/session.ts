@@ -9,6 +9,7 @@ import { serde, TerminalError } from '@restatedev/restate-sdk';
 import { millisOrDurationToMillis, type Serde } from '@restatedev/restate-sdk-core';
 import {
   open,
+  openOnVm,
   type Row,
   sqlOver,
   SqlError,
@@ -20,6 +21,7 @@ import {
   type Store,
   type ConnectionTransaction,
 } from './database.ts';
+import type { Vm } from './vm.ts';
 import { Link } from './link.ts';
 import { apply, dropAll, ensureOf, ensuring, type Schema } from './schema.ts';
 import { type Send, sendOf } from './calls.ts';
@@ -76,6 +78,12 @@ export interface SqlHost {
    * stands for it.
    */
   sync?(): PromiseLike<void>;
+  /**
+   * The attempt's VM, when it has one: the addon then reads and writes the
+   * object's state as the VM's own commands, and none of it crosses into
+   * JavaScript (see `openOnVm`).
+   */
+  readonly vm?: Vm;
   genericSend(send: restate.GenericSend<Uint8Array>): unknown;
 }
 
@@ -168,6 +176,21 @@ const unbeside = (name: string) => (key: string) => {
  * the life of the process. One the SDK cancels fails as any await does: the
  * session it ends fails its calls with the CancelledError (see `open`).
  */
+/**
+ * The store of a database the addon keeps on the VM: it reads and writes the
+ * state itself, and calls this only at a commit, through `sync`, where the
+ * boundary runs what the committing transaction gave `withCommit`. Reaching
+ * anything else is a bug in the addon, and says so rather than going quiet.
+ */
+function commitOnly(): Store {
+  return { get: servedByVm('get'), set: servedByVm('set'), clear: servedByVm('clear'), sync: async () => {} };
+}
+
+/** What a store the addon never calls does if it is called after all. */
+const servedByVm = (op: string) => () => {
+  throw new Error(`@restatedev/sessions: the VM serves the state; the store's ${op} is not called`);
+};
+
 function objectStore(ctx: SqlHost, end: AttemptEnd, dbName: string | undefined): Store {
   const keyOf = dbName === undefined ? (key: string) => key : beside(dbName);
   const request = <T>(promise: PromiseLike<T>) => end.race(promise);
@@ -571,9 +594,15 @@ export class Attempt {
     // database (a name has no `/`).
     const key = `${ctx.request().target.service}/${encodeURIComponent(ctx.key)}`;
     const namespace = this.name === undefined ? key : `${key}/${this.name}`;
-    const object = objectStore(ctx, end, this.name);
     const wrap = this.config.wrapStore;
-    const db = await open(namespace, wrap ? wrap(object) : object, { reader: ctx.shared });
+    // The VM reads and writes the state in the addon, so nothing of the store
+    // crosses into JavaScript — but only when no test wraps the store, since a
+    // wrapper (fault injection) has nothing to wrap otherwise.
+    const onVm = ctx.vm !== undefined && wrap === undefined;
+    const object = onVm ? commitOnly() : objectStore(ctx, end, this.name);
+    const db = onVm
+      ? await openOnVm(namespace, object, ctx.vm, { name: this.name, reader: ctx.shared })
+      : await open(namespace, wrap ? wrap(object) : object, { reader: ctx.shared });
     try {
       // A view writes nothing: a write fails, rather than vanish with the attempt.
       if (ctx.shared) await db.execute('PRAGMA query_only = 1');
