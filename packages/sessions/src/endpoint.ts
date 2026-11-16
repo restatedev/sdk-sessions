@@ -128,6 +128,18 @@ function routing(
       sdk(request as never, response as never);
       return;
     }
+    const { path } = route;
+    // `null` is a verified request, as the addon answers `None` with: a
+    // deployment without keys verifies nothing, and stands for the same.
+    const unsigned = identity === undefined ? null : identity.verify(path, headersOf(request.headers));
+    if (unsigned !== null) {
+      // What the SDK answers, and the handler never runs.
+      (response as Http2ServerResponse).writeHead(401, { 'content-type': 'text/plain' });
+      response.end('Unauthorized');
+      return;
+    }
+    // After the signature check, so that an unsigned request learns nothing
+    // about what is bound here: the SDK answers one 401 for anything.
     if (!servedHere(request.headers)) {
       // A session object on a Restate too old for the VM. Handing it to the
       // SDK would run it on a VM that replays, which such a handler cannot
@@ -141,16 +153,6 @@ function routing(
           `explicit recovery VM and needs Restate's service protocol v${MIN_PROTOCOL} or later; this ` +
           `invocation negotiated ${spoken}. Upgrade the Restate server.`,
       );
-      return;
-    }
-    const { path } = route;
-    // `null` is a verified request, as the addon answers `None` with: a
-    // deployment without keys verifies nothing, and stands for the same.
-    const unsigned = identity === undefined ? null : identity.verify(path, headersOf(request.headers));
-    if (unsigned !== null) {
-      // What the SDK answers, and the handler never runs.
-      (response as Http2ServerResponse).writeHead(401, { 'content-type': 'text/plain' });
-      response.end('Unauthorized');
       return;
     }
     serveSession(definition, route.handler, streamOf(request as Http2ServerRequest, response as Http2ServerResponse), {

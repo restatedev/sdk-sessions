@@ -251,7 +251,17 @@ const notes = restate.sessionObject({
       };
       const first = await commit('a');
       await new Promise((resolve) => setTimeout(resolve, 300));
-      return `${first},${await commit('b')}`;
+      // A transaction, so the commit has sends of its own: they are made in
+      // the hook between its head write and the wait for that write's ack.
+      try {
+        await ctx.db.transaction(async (tx) => {
+          await tx.execute('INSERT INTO notes (body) VALUES (?)', ['b']);
+          tx.send({ service: 'Shipping', key: 'b', handler: 'ship', input: 'b' });
+        });
+        return `${first},ok`;
+      } catch (error) {
+        return `${first},${error instanceof CancelledError ? 'CancelledError' : (error as Error).name}`;
+      }
     },
     /**
      * The same, with calls of Restate instead of the database: a carried
@@ -439,6 +449,14 @@ describe('a session object served on the explicit recovery VM', () => {
     const lastHead = written.findLastIndex((w) => w.key === HEAD_KEY);
     const lastPage = written.findLastIndex((w) => w.key.startsWith('v22/tail/'));
     expect(lastHead, 'the cancelled commit put its head write out too').toBeLessThan(lastPage);
+    // And its sends stayed in. They are made in the hook between the head
+    // write and the wait for its ack, so failing the wait after the command
+    // had been issued let them out for a commit that never landed: the
+    // shipment durable and the row not.
+    expect(
+      r.sent().some((m) => m.type === TYPE.oneWayCall),
+      "the cancelled commit's sends went out",
+    ).toBe(false);
     // Every head write asks for its own ack: that ack is the commit's sync.
     expect(written.filter((w) => w.key === HEAD_KEY).every((w) => w.acked)).toBe(true);
   }, 30_000);

@@ -374,12 +374,18 @@ impl Vm {
             // head is what makes one visible, and a commit without its head
             // is as if it never started, exactly as after a crash.
             let result = if std::mem::take(&mut vm.cancel_next_wait) {
-                let (sender, receiver) = oneshot::channel();
-                let _ = sender.send(Err(Error::new(
+                // An error, not a receiver already carrying one. A caller
+                // that reads the receiver only at the end does work in
+                // between: a commit's `put_and_sync` runs the JavaScript hook
+                // that sends a transaction's messages between its head write
+                // and the wait for that write's ack. A pre-failed receiver
+                // let those sends go out for a commit whose head was never
+                // written — the shipment durable and the row not, which is
+                // worse than landing both.
+                Err(Error::new(
                     restate_sdk_shared_core::error::codes::INTERNAL,
                     CANCELLED.to_owned(),
-                )));
-                Ok(receiver)
+                ))
             } else {
                 act(&mut vm.vm).map(|handle| {
                     let (sender, receiver) = oneshot::channel();

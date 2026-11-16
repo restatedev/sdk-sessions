@@ -415,6 +415,13 @@ this itself is the better end state.
   `journalValueCodecProvider`). Unpinning needs those checked against a newer
   SDK, which is its own piece of work.
 
+- **`concurrency` fails on this, and so CI is red.** Its acceptance test "a
+  cancellation fails one await, once; what committed is sent, and the handler
+  compensates after it" sees two cancellations where it expects one. It was
+  not introduced by a commit of this branch — it fails at `e626ec7` too — but
+  moving `concurrency` onto the VM is what exposed it, so it is this branch's
+  to answer before merging.
+
 - **A cancellation can still be delivered twice, and a read never sees one.**
   The driver carries a cancellation when nothing of its own is waiting, and
   `cancel_state_waits` carries one when nothing of the store's is —
@@ -438,8 +445,24 @@ this itself is the better end state.
 
   A fix has to tell a wait the handler is owed from one the session makes for
   itself, on both sides of the boundary — `Waits` does it for the driver, and
-  the store would need the same — and only then share one carry between
-  them.
+  the store would need the same — and only then share one carry between them.
+
+  Three attempts, each stopped by a different consumer of the carry, which is
+  worth having written down:
+
+  1. **One carry in `VmInner`, taken by whichever side waits next.** The
+     database's head read, while it opens, takes it before the handler's
+     first await.
+  2. **Each side telling the other what it failed**, so at most one carries.
+     Better — the first two of `concurrency`'s five iterations pass — but the
+     store counts its own in-flight open read as a delivery, and when neither
+     side was waiting both still carry.
+  3. **Only an acked write may take the carry**, reads never. The schema's own
+     commit is an acked write, so it takes it.
+
+  The common thread: the store cannot tell from inside which of its waits the
+  handler is owed. That has to come from the caller, in `database.ts` and
+  `session.ts`, where the handler's own operations are named.
 
 - **A Restate below protocol v7 cannot serve a session object at all.** It
   once reached the SDK's VM through the selector. With the selector gone
