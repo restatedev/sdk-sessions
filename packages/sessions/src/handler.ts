@@ -159,7 +159,6 @@ function contextOf(
 ): AttemptContext {
   const headers = new Map(Object.entries(attemptHeaders));
   const request = driver.request(headers);
-  const raw = restate.serde.binary;
 
   /** The attempt's end, as `invocationEndPromise` gives it: a promise that rejects. */
   const ending = Promise.withResolvers<never>();
@@ -169,15 +168,14 @@ function contextOf(
   const context = {
     key: driver.key,
     request: () => request,
-    get: (name: string, serde?: Serde<unknown>, options?: restate.EntryOptions) =>
-      driver
-        .getState(name, named(options))
-        .then((value) => (value === null ? null : (serde ?? raw).deserialize(value))),
-    set: (name: string, value: unknown, serde?: Serde<unknown>, options?: restate.EntryOptions) =>
-      driver.setState(name, (serde ?? raw).serialize(value), named(options)),
-    clear: (name: string, options?: restate.EntryOptions) => driver.clearState(name, named(options)),
-    stateKeys: () => driver.stateKeys(),
-    sync: () => driver.sync(),
+    // The object's state is the addon's: it reads and writes it as the VM's
+    // own commands, so nothing of it is implemented here. A session opened on
+    // a VM never asks (see `commitOnly` in `session.ts`); anything else that
+    // does is a mistake, and says so.
+    get: servedByVm('get'),
+    set: servedByVm('set'),
+    clear: servedByVm('clear'),
+    stateKeys: servedByVm('stateKeys'),
     run: () => {
       throw new restate.TerminalError(
         'a session object has no ctx.run: put journaled work in a restate.object, service or workflow, and call it with ctx.rpc',
@@ -241,8 +239,12 @@ function quiet<T>(promise: Promise<T>): Promise<T> {
   return promise;
 }
 
-/** The command name an entry's options give, if any. */
-const named = (options?: restate.EntryOptions): string | undefined => (options as { name?: string })?.name;
+/** What a state member of the context does if anything calls it. */
+const servedByVm = (of: string) => () => {
+  throw new restate.TerminalError(
+    `@restatedev/sessions: the VM serves the object's state in the addon; ctx.${of} is not called`,
+  );
+};
 
 /** `ctx.genericCall`'s argument, as this package makes it (`calls.ts`). */
 interface GenericCall {

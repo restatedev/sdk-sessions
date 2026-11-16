@@ -15,7 +15,7 @@ export { failpoints, PromiseSelector, type Failpoint } from './selector.ts';
 export { AttemptDriver, AttemptFailed, AttemptShutDown } from './driver.ts';
 export { Vm, isShutDown } from './vm.ts';
 export { serveSession, servedHere, type Stream } from './handler.ts';
-export { needing, served } from './serve.ts';
+export { invokeRoute, needing, served } from './serve.ts';
 export {
   attach,
   cancelCalls,

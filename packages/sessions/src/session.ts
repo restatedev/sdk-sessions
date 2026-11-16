@@ -72,13 +72,6 @@ export interface SqlHost {
   stateKeys(): PromiseLike<string[]>;
   run(name: string, action: () => void): PromiseLike<void>;
   /**
-   * Every write issued before it is stored once it resolves. The explicit
-   * recovery VM has it (a write of its own that asks Restate to ack it); on
-   * the SDK's journaled context there is none, and the empty `sync` run below
-   * stands for it.
-   */
-  sync?(): PromiseLike<void>;
-  /**
    * The attempt's VM, when it has one: the addon then reads and writes the
    * object's state as the VM's own commands, and none of it crosses into
    * JavaScript (see `openOnVm`).
@@ -216,7 +209,7 @@ function objectStore(ctx: SqlHost, end: AttemptEnd, dbName: string | undefined):
       return keys.flatMap((key) => own(key) ?? []);
     },
     sync: async () => {
-      await request(ctx.sync === undefined ? ctx.run('sync', () => {}) : ctx.sync());
+      await request(ctx.run('sync', () => {}));
     },
   };
 }

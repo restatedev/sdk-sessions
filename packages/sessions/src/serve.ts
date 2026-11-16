@@ -46,11 +46,18 @@ export const serve = (...services: Service[]): Promise<number> => {
   });
 };
 
-/** The route of an invocation's path: `/invoke/<service>/<handler>`. */
-function invokeRoute(url: string): { service: string; handler: string } | undefined {
-  const parts = new URL(url, 'http://invoke').pathname.split('/').filter(Boolean);
-  if (parts.length !== 3 || parts[0] !== 'invoke') return undefined;
-  return { service: parts[1]!, handler: parts[2]! };
+/**
+ * The route of an invocation's path, as the SDK reads it
+ * (`parseUrlComponents`): the last three fragments, `invoke/<service>/<handler>`.
+ * A deployment registered under a prefix has them after it, and matching only
+ * a bare `/invoke/...` would hand those to the SDK without a word.
+ */
+export function invokeRoute(url: string): { service: string; handler: string } | undefined {
+  const parts = new URL(url, 'http://invoke').pathname.split('/');
+  if (parts.length < 3 || parts[parts.length - 3] !== 'invoke') return undefined;
+  const service = parts[parts.length - 2]!;
+  const handler = parts[parts.length - 1]!;
+  return service === '' || handler === '' ? undefined : { service, handler };
 }
 
 /** One invocation over HTTP/2, as {@link Stream}. */

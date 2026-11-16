@@ -21,13 +21,7 @@
 // the promises still pending reject, and a new attempt runs the handler from
 // the start. See the heartbeats on what keeps an attempt at work alive.
 import * as restate from '@restatedev/restate-sdk';
-import { isShutDown, type Vm, type VmFailure, type VmNotification } from './vm.ts';
-
-/** The state key a sync clears with an ack, under the prefix tooling hides. */
-const SYNC_KEY = 'v22/sync';
-
-/** The key the keys listing is named with, under the prefix tooling hides. */
-const KEYS_NAME = 'v22/keys';
+import { isShutDown, type Vm, type VmFailure, type VmInput, type VmNotification } from './vm.ts';
 
 /**
  * How often an attempt at work of its own tells Restate it makes progress, in
@@ -158,6 +152,11 @@ export class AttemptDriver {
   private readonly cancelledPromise: Promise<void>;
   private heartbeats: ReturnType<typeof setInterval> | undefined;
   private readonly aborter = new AbortController();
+  /**
+   * The invocation's input. Taking it from the VM copies the body across the
+   * addon, and the key, the body and the request each want it.
+   */
+  private theInput: VmInput | undefined;
 
   constructor(vm: Vm, write: (chunk: Uint8Array) => void, options: AttemptOptions) {
     this.vm = vm;
@@ -405,39 +404,6 @@ export class AttemptDriver {
     return this.promise(handle);
   }
 
-  // --- State, as the database's store uses it
-
-  getState(key: string, name?: string): Promise<Uint8Array | null> {
-    return quiet(
-      this.issue((vm) => vm.getState(key, name)).then((value) => (value === undefined ? null : (value as Uint8Array))),
-    );
-  }
-
-  setState(key: string, value: Uint8Array, name?: string): void {
-    // Notified at once: nothing waits for it.
-    this.tell((vm) => vm.setState(key, value, name, false));
-  }
-
-  clearState(key: string, name?: string): void {
-    this.tell((vm) => vm.clearState(key, name, false));
-  }
-
-  stateKeys(): Promise<string[]> {
-    return quiet(this.issue((vm) => vm.getStateKeys(KEYS_NAME)).then((keys) => (keys ?? []) as string[]));
-  }
-
-  /**
-   * Every write issued before this is stored once it resolves: a write of its
-   * own that asks Restate to ack it, which it does only after the writes
-   * before it. This is what the empty `sync` run was.
-   *
-   * A view wrote nothing, and an acked clear would be a write: it syncs at once.
-   */
-  sync(): Promise<void> {
-    if (this.options.shared === true) return Promise.resolve();
-    return quiet(this.issue((vm) => vm.clearState(SYNC_KEY, SYNC_KEY, true)).then(() => undefined));
-  }
-
   // --- Calls
 
   /** A call: the promise of its result, and of its invocation id. */
@@ -567,19 +533,25 @@ export class AttemptDriver {
 
   // --- The input, and the end
 
+  /** The invocation's input, read from the VM once. */
+  private input(): VmInput {
+    this.theInput ??= this.vm.input();
+    return this.theInput;
+  }
+
   /** The invocation's key, once the VM is ready to execute. */
   get key(): string {
-    return this.vm.input().key;
+    return this.input().key;
   }
 
   /** The handler's input. */
   get body(): Uint8Array {
-    return this.vm.input().input;
+    return this.input().input;
   }
 
   /** The invocation's request, as a handler's `ctx.request` has it. */
   request(attemptHeaders: ReadonlyMap<string, string | string[] | undefined> = new Map()): restate.Request {
-    const input = this.vm.input();
+    const input = this.input();
     const target = {
       service: this.options.service,
       handler: this.options.handler,

@@ -147,9 +147,6 @@ export function host(
     clear: (name, entry) => exclusive.clear(name, entry),
     stateKeys: () => ctx.stateKeys(),
     run: (name, action) => exclusive.run(name, action),
-    // The explicit recovery VM's context has a sync of its own; the SDK's has
-    // none, and `session.ts` falls back to the empty `sync` run.
-    sync: (ctx as { sync?: () => PromiseLike<void> }).sync?.bind(ctx),
     vm: (ctx as { vm?: SqlHost['vm'] }).vm,
     genericSend: (send) => ctx.genericSend(send),
   };

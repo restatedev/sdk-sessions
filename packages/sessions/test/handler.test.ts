@@ -256,6 +256,13 @@ const notes = restate.sessionObject({
       return `${String(a)}${String(b)}`;
     },
   },
+  views: {
+    /** A view reads beside the handlers, in its own session, and writes nothing. */
+    count: async (ctx: restate.ViewContext) => {
+      const row = await ctx.db.get<{ n: number }>('SELECT count(*) AS n FROM notes');
+      return row?.n ?? -1;
+    },
+  },
 });
 
 describe('a session object served on the explicit recovery VM', () => {
@@ -307,6 +314,29 @@ describe('a session object served on the explicit recovery VM', () => {
     const output = r.sent().find((m) => m.type === TYPE.output);
     const answered = decode(output!.fields.get(14)![0] as Uint8Array);
     expect(text(answered.get(1)![0] as Uint8Array)).toBe('"CancelledError"');
+  }, 30_000);
+
+  it('a view reads, and writes nothing: its sync has nothing to store', async () => {
+    const state = new Map<string, Uint8Array>();
+    const writer = restateSide(state);
+    const writing = serveSession(notes, 'add', writer.stream);
+    writer.start('k8', 'first');
+    await writer.settle();
+    await writing;
+    const stored = new Map(state);
+
+    const r = restateSide(state);
+    const serving = serveSession(notes, 'count', r.stream);
+    r.start('k8', null);
+    await r.settle();
+    await serving;
+    const output = r.sent().find((m) => m.type === TYPE.output);
+    const answered = decode(output!.fields.get(14)![0] as Uint8Array);
+    expect(text(answered.get(1)![0] as Uint8Array)).toBe('1');
+    // `VmStore` refuses a reader's writes and syncs it at once, so the view
+    // sends no state command and leaves the object's state as it found it.
+    expect(r.sent().some((m) => m.type === TYPE.setState || m.type === TYPE.clearState)).toBe(false);
+    expect([...state.keys()].toSorted()).toEqual([...stored.keys()].toSorted());
   }, 30_000);
 
   it('a retry of a cancelled invocation fails its first call, and works after it', async () => {

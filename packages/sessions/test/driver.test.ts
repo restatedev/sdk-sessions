@@ -32,14 +32,24 @@ function attempt(
     written,
     /** Everything written so far, as messages. */
     sent: () => messages(Buffer.concat(written)),
-    /** Restate answers the ephemeral get of `key` with `answer`. */
-    answerGet(key: string, answer: string) {
-      const get = messages(Buffer.concat(all)).find(
-        (m) => m.type === TYPE.getStateEphemeral && String(m.fields.get(2)?.[0]) === key,
-      );
-      if (get === undefined) throw new Error(`no ephemeral get of ${key} was sent`);
-      const id = get.fields.get(1)![0] as number;
-      a.notifyInput(frame(TYPE.getStateEphemeralNotification, [...uint(1, id), ...field(5, 2, value(answer))]));
+    /** A call of the attempt's, which waits on Restate as a `ctx.rpc` does. */
+    makeCall(handler = 'reserve') {
+      return a.call({ service: 'Store', handler, input: Buffer.from('"x"') });
+    },
+    /** Answer the `nth` call sent so far (0-based): its invocation id, its result, or both. */
+    answerCall(nth: number, { id, result }: { id?: string; result?: string } = {}) {
+      const calls = messages(Buffer.concat(all)).filter((m) => m.type === TYPE.call);
+      const command = calls[nth]!.fields;
+      if (id !== undefined) {
+        a.notifyInput(
+          frame(TYPE.callInvocationIdCompletion, [...uint(1, command.get(10)![0] as number), ...bytesField(16, id)]),
+        );
+      }
+      if (result !== undefined) {
+        a.notifyInput(
+          frame(TYPE.callCompletion, [...uint(1, command.get(11)![0] as number), ...field(5, 2, value(result))]),
+        );
+      }
     },
     /** Restate acks the `nth` command it was sent (1-based, as the journal numbers them). */
     ack(nth: number) {
@@ -52,15 +62,15 @@ function attempt(
 const turn = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe('an attempt on the explicit recovery VM', () => {
-  it('settles two reads awaited at once, which is what the selector existed to do', async () => {
-    const r = attempt({ partial: true });
+  it('settles two calls awaited at once, which is what the selector existed to do', async () => {
+    const r = attempt();
     // Both issued in the same turn, both waiting on Restate. On the SDK's own
     // loop this is "awaitNext already pending".
-    const both = Promise.all([r.attempt.getState('one'), r.attempt.getState('two')]);
+    const both = Promise.all([r.makeCall('one').result, r.makeCall('two').result]);
     await turn();
-    expect(types(Buffer.concat(r.written))).toEqual([TYPE.getStateEphemeral, TYPE.getStateEphemeral]);
-    r.answerGet('one', '"1"');
-    r.answerGet('two', '"2"');
+    expect(types(Buffer.concat(r.written))).toEqual([TYPE.call, TYPE.call]);
+    r.answerCall(0, { result: '"1"' });
+    r.answerCall(1, { result: '"2"' });
     await turn();
     expect((await both).map((v: Uint8Array | null) => (v === null ? null : Buffer.from(v).toString()))).toEqual([
       '"1"',
@@ -69,38 +79,14 @@ describe('an attempt on the explicit recovery VM', () => {
   });
 
   it('batches the output of the actions issued in one turn into a single write', async () => {
-    const r = attempt({ partial: true });
-    void r.attempt.getState('one');
-    void r.attempt.getState('two');
-    r.attempt.setState('three', Buffer.from('3'));
+    const r = attempt();
+    void r.makeCall('one').result;
+    void r.makeCall('two').result;
+    void r.attempt.send({ service: 'Store', handler: 'note', input: Buffer.from('"x"') });
     expect(r.written).toHaveLength(0); // nothing is written before the tick
     await turn();
     expect(r.written).toHaveLength(1);
-    expect(types(r.written[0]!)).toEqual([TYPE.getStateEphemeral, TYPE.getStateEphemeral, TYPE.setState]);
-  });
-
-  it('a sync resolves once Restate acks it, and not before', async () => {
-    const r = attempt();
-    r.attempt.setState('a', Buffer.from('1'));
-    let synced = false;
-    const sync = r.attempt.sync().then(() => (synced = true));
-    await turn();
-    // The write, then the sync's own acked clear.
-    expect(types(Buffer.concat(r.written))).toEqual([TYPE.setState, TYPE.clearState]);
-    expect(synced).toBe(false);
-    r.ack(2); // the clear is the second command of the journal after the input
-    await turn();
-    await sync;
-    expect(synced).toBe(true);
-  });
-
-  it('a value this attempt wrote is read back without asking Restate', async () => {
-    const r = attempt({ partial: true });
-    r.attempt.setState('greeting', Buffer.from('"hi"'));
-    const read = await r.attempt.getState('greeting');
-    expect(Buffer.from(read!).toString()).toBe('"hi"');
-    await turn();
-    expect(types(Buffer.concat(r.written))).toEqual([TYPE.setState]); // no get went out
+    expect(types(r.written[0]!)).toEqual([TYPE.call, TYPE.call, 0x040e]);
   });
 
   it('a call gives its invocation id and its result, each from its own notification', async () => {
@@ -124,17 +110,17 @@ describe('an attempt on the explicit recovery VM', () => {
   });
 
   it('the attempt Restate shuts down rejects everything still waiting', async () => {
-    const r = attempt({ partial: true });
-    const read = r.attempt.getState('one');
-    const sync = r.attempt.sync();
+    const r = attempt();
+    const first = r.makeCall('one').result;
+    const second = r.makeCall('two').result;
     await turn();
     r.attempt.notifyInputClosed();
     await turn();
-    await expect(read).rejects.toBeInstanceOf(AttemptShutDown);
-    await expect(sync).rejects.toBeInstanceOf(AttemptShutDown);
+    await expect(first).rejects.toBeInstanceOf(AttemptShutDown);
+    await expect(second).rejects.toBeInstanceOf(AttemptShutDown);
     expect(r.attempt.over).toBeInstanceOf(AttemptShutDown);
-    // An action after the end throws rather than hanging.
-    await expect(r.attempt.getState('two')).rejects.toBeInstanceOf(AttemptShutDown);
+    // An action after the end rejects rather than hanging.
+    await expect(r.makeCall('three').result).rejects.toBeInstanceOf(AttemptShutDown);
   });
 
   it('tells its listeners once when the attempt ends', async () => {
@@ -193,13 +179,13 @@ describe('an attempt on the explicit recovery VM', () => {
     );
     await turn();
     await call.invocationId;
-    const read = r.attempt.getState('one');
+    const waiting = r.makeCall('one').result;
     await turn();
     r.written.length = 0;
     r.attempt.notifyInput(frame(TYPE.signal, [...uint(2, 1), ...bytesField(4, '')]));
     await turn();
-    // The read fails as a cancelled invocation's awaits do...
-    const failed = await read.then(
+    // The await fails as a cancelled invocation's do...
+    const failed = await waiting.then(
       () => undefined,
       (e: unknown) => e as Error & { code?: number },
     );
@@ -211,12 +197,12 @@ describe('an attempt on the explicit recovery VM', () => {
   });
 
   it('an explicit cancellation only resolves cancelled(), leaving the handler to stop its own work', async () => {
-    const r = attempt({ partial: true, explicitCancellation: true });
+    const r = attempt({ explicitCancellation: true });
     let cancelled = false;
     void r.attempt.cancellation().then(() => (cancelled = true));
-    const read = r.attempt.getState('one');
+    const waiting = r.makeCall('one').result;
     let settled = false;
-    void read.then(
+    void waiting.then(
       () => (settled = true),
       () => (settled = true),
     );
@@ -225,12 +211,12 @@ describe('an attempt on the explicit recovery VM', () => {
     r.attempt.notifyInput(frame(TYPE.signal, [...uint(2, 1), ...bytesField(4, '')]));
     await turn();
     expect(cancelled).toBe(true);
-    // The read is left alone: the handler decides what to stop.
+    // The call is left alone: the handler decides what to stop.
     expect(settled).toBe(false);
     expect(types(Buffer.concat(r.written))).toEqual([]);
-    r.answerGet('one', '"1"');
+    r.answerCall(0, { result: '"1"' });
     await turn();
-    expect(Buffer.from((await read)!).toString()).toBe('"1"');
+    expect(Buffer.from((await waiting)!).toString()).toBe('"1"');
   });
 
   it('does not cancel a call that already answered', async () => {
@@ -275,13 +261,6 @@ describe('an attempt on the explicit recovery VM', () => {
     expect(types(Buffer.concat(r.written))).toContain(0x0410); // the cancellation went out
   });
 
-  it("a view's sync writes nothing: it stored nothing to sync", async () => {
-    const r = attempt({ shared: true });
-    await r.attempt.sync();
-    await turn();
-    expect(r.written).toHaveLength(0);
-  });
-
   it('the request names its target, and its signal aborts when the attempt ends', async () => {
     const r = attempt();
     const request = r.attempt.request(new Map([['content-type', 'application/vnd.restate.invocation.v8']]));
@@ -296,20 +275,20 @@ describe('an attempt on the explicit recovery VM', () => {
   });
 
   it('heartbeats only while nothing of the attempt waits on Restate', async () => {
-    const r = attempt({ partial: true });
+    const r = attempt();
     r.attempt.startHeartbeats(5);
     // Nothing waits: the handler is at work of its own, so the attempt says so.
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(types(Buffer.concat(r.written))).toContain(TYPE.awaitingOn);
-    // With a read outstanding, Restate knows what it waits for: no heartbeat,
+    // With a call outstanding, Restate knows what it waits for: no heartbeat,
     // so that a shutdown can happen and a new attempt resume on the answer.
-    const read = r.attempt.getState('one');
+    const waiting = r.makeCall('one').result;
     await turn();
     r.written.length = 0;
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(types(Buffer.concat(r.written))).not.toContain(TYPE.awaitingOn);
-    r.answerGet('one', '"1"');
-    await read;
+    r.answerCall(0, { result: '"1"' });
+    await waiting;
   });
 
   it('ends the handler with its output, and writes it', async () => {
