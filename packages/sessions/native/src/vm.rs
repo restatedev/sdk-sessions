@@ -8,16 +8,16 @@
 //! so a handler awaits what it likes, with its own combinators, and nothing
 //! has to fake a single await point (see the selector this replaces).
 //!
-//! The database's store awaits its own handles here, in Rust
-//! ([`Vm::wait_in_rust`]): its reads, its acked writes and its listings never
-//! reach JavaScript. Every other notification is queued for JavaScript.
+//! The database's store is still JavaScript's (`src/session.ts`, through the
+//! dispatcher in [`crate::node`]): its reads and writes are commands like any
+//! other, and their notifications reach the driver with the rest. Moving it
+//! into Rust is a separate change.
 //!
-//! The VM is driven from two threads: JavaScript's, which ticks it, and the
-//! runtime's, where a database call that waits for the store goes on (see
-//! `node::answer`). It is [`Send`] but not `Sync`, so it lives behind a
-//! [`Mutex`] that every call takes briefly and never holds across an await.
+//! The VM is [`Send`] but not `Sync`, and it lives behind a [`Mutex`]: only
+//! JavaScript's thread touches it today, but a store in Rust would reach it
+//! from the runtime's too, where a database call that waits goes on (see
+//! `node::answer`).
 use bytes::Bytes;
-use futures::channel::oneshot;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use restate_sdk_shared_core::explicit_recovery::{
@@ -25,10 +25,9 @@ use restate_sdk_shared_core::explicit_recovery::{
     request_response_unsupported,
 };
 use restate_sdk_shared_core::{
-    AttachInvocationTarget, Error, Header, NonEmptyValue, NotificationHandle, Target,
-    TerminalFailure, Value,
+    AttachInvocationTarget, Error, Header, NonEmptyValue, Target, TerminalFailure, Value,
 };
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
@@ -163,35 +162,20 @@ fn notification_to_js(handle: u32, value: Value) -> VmNotification {
     js
 }
 
-/// Where Rust waits for the notification of a handle (the database's store).
-pub(crate) type RustWaiter = oneshot::Sender<std::result::Result<Value, Error>>;
-
-/// The VM, the handles Rust waits for, and the notifications queued for JavaScript.
+/// The VM, and the notifications queued for JavaScript.
 pub(crate) struct VmInner {
     pub(crate) vm: CoreExplicitRecoveryVM,
-    rust_waiters: HashMap<NotificationHandle, RustWaiter>,
     for_js: VecDeque<Notification>,
 }
 
 impl VmInner {
-    /// Take the VM's notifications, handing Rust's to their waiters and queueing the rest for
-    /// JavaScript. Once the attempt is closed with an error, every waiter gets it.
+    /// Take every notification the VM has ready, and queue it for JavaScript.
     fn route(&mut self) -> std::result::Result<(), Error> {
         loop {
             match self.vm.take_next_notification() {
-                Ok(Some(notification)) => match self.rust_waiters.remove(&notification.handle) {
-                    Some(waiter) => {
-                        let _ = waiter.send(Ok(notification.value));
-                    }
-                    None => self.for_js.push_back(notification),
-                },
+                Ok(Some(notification)) => self.for_js.push_back(notification),
                 Ok(None) => return Ok(()),
-                Err(error) => {
-                    for (_, waiter) in self.rust_waiters.drain() {
-                        let _ = waiter.send(Err(error.clone()));
-                    }
-                    return Err(error);
-                }
+                Err(error) => return Err(error),
             }
         }
     }
@@ -246,24 +230,6 @@ impl Vm {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
-
-    /// The notification of `handle`, for Rust: the database's store awaits it.
-    /// A handle already notified answers at once.
-    // Unused until the store moves onto the VM, which is the next change.
-    #[allow(dead_code)]
-    pub(crate) fn wait_in_rust(
-        inner: &Arc<Mutex<VmInner>>,
-        handle: NotificationHandle,
-    ) -> oneshot::Receiver<std::result::Result<Value, Error>> {
-        let (sender, receiver) = oneshot::channel();
-        let mut vm = inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        vm.rust_waiters.insert(handle, sender);
-        // The error, if any, reaches the waiter.
-        let _ = vm.route();
-        receiver
-    }
 }
 
 #[napi]
@@ -286,7 +252,6 @@ impl Vm {
         }
         Ok(Vm(Arc::new(Mutex::new(VmInner {
             vm,
-            rust_waiters: Default::default(),
             for_js: Default::default(),
         }))))
     }
