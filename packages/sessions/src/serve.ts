@@ -1,16 +1,12 @@
 // `serve`: the services of a program, on PORT, with what they need beside
 // them (a library's objects, such as each @restatedev/agents agent's companion).
 //
-// A session object's invocation is served here, on the explicit recovery VM
-// (`handler.ts`); everything else a deployment serves — discovery, the health
-// check, a library's journaled objects — is the SDK's, as it was. See
-// `docs/explicit-recovery.md` on why `connect` is not routed this way yet.
-import * as http2 from 'node:http2';
-import type { Http2ServerRequest, Http2ServerResponse } from 'node:http2';
+// A session object's invocations run on the explicit recovery VM whichever of
+// these serves them, and so does an endpoint built by hand: `endpoint.ts`
+// wraps the SDK's endpoint class, which every transport builds its request
+// handler from.
 import * as restate from '@restatedev/restate-sdk';
 import { isRemote } from './calls.ts';
-import { servedHere, serveSession, type Stream } from './handler.ts';
-import { isSessionObject } from './object.ts';
 
 type Service = restate.ServeOptions['services'][number];
 
@@ -33,73 +29,8 @@ export const needing = <D extends object>(definition: D, services: () => Service
  *
  *   await restate.serve(notes, orders);
  */
-export const serve = (...services: Service[]): Promise<number> => {
-  const port = Number(process.env.PORT ?? 9080);
-  const server = http2.createServer(http2Handler(...services));
-  return new Promise<number>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(port, () => {
-      const address = server.address();
-      if (address === null || typeof address === 'string') reject(new TypeError('serve binds to a port'));
-      else resolve(address.port);
-    });
-  });
-};
-
-/**
- * The route of an invocation's path, as the SDK reads it
- * (`parseUrlComponents`): the last three fragments, `invoke/<service>/<handler>`.
- * A deployment registered under a prefix has them after it, and matching only
- * a bare `/invoke/...` would hand those to the SDK without a word.
- */
-export function invokeRoute(url: string): { service: string; handler: string } | undefined {
-  const parts = new URL(url, 'http://invoke').pathname.split('/');
-  if (parts.length < 3 || parts[parts.length - 3] !== 'invoke') return undefined;
-  const service = parts[parts.length - 2]!;
-  const handler = parts[parts.length - 1]!;
-  return service === '' || handler === '' ? undefined : { service, handler };
-}
-
-/** One invocation over HTTP/2, as {@link Stream}. */
-function streamOf(request: Http2ServerRequest, response: Http2ServerResponse): Stream {
-  return {
-    headers: request.headers,
-    body: request,
-    writeHead: (status, headers) => void response.writeHead(status, headers),
-    write: (chunk) => void response.write(chunk),
-    close: () => void response.end(),
-  };
-}
-
-/**
- * The HTTP/2 request handler of `services`, with what they need beside them:
- * a session object's invocation runs on the explicit recovery VM, and every
- * other request is the SDK's. For a server of your own:
- *
- *   http2.createServer(restate.http2Handler(notes, orders)).listen(9080);
- */
-export function http2Handler(...services: Service[]): (req: Http2ServerRequest, res: Http2ServerResponse) => void {
-  const all = served(services, process.env.RESTATE_SERVE_ONLY);
-  const endpoint = restate.endpoint();
-  for (const service of all) endpoint.bind(service);
-  const sdk = endpoint.http2Handler();
-  const sessions = new Map(all.filter((s) => isSessionObject(s)).map((s) => [s.name, s]));
-  return (request, response) => {
-    const route = invokeRoute(request.url ?? '');
-    const definition = route === undefined ? undefined : sessions.get(route.service);
-    // A Restate that speaks a protocol the VM does not take keeps the SDK's,
-    // which serves it today.
-    if (definition === undefined || route === undefined || !servedHere(request.headers)) {
-      sdk(request, response);
-      return;
-    }
-    serveSession(definition, route.handler, streamOf(request, response)).catch((error: unknown) => {
-      // The attempt could not be served at all: the VM wrote nothing, so say so here.
-      if (!response.headersSent) response.writeHead(500, { 'content-type': 'text/plain' });
-      response.end(error instanceof Error ? error.message : String(error));
-    });
-  };
-}
+export const serve = (...services: Service[]) =>
+  restate.serve({ services: served(services, process.env.RESTATE_SERVE_ONLY), port: Number(process.env.PORT ?? 9080) });
 
 /**
  * Connect out to Restate Cloud, rather than listening for it: the SDK's

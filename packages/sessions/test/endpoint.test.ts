@@ -1,0 +1,107 @@
+// Every way the SDK hands out a request handler runs a session object's
+// invocations on the explicit recovery VM: `endpoint.ts` wraps the class that
+// `restate.endpoint()`, `restate.serve` and the tunnel behind `connect` all
+// build theirs from.
+//
+// Over a real HTTP/2 server and client, which is what each of them has: the
+// tunnel runs an `http2.createServer` of its own and hands the handler the
+// request and response it makes (`tunnel/connection.js`).
+import * as http2 from 'node:http2';
+import type { AddressInfo } from 'node:net';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import * as restate from '@restatedev/sessions';
+import { bytes, decode, frame, uint } from './wire.ts';
+import { messages, TYPE, V8, value } from './vm-support.ts';
+
+const probe = restate.sessionObject({
+  name: 'Probe',
+  handlers: {
+    greet: async (_ctx: restate.SessionContext, who: string) => `hello ${who}`,
+  },
+});
+
+/** A journaled object beside it: the SDK goes on serving these. */
+const plain = restate.object({
+  name: 'Plain',
+  handlers: { ping: async (_ctx: restate.ObjectContext) => 'pong' },
+});
+
+let server: http2.Http2Server;
+let client: http2.ClientHttp2Session;
+
+beforeAll(async () => {
+  server = http2.createServer(restate.endpoint().bind(probe).bind(plain).handler());
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  client = http2.connect(`http://127.0.0.1:${(server.address() as AddressInfo).port}`);
+});
+
+afterAll(async () => {
+  client.close();
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+});
+
+/**
+ * One invocation: the start and input Restate sends, then whatever it is told
+ * to send next, with the request kept open — as Restate keeps it — until the
+ * attempt says it is over. Answers the messages the attempt wrote.
+ */
+async function invoke(path: string, key: string, input: unknown) {
+  const request = client.request({
+    ':method': 'POST',
+    ':path': path,
+    'content-type': V8,
+  });
+  request.write(
+    Buffer.from(frame(TYPE.start, [...bytes(1, [1, 2, 3, 4]), ...bytes(2, 'inv_e'), ...uint(3, 1), ...bytes(6, key)])),
+  );
+  request.write(Buffer.from(frame(TYPE.input, bytes(14, value(JSON.stringify(input))))));
+
+  const chunks: Buffer[] = [];
+  const status = Promise.withResolvers<number>();
+  request.on('response', (headers) => status.resolve(Number(headers[':status'])));
+  const done = new Promise<void>((resolve) => {
+    request.on('data', (chunk: Buffer) => {
+      chunks.push(chunk);
+      // The attempt has said it is over: Restate closes its side, and so the
+      // input pump of a handler that is done sees the end it waits for.
+      if (messages(Buffer.concat(chunks)).some((m) => m.type === TYPE.end || m.type === TYPE.error)) request.end();
+    });
+    request.on('end', () => resolve());
+    request.on('close', () => resolve());
+  });
+  await done;
+  return { status: await status.promise, sent: messages(Buffer.concat(chunks)) };
+}
+
+/** What the handler answered, as its output message carries it. */
+const answered = (sent: ReturnType<typeof messages>) => {
+  const output = sent.find((m) => m.type === TYPE.output);
+  expect(output, 'the attempt wrote no output').toBeDefined();
+  const carried = decode(output!.fields.get(14)![0] as Uint8Array);
+  return Buffer.from(carried.get(1)![0] as Uint8Array).toString();
+};
+
+describe('an endpoint the SDK built', () => {
+  it('runs a session object on the explicit recovery VM', async () => {
+    const { status, sent } = await invoke('/invoke/Probe/greet', 'k1', 'world');
+    expect(status).toBe(200);
+    expect(answered(sent)).toBe('"hello world"');
+    expect(sent.at(-1)?.type).toBe(TYPE.end);
+    // Only the VM's path leaves no run: the SDK's journals one for a commit's
+    // sync, and another for the selector's working run.
+    expect(sent.some((m) => m.type === 0x0411)).toBe(false);
+  }, 30_000);
+
+  it('leaves everything else to the SDK: a journaled object still answers', async () => {
+    const { status, sent } = await invoke('/invoke/Plain/ping', 'k1', null);
+    expect(status).toBe(200);
+    expect(answered(sent)).toBe('"pong"');
+  }, 30_000);
+
+  it('runs a session object behind a prefixed deployment path', async () => {
+    // The SDK matches the last three fragments, so these reach it too.
+    const { status, sent } = await invoke('/behind/a/prefix/invoke/Probe/greet', 'k2', 'again');
+    expect(status).toBe(200);
+    expect(answered(sent)).toBe('"hello again"');
+  }, 30_000);
+});

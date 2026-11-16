@@ -20,6 +20,7 @@ import type { Serde, VirtualObjectDefinition } from '@restatedev/restate-sdk-cor
 import { type CallOptions, type Rpc, rpcOf, type Send, sendOf, type Target } from './calls.ts';
 import type { DatabaseReader, Store } from './database.ts';
 import { ensureOf, ensuring, Schema, type Step } from './schema.ts';
+import { patchEndpoint } from './endpoint.ts';
 import { Link } from './link.ts';
 import { holding, Scope, scopeOf } from './scope.ts';
 import { hookSelector } from './selector.ts';
@@ -383,6 +384,10 @@ export function sessionObject<
   metadata?: Record<string, string>;
   options?: restate.ObjectOptions;
 }): VirtualObjectDefinition<P, Functions<H> & Functions<V>> {
+  // Every way the SDK hands out a request handler now routes this object's
+  // invocations to the explicit recovery VM (`endpoint.ts`). Installed here
+  // rather than on import: the package declares `sideEffects: false`.
+  patchEndpoint();
   const { name, schema, handlers = {}, views = {}, description, metadata, options } = definition;
   const both = Object.keys(handlers).filter((key) => key in views);
   if (both.length > 0) throw new Error(`${name}: ${both.join(', ')} is a handler and a view: name one otherwise`);
