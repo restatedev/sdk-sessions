@@ -4,8 +4,7 @@
 // (`native/src/node.rs`); this module orders the calls and runs transactions.
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { Buffer } from 'node:buffer';
-import { createRequire } from 'node:module';
-import { PLATFORMS, platform } from './platform.ts';
+import { addon as loaded } from './addon.ts';
 
 /** An SQL value. Integers come back as numbers, or as bigints beyond 2^53. */
 export type SqlValue = null | number | bigint | string | Uint8Array;
@@ -134,23 +133,7 @@ interface NativeSession {
 /** A value, or a promise of it: `await` takes either. */
 type Answer<T> = T | Promise<T>;
 
-const addon = load();
-
-/** The addon of this machine's platform, from its package (see platform.ts). */
-function load(): Addon {
-  const machine = platform();
-  const name = `@restatedev/sessions-${machine}`;
-  try {
-    return createRequire(import.meta.url)(name) as Addon;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'MODULE_NOT_FOUND') throw error;
-    throw new Error(
-      `@restatedev/sessions found no addon for ${machine}, the package ${name}: it ships them for ` +
-        `${PLATFORMS.join(', ')}. In its repository, \`pnpm build\` builds this machine's.`,
-      { cause: error },
-    );
-  }
-}
+const addon = loaded as unknown as Addon;
 
 /**
  * Open the database of `namespace` over `store`. One process-wide page cache

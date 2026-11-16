@@ -18,15 +18,15 @@ const varint = (n: number): number[] => {
   for (; n > 127; n = Math.floor(n / 128)) bytes.push((n % 128) | 128);
   return [...bytes, n];
 };
-const field = (number: number, wire: 0 | 2, payload: number[]) =>
+export const field = (number: number, wire: 0 | 2, payload: number[]) =>
   wire === 0 ? [...varint(number * 8), ...payload] : [...varint(number * 8 + 2), ...varint(payload.length), ...payload];
-const uint = (number: number, value: number) => field(number, 0, varint(value));
-const bytes = (number: number, value: Uint8Array | number[] | string) =>
+export const uint = (number: number, value: number) => field(number, 0, varint(value));
+export const bytes = (number: number, value: Uint8Array | number[] | string) =>
   field(number, 2, typeof value === 'string' ? [...new TextEncoder().encode(value)] : [...value]);
 
 /** A decoded message: its fields' values by number, a number or the bytes of each. */
-type Fields = Map<number, (number | Uint8Array)[]>;
-function decode(buffer: Uint8Array): Fields {
+export type Fields = Map<number, (number | Uint8Array)[]>;
+export function decode(buffer: Uint8Array): Fields {
   const fields: Fields = new Map();
   let at = 0;
   const readVarint = () => {
@@ -89,7 +89,7 @@ function awaited(future: Uint8Array | undefined): Awaited {
 
 // --- Messages
 
-const TYPE = {
+export const TYPE = {
   start: 0x0000,
   suspension: 0x0001,
   error: 0x0002,
@@ -105,7 +105,7 @@ const TYPE = {
 /** The cancel signal's id. */
 export const CANCEL = 1;
 
-const frame = (type: number, body: number[]) => {
+export const frame = (type: number, body: number[]) => {
   const out = new Uint8Array(8 + body.length);
   const view = new DataView(out.buffer);
   view.setUint16(0, type);
