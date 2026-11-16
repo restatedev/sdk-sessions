@@ -16,7 +16,7 @@ import * as http2 from 'node:http2';
 import type { Http2ServerRequest, Http2ServerResponse } from 'node:http2';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as restate from '@restatedev/restate-sdk';
-import { servedHere, serveSession, type Stream } from './handler.ts';
+import { MIN_PROTOCOL, servedHere, serveSession, type Stream } from './handler.ts';
 import { isSessionObject } from './object.ts';
 import { Identity, type VmHeader } from './vm.ts';
 
@@ -124,8 +124,23 @@ function routing(
   return (request, response) => {
     const route = sessions.size === 0 ? undefined : parse(request.url ?? '');
     const definition = route === undefined ? undefined : sessions.get(route.service);
-    if (definition === undefined || route === undefined || !servedHere(request.headers)) {
+    if (definition === undefined || route === undefined) {
       sdk(request as never, response as never);
+      return;
+    }
+    if (!servedHere(request.headers)) {
+      // A session object on a Restate too old for the VM. Handing it to the
+      // SDK would run it on a VM that replays, which such a handler cannot
+      // use; it would be refused there for the wrong reason, naming endpoint
+      // types to someone whose endpoint is fine. Say which it is.
+      const type = request.headers['content-type'];
+      const spoken = /\.invocation\.(v\d+)/.exec((Array.isArray(type) ? type[0] : type) ?? '')?.[1] ?? 'none';
+      (response as Http2ServerResponse).writeHead(415, { 'content-type': 'text/plain' });
+      response.end(
+        `@restatedev/sessions: ${route.service}/${route.handler} is a session object, which runs on the ` +
+          `explicit recovery VM and needs Restate's service protocol v${MIN_PROTOCOL} or later; this ` +
+          `invocation negotiated ${spoken}. Upgrade the Restate server.`,
+      );
       return;
     }
     const { path } = route;

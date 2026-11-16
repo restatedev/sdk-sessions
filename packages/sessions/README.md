@@ -17,6 +17,12 @@ It runs on a released Restate server and the published SDK, version 1.18.2,
 which it pins ([why](#concurrent-awaits)). See
 [the requirements](../../README.md#requirements).
 
+A session object needs a Restate that speaks **service protocol v7 or later**
+— 1.5 and up. Its VM accepts no less, and an invocation that negotiates an
+older protocol is refused with a 415 that says so. Journaled services and
+virtual objects are unaffected: they are the SDK's, at any version it
+supports.
+
 ```ts
 import * as restate from '@restatedev/sessions';
 

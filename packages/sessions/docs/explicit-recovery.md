@@ -427,9 +427,17 @@ this itself is the better end state.
   apart. Implicit cancellation only: a handler with `explicitCancellation`
   returns before either carry, which is every handler in @restatedev/agents.
 
-- **`crash` has no VM variant.** `e2e/serve.ts` injects faults with
-  `withFaults`, and a VM attempt refuses a wrapped store (decision 3), so the
-  fault injection has to reach `VmStore` before that e2e covers this path.
+- **A Restate below protocol v7 cannot serve a session object at all.** It
+  once reached the SDK's VM through the selector. With the selector gone
+  `endpoint.ts` answers such an invocation itself, with a 415 naming the
+  negotiated protocol, rather than handing it to the SDK — where it would be
+  refused for the wrong reason, naming endpoint types to someone whose
+  endpoint is fine. The README states the minimum.
+
+- **`crash` has no VM variant**, and is out of CI until it does.
+  `e2e/serve.ts` injects faults with `withFaults`, and a VM attempt refuses a
+  wrapped store (decision 3), so the fault injection has to reach `VmStore`
+  before the repository's crash acceptance test can run again.
 - ~~**foyer's debug print.**~~ Fixed. shared-core#117 pinned foyer 0.22.6,
   whose `foyer-storage/src/io/device/file.rs:103` had a stray
   `println!("==========> {capacity}")`, so every process that opened a disk

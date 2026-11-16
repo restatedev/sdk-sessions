@@ -13,7 +13,7 @@ import { handlerEntry, invoke, type AttemptContext } from './object.ts';
 import { Vm, type VmHeader } from './vm.ts';
 
 /** The lowest service protocol version the VM accepts; the SDK serves anything below. */
-const MIN_PROTOCOL = 7;
+export const MIN_PROTOCOL = 7;
 
 /** One invocation on the wire: what the core reads, and where it writes. */
 export interface Stream {
@@ -28,8 +28,13 @@ export interface Stream {
 
 /**
  * Whether this package serves `headers`' invocation, or the SDK does. The VM
- * accepts the service protocol V7 and V8 only; a Restate that speaks less
- * works today on the SDK's VM, so it keeps it.
+ * accepts the service protocol V7 and V8 only.
+ *
+ * A Restate that speaks less once reached the SDK's VM through the selector.
+ * That is gone, and a session object cannot run on a VM that replays, so an
+ * older server cannot serve one at all: `endpoint.ts` answers such an
+ * invocation itself rather than handing it on. Everything that is not a
+ * session object is still the SDK's at any version it supports.
  */
 export function servedHere(headers: Readonly<Record<string, string | string[] | undefined>>): boolean {
   const type = headers['content-type'];

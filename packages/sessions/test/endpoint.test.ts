@@ -105,6 +105,28 @@ describe('an endpoint the SDK built', () => {
     expect(answered(sent)).toBe('"hello again"');
   }, 30_000);
 
+  it('tells a Restate too old for the VM which it is, and refuses', async () => {
+    // Below V7 the invocation used to go to the SDK, which ran it on the
+    // selector. With that gone the SDK would refuse it for the wrong reason —
+    // naming endpoint types to someone whose endpoint is fine — so this
+    // answers it instead.
+    const request = client.request({
+      ':method': 'POST',
+      ':path': '/invoke/Probe/greet',
+      'content-type': 'application/vnd.restate.invocation.v6',
+    });
+    const status = Promise.withResolvers<number>();
+    request.on('response', (head) => status.resolve(Number(head[':status'])));
+    const body: Buffer[] = [];
+    request.on('data', (chunk: Buffer) => body.push(chunk));
+    request.end();
+    await new Promise<void>((resolve) => request.on('close', () => resolve()));
+    expect(await status.promise).toBe(415);
+    const said = Buffer.concat(body).toString();
+    expect(said).toContain('service protocol v7 or later');
+    expect(said).toContain('negotiated v6');
+  }, 30_000);
+
   it('refuses a session object on an endpoint the patch does not reach', async () => {
     // A fetch endpoint is not built from `NodeEndpoint`, so nothing routes
     // its invocations to the VM. A session object cannot run on the SDK's
