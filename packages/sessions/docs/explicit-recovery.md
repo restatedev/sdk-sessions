@@ -162,9 +162,12 @@ the end-to-end tests V7.
    open question here until it was run;
 2. nothing in the journal is a run: no `sync` run, and no `work` run;
 3. the commit syncs with a clear of `v22/sync`;
-4. two reads awaited at once both answer;
-5. work past the inactivity timeout answers;
-6. and it took one attempt, so the heartbeat kept it alive.
+4. two **calls** awaited at once both answer — two `ctx.db` reads would not
+   show this, since the database runs its calls one at a time and they never
+   wait on Restate together;
+5. and work past the inactivity timeout answers **in one attempt**, which the
+   handler proves by writing a row per attempt rather than by reading a retry
+   count that may have no row.
 
 The journal of (1), verbatim:
 
@@ -223,6 +226,35 @@ The same run crashed the process. The database's store calls `setState` and
 An attempt that is over cannot send them anyway, and a new attempt writes them
 again, so they are dropped. Reads still reject: they are promises, and the
 caller is awaiting one.
+
+## What this change adds to the public surface
+
+- **`http2Handler(...services)`**, exported beside `serve` and `served`, for a
+  server of your own. `serve` is written in terms of it. It exists because
+  `serve` no longer delegates to the SDK's `listen`, and a user who built their
+  own server with `endpoint().http2Handler()` would otherwise have no way onto
+  the VM.
+- **`RESTATE_SESSIONS_HEARTBEAT`** (milliseconds), see 8 above.
+
+## What differs from the SDK's path, beyond the VM
+
+- **`ctx.run` throws.** There are no runs on this VM, and a session object's
+  journaled work belongs in a `restate.object` called with `ctx.rpc`. The error
+  says so. On the SDK's path it was never reachable either — `SessionContext`
+  has no `run` — but the context behind it did.
+- **`asTerminalError` is honoured** (the handler option): an error it names
+  ends the invocation instead of being retried, as the SDK does. It was dropped
+  in the first draft of `serveSession`, which would have turned a terminal
+  error into an endless retry.
+- **A failed attempt logs nothing locally.** The SDK logs the error that failed
+  an invocation before writing it to Restate; this path only writes it. The
+  error reaches Restate either way, but `docker logs` is quieter.
+- **Heartbeats stop while any handle is outstanding**, including the result of
+  a call made with `start()` that nobody awaits. That is deliberate: the
+  pathology a heartbeat prevents is an attempt with _nothing_ outstanding being
+  shut down, since Restate then has no answer to resume it with and retries
+  from the start forever. With a call outstanding, a shutdown is recoverable —
+  Restate starts a new attempt when that call answers.
 
 ## The issue to open on sdk-typescript
 

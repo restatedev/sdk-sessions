@@ -7,7 +7,7 @@
 // can hand it an HTTP/2 one. It is reached only for a session object's
 // handler; everything else a deployment serves stays the SDK's.
 import * as restate from '@restatedev/restate-sdk';
-import type { Serde } from '@restatedev/restate-sdk-core';
+import { millisOrDurationToMillis, type Serde } from '@restatedev/restate-sdk-core';
 import { AttemptDriver, AttemptFailed, AttemptShutDown } from './driver.ts';
 import { handlerEntry, invoke, type AttemptContext } from './object.ts';
 import { Vm, type VmHeader } from './vm.ts';
@@ -101,7 +101,7 @@ export async function serveSession(
     driver.endSuccess(entry.outputSerde.serialize(output));
   } catch (error) {
     await driver.cancellingCalls;
-    endWith(driver, error);
+    endWith(driver, error, entry.asTerminalError);
   } finally {
     await pump;
     // The attempt's last words are buffered: a turn lets the tick write them.
@@ -111,8 +111,19 @@ export async function serveSession(
 }
 
 /** End the attempt the way `error` says to. */
-function endWith(driver: AttemptDriver, error: unknown): void {
+function endWith(driver: AttemptDriver, error: unknown, asTerminalError?: (error: unknown) => Error | undefined): void {
   if (error instanceof AttemptShutDown) return; // the attempt is over; nothing more is sent
+  // The handler option of the same name: an error it names ends the
+  // invocation rather than being retried. The SDK applies it, so this does.
+  if (asTerminalError !== undefined && !(error instanceof restate.TerminalError)) {
+    const terminal = asTerminalError(error);
+    if (terminal !== undefined) {
+      driver.endFailure(
+        terminal instanceof restate.TerminalError ? terminal : new restate.TerminalError(terminal.message),
+      );
+      return;
+    }
+  }
   if (error instanceof restate.TerminalError) {
     driver.endFailure(error);
     return;
@@ -166,8 +177,11 @@ function contextOf(
         idempotencyKey: call.idempotencyKey,
         headers: Object.entries(call.headers ?? {}).map(([key, value]) => ({ key, value })),
       });
-      const answered = result.then((value) =>
-        (call.outputSerde ?? restate.serde.json).deserialize(value ?? new Uint8Array()),
+      // Marked handled: `start()` awaits only the invocation id, so nothing
+      // holds this, and it rejects when the callee fails, on a cancellation,
+      // and at the end of every attempt — including a successful one.
+      const answered = quiet(
+        result.then((value) => (call.outputSerde ?? restate.serde.json).deserialize(value ?? new Uint8Array())),
       );
       return Object.assign(answered, { invocationId });
     },
@@ -177,16 +191,20 @@ function contextOf(
         handler: send.method,
         key: send.key,
         input: (send.inputSerde ?? restate.serde.json).serialize(send.parameter),
-        delay: send.delay,
+        // `SendOptions.delay` is milliseconds or a `Duration`; the VM takes
+        // milliseconds.
+        delay: send.delay === undefined ? undefined : millisOrDurationToMillis(send.delay),
         idempotencyKey: send.idempotencyKey,
         headers: Object.entries(send.headers ?? {}).map(([key, value]) => ({ key, value })),
       }),
     invocation: (invocationId: unknown) => ({
       cancel: () => driver.cancel(String(invocationId)),
       attach: (serde?: Serde<unknown>) =>
-        driver
-          .attach(String(invocationId))
-          .then((value) => (serde ?? restate.serde.json).deserialize(value ?? new Uint8Array())),
+        quiet(
+          driver
+            .attach(String(invocationId))
+            .then((value) => (serde ?? restate.serde.json).deserialize(value ?? new Uint8Array())),
+        ),
     }),
     cancellation: () => driver.cancellation(),
     cancelPreviousCalls: () => driver.cancelPreviousCalls(),
@@ -194,6 +212,15 @@ function contextOf(
     defaultSerde: restate.serde.json,
   };
   return context as unknown as AttemptContext;
+}
+
+/**
+ * Mark a promise handled, so that one the handler never awaits does not bring
+ * the process down when the attempt ends. The caller still sees the rejection.
+ */
+function quiet<T>(promise: Promise<T>): Promise<T> {
+  promise.catch(() => {});
+  return promise;
 }
 
 /** The command name an entry's options give, if any. */
@@ -213,5 +240,5 @@ interface GenericCall {
 
 /** `ctx.genericSend`'s argument. */
 interface GenericSend extends GenericCall {
-  delay?: number;
+  delay?: number | Parameters<typeof millisOrDurationToMillis>[0];
 }

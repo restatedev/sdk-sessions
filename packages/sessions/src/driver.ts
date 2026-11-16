@@ -458,19 +458,30 @@ export class AttemptDriver {
     headers?: { key: string; value: string }[];
     name?: string;
   }): Promise<string> {
-    const handle = this.issue((vm) =>
-      vm.send(
-        target.service,
-        target.handler,
-        target.input,
-        target.key,
-        target.delay,
-        target.idempotencyKey,
-        target.headers,
-        target.name,
-      ),
-    );
-    return quiet(handle.then((id) => String(id)));
+    if (this.ended !== undefined) return quiet(Promise.reject(this.ended));
+    let handle: number;
+    try {
+      handle = this.act((vm) =>
+        vm.send(
+          target.service,
+          target.handler,
+          target.input,
+          target.key,
+          target.delay,
+          target.idempotencyKey,
+          target.headers,
+          target.name,
+        ),
+      );
+    } catch (error) {
+      // An attempt that ended drops it, as it drops a write: a new attempt
+      // sends it again. Anything else is the caller's — a delay that is not a
+      // number of milliseconds, say — and throws, as it does on the SDK's
+      // context, rather than vanishing into a promise nobody holds.
+      if (this.ended !== undefined) return quiet(Promise.reject(this.ended));
+      throw error;
+    }
+    return quiet(this.promise(handle).then((id) => String(id)));
   }
 
   /** The result of an invocation, once it ends. */

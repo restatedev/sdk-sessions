@@ -8,6 +8,7 @@
 // run in the journal.
 import { describe, expect, it } from 'vitest';
 import * as restate from '@restatedev/sessions';
+import { start } from '@restatedev/sessions/internal';
 import { serveSession, servedHere, type Stream } from '../src/handler.ts';
 import { bytes, decode, field, frame, uint } from './wire.ts';
 import { messages, TYPE as BASE, V8, value } from './vm-support.ts';
@@ -17,6 +18,7 @@ const TYPE = {
   getStateKeys: 0x0406,
   getStateKeysCompletion: 0x8006,
   run: 0x0411,
+  oneWayCall: 0x040e,
 } as const;
 
 const text = (b: Uint8Array | undefined) => (b === undefined ? undefined : Buffer.from(b).toString());
@@ -29,8 +31,11 @@ function restateSide(state = new Map<string, Uint8Array>()) {
   const chunks: Uint8Array[] = [];
   let resolveChunk: (() => void) | undefined;
   let closed = false;
-  /** Commands seen, to number the acks as Restate does. */
-  let commands = 1; // the input is the first
+  /**
+   * The journal index of the last command seen. Restate numbers *every*
+   * command, so an ack must count the calls too, not only the writes.
+   */
+  let index = 1; // the input is the first
 
   const inbound: Uint8Array[] = [];
   const toSdk = {
@@ -104,6 +109,16 @@ function restateSide(state = new Map<string, Uint8Array>()) {
         const sent = messages(Buffer.concat(chunks));
         for (const message of sent.slice(answered)) {
           answered++;
+          // Commands are journaled and numbered; ephemeral commands (0x02xx)
+          // and notifications (0x8xxx) are not.
+          if (message.type >= 0x0400 && message.type < 0x8000) {
+            index++;
+            // Restate acks a stored command; the VM waits for the ack of the
+            // sync's clear, and ignores the rest.
+            if (message.type === TYPE.setState || message.type === TYPE.clearState) {
+              toSdk.push(frame(TYPE.commandAck, uint(1, index)));
+            }
+          }
           if (message.type === TYPE.getStateEphemeral) {
             const key = text(message.fields.get(2)?.[0] as Uint8Array)!;
             const id = message.fields.get(1)![0] as number;
@@ -115,15 +130,21 @@ function restateSide(state = new Map<string, Uint8Array>()) {
               ]),
             );
           } else if (message.type === TYPE.setState) {
-            commands++;
             const key = text(message.fields.get(1)?.[0] as Uint8Array)!;
             const wrapped = decode(message.fields.get(3)![0] as Uint8Array);
             state.set(key, wrapped.get(1)![0] as Uint8Array);
-            toSdk.push(frame(TYPE.commandAck, uint(1, commands)));
           } else if (message.type === TYPE.clearState) {
-            commands++;
             state.delete(text(message.fields.get(1)?.[0] as Uint8Array)!);
-            toSdk.push(frame(TYPE.commandAck, uint(1, commands)));
+          } else if (message.type === TYPE.call) {
+            const id = message.fields.get(10)![0] as number;
+            toSdk.push(frame(TYPE.callInvocationIdCompletion, [...uint(1, id), ...bytes(16, 'inv_started')]));
+            // A call to key `k` is never answered: that is what a `start()`ed
+            // call, whose result nobody holds, looks like to the handler.
+            if (text(message.fields.get(5)?.[0] as Uint8Array) !== 'k') {
+              const result = message.fields.get(11)![0] as number;
+              const echoed = text(message.fields.get(3)![0] as Uint8Array)!;
+              toSdk.push(frame(TYPE.callCompletion, [...uint(1, result), ...field(5, 2, value(echoed))]));
+            }
           } else if (message.type === TYPE.getStateKeys) {
             const id = message.fields.get(11)![0] as number;
             toSdk.push(
@@ -156,13 +177,27 @@ const notes = restate.sessionObject({
       const row = await ctx.db.get<{ n: number }>('SELECT count(*) AS n FROM notes');
       return row!.n;
     },
+    /** Starts a call and returns without awaiting its result, as `start` does. */
+    starts: async (ctx: restate.SessionContext) => {
+      return await start(ctx, { service: 'Callee', key: 'k', handler: 'echo', input: 'x' });
+    },
+    /** A send with a delay given as a `Duration`, not milliseconds. */
+    sends: async (ctx: restate.SessionContext) => {
+      ctx.send({ service: 'Callee', key: 'k', handler: 'echo', input: 'x', delay: { seconds: 30 } });
+      return 'sent';
+    },
+    /**
+     * Two calls awaited at once, each waiting on Restate. This is the
+     * selector's reason to exist: the SDK's own loop lets one promise wait on
+     * the server at a time. Two `ctx.db` reads would not show it — the
+     * database runs its calls one at a time, so they never wait together.
+     */
     both: async (ctx: restate.SessionContext) => {
-      // Two reads of Restate awaited at once: the selector's reason to exist.
       const [a, b] = await Promise.all([
-        ctx.db.get<{ n: number }>('SELECT count(*) AS n FROM notes'),
-        ctx.db.get<{ n: number }>('SELECT count(*) AS n FROM notes'),
+        ctx.rpc({ service: 'Callee', key: 'a', handler: 'echo', input: 'A' }),
+        ctx.rpc({ service: 'Callee', key: 'b', handler: 'echo', input: 'B' }),
       ]);
-      return (a?.n ?? -1) + (b?.n ?? -1);
+      return `${String(a)}${String(b)}`;
     },
   },
 });
@@ -201,7 +236,38 @@ describe('a session object served on the explicit recovery VM', () => {
     expect([...r.state.keys()].some((k) => k.startsWith('v22/'))).toBe(true);
   });
 
-  it('awaits two reads of Restate at once, which the selector existed to allow', async () => {
+  it('a handler that starts a call and returns leaves no unhandled rejection', async () => {
+    // The call's result is never answered and rejects when the attempt ends.
+    // Nothing holds it — `start` awaits only the invocation id — so an
+    // unhandled rejection here would bring the process down. Vitest fails the
+    // run on one, which is the assertion.
+    const r = restateSide();
+    const serving = serveSession(notes, 'starts', r.stream);
+    r.start('k3', null);
+    await r.settle();
+    await serving;
+    const output = r.sent().find((m) => m.type === TYPE.output);
+    const answered = decode(output!.fields.get(14)![0] as Uint8Array);
+    expect(text(answered.get(1)![0] as Uint8Array)).toBe('"inv_started"');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  });
+
+  it('a send takes a Duration delay, not only milliseconds', async () => {
+    const r = restateSide();
+    const serving = serveSession(notes, 'sends', r.stream);
+    r.start('k4', null);
+    await r.settle();
+    await serving;
+    const sent = r.sent().find((m) => m.type === TYPE.oneWayCall);
+    expect(sent).toBeDefined();
+    // `invoke_time` is absolute: 30 seconds from now, not 0 and not NaN.
+    const at = Number(sent!.fields.get(4)![0]);
+    expect(at).toBeGreaterThan(Date.now() + 20_000);
+    const output = r.sent().find((m) => m.type === TYPE.output);
+    expect(output?.fields.get(14)).toBeDefined();
+  });
+
+  it('awaits two calls of Restate at once, which the selector existed to allow', async () => {
     const r = restateSide();
     const serving = serveSession(notes, 'both', r.stream);
     r.start('k2', null);
@@ -209,6 +275,7 @@ describe('a session object served on the explicit recovery VM', () => {
     await serving;
     const output = r.sent().find((m) => m.type === TYPE.output);
     const answered = decode(output!.fields.get(14)![0] as Uint8Array);
-    expect(text(answered.get(1)![0] as Uint8Array)).toBe('0');
+    // Both answered, in the order the handler put them.
+    expect(text(answered.get(1)![0] as Uint8Array)).toBe('"AB"');
   });
 });
