@@ -53,8 +53,34 @@ sdk-python needs none: the GIL serializes its binding.
 
 The database's store reads and writes the object's state as the VM's own
 commands, in the addon (`VmStore` in `native/src/node.rs`), and awaits their
-notifications there. None of it crosses into JavaScript — no dispatch per page
-read, no promise per write.
+notifications there.
+
+**Why: hops between event loops, and moving bytes.** A session's pages are the
+hot path, and on the JavaScript store each page crossed the addon boundary
+twice and was copied twice:
+
+| per page             | JavaScript store                                                      | on the VM |
+| -------------------- | --------------------------------------------------------------------- | --------- |
+| thread hops          | 2 (out to JavaScript, back)                                           | 0         |
+| copies of the value  | 2 (`Buffer::from(value.to_vec())` out, `Bytes::copy_from_slice` back) | 0         |
+| promises, JS objects | one per operation                                                     | none      |
+
+`Bytes` now moves from the SQL layer into the VM's command and back without
+being copied or leaving the thread. What remains on the boundary is the
+protocol's own framing — the request body in, the response out — which is per
+frame, not per page.
+
+Two hops per _write_ survived the first cut, and both are gone:
+
+- the scheduler asked JavaScript to tick after every act, so a commit woke the
+  other thread once per write; one tick is now asked for at a time
+  (`asked_to_tick`), which is all a tick can do anyway;
+- a write that asks for no ack is answered by the VM at once, and that
+  notification was queued for JavaScript, turned into an object and dropped.
+  Such handles are marked and dropped in Rust (`issue_and_discard`).
+
+A read the VM can answer locally is routed under the lock that issued it, so it
+never costs a turn of the event loop either.
 
 **The race the GIL hides.** sdk-python#314 issues a command and registers the
 waiter for its handle in two separate borrows of the VM. That is safe there

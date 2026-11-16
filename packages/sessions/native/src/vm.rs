@@ -38,7 +38,7 @@ use restate_sdk_shared_core::{
     AttachInvocationTarget, Error, Header, NonEmptyValue, NotificationHandle, Target,
     TerminalFailure, Value,
 };
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
@@ -183,8 +183,16 @@ pub(crate) type RustWaiter = oneshot::Sender<std::result::Result<Value, Error>>;
 pub(crate) struct VmInner {
     pub(crate) vm: CoreExplicitRecoveryVM,
     rust_waiters: HashMap<NotificationHandle, RustWaiter>,
+    /// Handles whose notification nothing waits for: the database's writes
+    /// that asked for no ack, which the VM answers at once. Queueing them for
+    /// JavaScript would cost a call across the addon and an object for each,
+    /// only to drop them.
+    discarded: HashSet<NotificationHandle>,
     for_js: VecDeque<Notification>,
     scheduler: Option<Arc<Scheduler>>,
+    /// Whether a tick is already asked for: one is enough until it runs, and
+    /// a commit's writes would otherwise each wake JavaScript's thread.
+    asked_to_tick: bool,
 }
 
 impl VmInner {
@@ -198,7 +206,11 @@ impl VmInner {
                     Some(waiter) => {
                         let _ = waiter.send(Ok(notification.value));
                     }
-                    None => self.for_js.push_back(notification),
+                    None => {
+                        if !self.discarded.remove(&notification.handle) {
+                            self.for_js.push_back(notification);
+                        }
+                    }
                 },
                 Ok(None) => return Ok(()),
                 Err(error) => {
@@ -280,11 +292,22 @@ impl Vm {
     }
 
     /// Ask JavaScript to tick, so that what Rust just sent is written and what
-    /// it waits for can be answered. Called with the lock released.
+    /// it waits for can be answered. Called with the lock released, and only
+    /// when no tick is pending: a commit's writes would otherwise wake the
+    /// other thread once each, to do the one piece of work.
     fn schedule(scheduler: Option<Arc<Scheduler>>) {
         if let Some(scheduler) = scheduler {
             scheduler.call((), ThreadsafeFunctionCallMode::NonBlocking);
         }
+    }
+
+    /// The scheduler to call, if a tick is not already asked for.
+    fn wanted(vm: &mut VmInner) -> Option<Arc<Scheduler>> {
+        if vm.asked_to_tick {
+            return None;
+        }
+        vm.asked_to_tick = true;
+        vm.scheduler.clone()
     }
 
     /// Issue a command with `act` and register the waiter of its handle, in one
@@ -331,15 +354,21 @@ impl Vm {
         }
     }
 
-    /// Act on the VM without waiting for anything, then ask JavaScript to tick.
-    pub(crate) fn act<T>(
+    /// Issue a command whose notification nothing waits for, and drop it when
+    /// it comes: the database's writes that ask for no ack, which the VM
+    /// answers at once. Queueing them for JavaScript would cost a call across
+    /// the addon and an object for each, only to drop them there.
+    pub(crate) fn issue_and_discard(
         inner: &Arc<Mutex<VmInner>>,
-        act: impl FnOnce(&mut CoreExplicitRecoveryVM) -> std::result::Result<T, Error>,
-    ) -> std::result::Result<T, Error> {
+        act: impl FnOnce(&mut CoreExplicitRecoveryVM) -> std::result::Result<NotificationHandle, Error>,
+    ) -> std::result::Result<(), Error> {
         let (result, scheduler) = {
             let mut vm = lock(inner);
-            let result = act(&mut vm.vm);
-            let scheduler = vm.scheduler.clone();
+            let result = act(&mut vm.vm).map(|handle| {
+                vm.discarded.insert(handle);
+                let _ = vm.route();
+            });
+            let scheduler = Self::wanted(&mut vm);
             (result, scheduler)
         };
         Self::schedule(scheduler);
@@ -368,8 +397,10 @@ impl Vm {
         Ok(Vm(Arc::new(Mutex::new(VmInner {
             vm,
             rust_waiters: Default::default(),
+            discarded: Default::default(),
             for_js: Default::default(),
             scheduler: None,
+            asked_to_tick: false,
         }))))
     }
 
@@ -408,10 +439,13 @@ impl Vm {
         self.lock().vm.notify_input_closed();
     }
 
-    /// The bytes buffered so far for the response body.
+    /// The bytes buffered so far for the response body. Every tick starts
+    /// here, so the tick Rust asked for is now running: the next act asks anew.
     #[napi]
     pub fn take_output(&self) -> Buffer {
-        self.lock().vm.take_output().to_vec().into()
+        let mut vm = self.lock();
+        vm.asked_to_tick = false;
+        vm.vm.take_output().to_vec().into()
     }
 
     #[napi]

@@ -298,10 +298,12 @@ impl VmStore {
         }
     }
 
-    /// Issue a write that asks for no ack; its count, for the sync that covers it.
+    /// Issue a write that asks for no ack; its count, for the sync that covers
+    /// it. The VM answers such a write at once, and nothing waits for that
+    /// answer, so it is dropped here rather than crossing into JavaScript.
     fn write(&self, act: impl FnOnce(&mut CoreVm) -> VmResult) -> io::Result<u64> {
         self.writable()?;
-        Vm::act(&self.vm, act).map_err(io_error)?;
+        Vm::issue_and_discard(&self.vm, act).map_err(io_error)?;
         Ok(self.issued.fetch_add(1, Ordering::SeqCst) + 1)
     }
 
