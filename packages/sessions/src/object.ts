@@ -148,6 +148,7 @@ export function host(
     stateKeys: () => ctx.stateKeys(),
     run: (name, action) => exclusive.run(name, action),
     vm: (ctx as { vm?: SqlHost['vm'] }).vm,
+    takeCancellation: (ctx as { takeCancellation?: SqlHost['takeCancellation'] }).takeCancellation,
     genericSend: (send) => ctx.genericSend(send),
   };
 }

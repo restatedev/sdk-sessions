@@ -283,18 +283,18 @@ with an idempotency key instead, which gives every attempt the same answer
 ([calls and sends](#calls-and-sends)).
 
 A cancellation reaches a handler as Restate's reaches any handler: once, at
-the awaits pending when it comes, which fail with a `CancelledError`. The
-session adds nothing to it. A `ctx.db` call is one such await: the request
-of its own to Restate that a cancellation reaches (a read, or the sync a
-commit waits for) fails, and so does the call. What the call sent to Restate
-before that await stays: a commit's writes, and its transaction's sends,
-which are made right after the writes, before the commit waits for anything.
-So a `CancelledError` from `transaction()` doesn't say whether it committed,
-as no cancelled await does: the database does. If it committed, its sends
-are made, once.
+an await, which fails with a `CancelledError`. The awaits of Restate pending
+when it comes fail (a `ctx.rpc`, a `wait`). A `ctx.db` call is treated
+differently, so that its failure means one thing: a call already under way
+when the cancellation comes runs to its end, and the cancellation goes to
+what the handler awaits next; a `ctx.db` call that fails with a
+`CancelledError` was refused before it began. So a `CancelledError` from
+`ctx.db` says the call did nothing: it wrote nothing, and a `transaction()`
+neither committed nor made its sends. A transaction that resolves committed,
+and its sends are made, once.
 
-The calls after it work: the next opens the session again, and reads what
-is stored. So a handler can check what committed, and compensate:
+The calls after it work. So a handler can compensate, or make the call
+again:
 
 ```ts
 try {
@@ -311,8 +311,8 @@ try {
 A transaction whose body awaits something else (a `ctx.rpc`) that a
 cancellation reaches fails with it and rolls back, unless the body catches
 it. A retry of a cancelled invocation, after a crash, gets the cancellation
-at its first await, which may be the open that makes what the crash left in
-the outbox. No attempt follows a cancelled one, so as an attempt ends, a
+at its first await; the open that makes what the crash left in the outbox is
+the session's own, and is not failed. No attempt follows a cancelled one, so as an attempt ends, a
 session that a failure ended is opened again, which makes what the outbox
 holds and empties it.
 

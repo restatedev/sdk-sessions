@@ -128,12 +128,10 @@ export interface Vm {
   /** Whether the invocation was cancelled, in this attempt or an earlier one. */
   isCancelled(): boolean;
   /**
-   * Fail what the database's store waits for, as a cancelled invocation's
-   * awaits fail: its reads and acks live in the addon, so the driver cannot
-   * reject them itself.
+   * Fail what the database's store waits for, once the attempt is over and
+   * nothing will answer: its reads and acks live in the addon, so the driver
+   * cannot reject them itself.
    */
-  cancelStateWaits(): void;
-  /** The same, for an attempt that is over: nothing will answer them. */
   endStateWaits(): void;
   /**
    * Let go of the scheduler. It holds the driver's tick, and so the driver and
@@ -181,10 +179,10 @@ interface IdentityConstructor {
 export const Identity = (addon as { Identity: IdentityConstructor }).Identity;
 
 /**
- * What the database's store's waits fail with, as the addon's errors carry it:
- * the text crosses the boundary, the class does not (`native/src/vm.rs`).
+ * What the database's store's waits fail with once the attempt is over, as
+ * the addon's errors carry it: the text crosses the boundary, the class does
+ * not (`native/src/vm.rs`).
  */
-export const STATE_WAIT_CANCELLED = 'restate-sessions: the invocation was cancelled';
 export const STATE_WAIT_OVER = 'restate-sessions: the attempt is over';
 
 /** The message of the error a closed attempt throws when Restate shut it down. */

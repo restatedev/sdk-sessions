@@ -158,11 +158,16 @@ export class AttemptDriver {
   private cancelling: Promise<void> | undefined;
   private cancelledResolve: (() => void) | undefined;
   /**
-   * A cancellation that found nothing of the driver's waiting, carried to the
-   * next wait: a retry of a cancelled invocation knows it was cancelled before
-   * the handler starts, and its first call has to fail all the same, rather
-   * than run to completion. The addon carries its own, for the database's
-   * waits.
+   * A cancellation that failed nothing the handler awaits, carried to the
+   * next thing it does await: a result of Restate's ({@link promise}), or a
+   * call of its database ({@link takeCarriedCancellation}). A retry of a
+   * cancelled invocation knows it was cancelled before the handler starts,
+   * and its first call has to fail all the same, rather than run to
+   * completion.
+   *
+   * There is one, and it is here. The addon once carried a second for the
+   * database's waits, and the two could not agree on who had delivered: a
+   * handler saw one cancellation twice.
    */
   private carriedCancellation = false;
   private readonly cancelledPromise: Promise<void>;
@@ -302,10 +307,12 @@ export class AttemptDriver {
     this.cancelledResolve?.();
     this.cancelledResolve = undefined;
     if (!first || this.options.explicitCancellation) return;
-    // The database's reads and acks wait in the addon, where this cannot
-    // reject them: the VM fails them, and `database.ts` gives the handler the
-    // `CancelledError` the store's own failure gave it on the SDK's path.
-    this.vm.cancelStateWaits();
+    // What the database waits for in the addon — a state read, the ack of a
+    // commit's head write — is left to finish. Restate answers those
+    // promptly, and failing the ack of a head that is already out would
+    // report a commit as cancelled that landed. A call of the database that
+    // is in flight completes, and the cancellation goes to what the handler
+    // awaits next.
     // The calls in flight are cancelled, which waits for the ids that have not
     // arrived yet: `serveSession` holds the handler's end for it.
     this.cancelling = quiet(this.cancelPreviousCalls().then(() => undefined));
@@ -324,6 +331,18 @@ export class AttemptDriver {
     // in `waiting` and is rejected here, but `genericSend` voided it, so the
     // handler saw no cancellation and is still owed its one.
     this.carriedCancellation = !failedAResult;
+  }
+
+  /**
+   * Whether a cancellation is owed to the handler's next await, which the
+   * caller then delivers: the handler's call of its database, before it
+   * issues anything, so that a call that fails with the cancellation did
+   * nothing.
+   */
+  takeCarriedCancellation(): boolean {
+    const carried = this.carriedCancellation;
+    this.carriedCancellation = false;
+    return carried;
   }
 
   /** Issuing the cancellations of the calls, if a cancellation started them. */

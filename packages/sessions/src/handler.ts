@@ -225,6 +225,9 @@ function contextOf(
         ),
     }),
     cancellation: () => driver.cancellation(),
+    // A cancellation owed to the handler's next await, which a call of its
+    // database takes before it issues anything (`session.ts`).
+    takeCancellation: () => driver.takeCarriedCancellation(),
     cancelPreviousCalls: () => driver.cancelPreviousCalls(),
     invocationEndPromise: { promise: ending.promise },
     defaultSerde: restate.serde.json,

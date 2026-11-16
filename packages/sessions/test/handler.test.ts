@@ -91,7 +91,11 @@ function restateSide(state = new Map<string, Uint8Array>(), { cancelOnCommit = f
         frame(TYPE.start, [
           ...bytes(1, [1, 2, 3, 4]),
           ...bytes(2, 'inv_test'),
-          ...uint(3, 1),
+          // Known entries: the input, and for a retry of a cancelled
+          // invocation the signal the earlier attempt got. Restate sends
+          // every attempt the entries of the ones before it, and the VM is
+          // not ready to execute until it has them.
+          ...uint(3, cancelAtStart ? 2 : 1),
           ...[...state].flatMap(([k, v]) => field(4, 2, [...bytes(1, k), ...bytes(2, [...v])])),
           ...bytes(6, key),
         ]),
@@ -140,11 +144,8 @@ function restateSide(state = new Map<string, Uint8Array>(), { cancelOnCommit = f
               // selector's path.
               const signalNow = cancelOnCommit && !signalled;
               signalled ||= signalNow;
-              toSdk.push(
-                signalNow
-                  ? frame(TYPE.signal, [...uint(2, 1), ...bytes(4, [])])
-                  : frame(TYPE.commandAck, uint(1, index)),
-              );
+              if (signalNow) toSdk.push(frame(TYPE.signal, [...uint(2, 1), ...bytes(4, [])]));
+              toSdk.push(frame(TYPE.commandAck, uint(1, index)));
             }
           }
           if (message.type === TYPE.getStateEphemeral) {
@@ -202,6 +203,16 @@ function restateSide(state = new Map<string, Uint8Array>(), { cancelOnCommit = f
   };
 }
 
+/** How `step` ended: `ok`, or the name of what it failed with. */
+async function said(step: () => Promise<unknown>): Promise<string> {
+  try {
+    await step();
+    return 'ok';
+  } catch (error) {
+    return error instanceof CancelledError ? 'CancelledError' : (error as Error).name;
+  }
+}
+
 const notes = restate.sessionObject({
   name: 'Notes',
   schema: ['CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)'],
@@ -223,6 +234,23 @@ const notes = restate.sessionObject({
       } catch (error) {
         return error instanceof CancelledError ? 'CancelledError' : (error as Error).name;
       }
+    },
+    /**
+     * A commit, work outside Restate long enough for a cancellation to land
+     * with nothing waiting, then two reads: of pages the commit left in the
+     * session, so they ask Restate nothing.
+     */
+    commitThenReads: async (ctx: restate.SessionContext) => {
+      const commit = await said(() => ctx.db.execute('INSERT INTO notes (body) VALUES (?)', ['a']));
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const read = () => ctx.db.get('SELECT count(*) AS n FROM notes');
+      return `${commit},${await said(read)},${await said(read)}`;
+    },
+    /** A commit, then a call: which of the two a cancellation failed. */
+    commitThenCall: async (ctx: restate.SessionContext) => {
+      const commit = await said(() => ctx.db.execute('INSERT INTO notes (body) VALUES (?)', ['x']));
+      const call = await said(() => ctx.rpc({ service: 'Callee', key: 'a', handler: 'echo', input: 'A' }));
+      return `${commit},${call}`;
     },
     /** Two commits, each reporting whether it failed and how. */
     twice: async (ctx: restate.SessionContext) => {
@@ -365,18 +393,37 @@ describe('a session object served on the explicit recovery VM', () => {
     expect([...r.state.keys()].some((k) => k.startsWith('v22/'))).toBe(true);
   }, 30_000);
 
-  it('a cancellation fails what the database waits for, with the CancelledError', async () => {
-    // The state is read and written in the addon now, so the driver cannot
-    // reject those waits: the VM fails them and `database.ts` restores the
-    // class. On the selector's path the store's own rejection carried it.
-    const r = restateSide(new Map(), { cancelOnCommit: true });
+  it('a cancellation does not fail a commit already under way: its head is out, and it lands', async () => {
+    // The signal arrives while the commit waits for the ack of its head
+    // write. Failing that wait reported a commit as cancelled that landed, so
+    // a handler could not tell from `CancelledError` whether its write
+    // happened. The commit runs to its end and says so; the cancellation is
+    // owed to the handler's next await, and this handler has none.
+    const state = new Map<string, Uint8Array>();
+    const r = restateSide(state, { cancelOnCommit: true });
     const serving = serveSession(notes, 'commits', r.stream);
     r.start('k5', null);
     await r.settle();
     await serving;
     const output = r.sent().find((m) => m.type === TYPE.output);
     const answered = decode(output!.fields.get(14)![0] as Uint8Array);
-    expect(text(answered.get(1)![0] as Uint8Array)).toBe('"CancelledError"');
+    expect(text(answered.get(1)![0] as Uint8Array)).toBe('"committed"');
+    expect(state.has(HEAD_KEY)).toBe(true);
+  }, 30_000);
+
+  it('a cancellation that lands on a commit in flight is delivered once, to the await after it', async () => {
+    // One signal, and the handler sees one `CancelledError`. The driver and
+    // the addon once each decided whether to carry it: the addon failed the
+    // commit, the driver carried its own to the call, and the handler saw
+    // two.
+    const r = restateSide(new Map(), { cancelOnCommit: true });
+    const serving = serveSession(notes, 'commitThenCall', r.stream);
+    r.start('k6', null);
+    await r.settle();
+    await serving;
+    const output = r.sent().find((m) => m.type === TYPE.output);
+    const answered = decode(output!.fields.get(14)![0] as Uint8Array);
+    expect(text(answered.get(1)![0] as Uint8Array)).toBe('"ok,CancelledError"');
   }, 30_000);
 
   it('a view reads, and writes nothing: its sync has nothing to store', async () => {
@@ -418,44 +465,70 @@ describe('a session object served on the explicit recovery VM', () => {
     expect(text(answered.get(1)![0] as Uint8Array)).toBe('"CancelledError,ok"');
   }, 30_000);
 
-  it('a carried cancellation fails the next commit without putting its head write out', async () => {
-    // The head is what makes a commit visible, so a commit reported cancelled
-    // must not leave one behind: a handler that compensates on
-    // `CancelledError` would otherwise be compensating for a write that did
-    // happen. Issuing the command and only then failing its waiter left
-    // exactly that — the row durable, the `await` rejected.
+  it('a read that asks Restate nothing sees a carried cancellation too, once', async () => {
+    // A read of pages the session holds is answered in the addon without a
+    // wait on Restate, so a cancellation delivered at the store's waits had
+    // nothing to land on. It is delivered where the handler calls.
+    const r = restateSide();
+    const serving = serveSession(notes, 'commitThenReads', r.stream);
+    r.start('kr', null);
+    let sentAtCancel = Infinity;
+    const landing = setTimeout(() => {
+      sentAtCancel = r.sent().length;
+      r.cancel();
+    }, 150);
+    await r.settle();
+    clearTimeout(landing);
+    await serving;
+    const sent = r.sent();
+    const output = sent.find((m) => m.type === TYPE.output);
+    const answered = decode(output!.fields.get(14)![0] as Uint8Array);
+    expect(text(answered.get(1)![0] as Uint8Array)).toBe('"ok,CancelledError,ok"');
+    // The premise: the reads after the signal asked Restate for nothing.
+    expect(sent.slice(sentAtCancel).map((m) => m.type)).toEqual([TYPE.output, TYPE.end]);
+  }, 30_000);
+
+  it('a carried cancellation fails the next call of the database before it writes or sends anything', async () => {
+    // A call that fails with `CancelledError` did nothing: a handler that
+    // compensates on it, or makes the call again, would otherwise be acting
+    // on a write that did happen. The cancellation is delivered where the
+    // handler calls, before the call issues a command.
     const state = new Map<string, Uint8Array>();
     const r = restateSide(state);
     const serving = serveSession(notes, 'twoCommits', r.stream);
     r.start('kc', null);
     // While the handler works outside Restate, between its two commits.
-    const landing = setTimeout(() => r.cancel(), 150);
+    let sentAtCancel = Infinity;
+    const landing = setTimeout(() => {
+      sentAtCancel = r.sent().length;
+      r.cancel();
+    }, 150);
     await r.settle();
     clearTimeout(landing);
     await serving;
     const output = r.sent().find((m) => m.type === TYPE.output);
     const answered = decode(output!.fields.get(14)![0] as Uint8Array);
     expect(text(answered.get(1)![0] as Uint8Array)).toBe('"ok,CancelledError"');
-    // The cancelled commit's pages went out — they are written before its
-    // head, and are harmless without one — but its head never did, so the
-    // commit is invisible, exactly as after a crash mid-commit. Counting
-    // commits would count the schema's too, so this asserts the shape: the
-    // last state command is a page, with no head after it.
-    const written = r
-      .sent()
+    // The cancelled transaction put nothing on the wire: no page, no head,
+    // no send. Counting commits would count the schema's too, so this asserts
+    // what came after the signal went in: the handler's output, and before it
+    // no command at all.
+    const sent = r.sent();
+    const written = sent
       .filter((m) => m.type === TYPE.setState)
       .map((m) => ({ key: text(m.fields.get(1)![0] as Uint8Array)!, acked: (m.flags & REQUESTED_ACK) !== 0 }));
-    expect(written.at(-1)?.key, 'the cancelled commit wrote no page').toMatch(/^v22\/tail\//);
-    const lastHead = written.findLastIndex((w) => w.key === HEAD_KEY);
-    const lastPage = written.findLastIndex((w) => w.key.startsWith('v22/tail/'));
-    expect(lastHead, 'the cancelled commit put its head write out too').toBeLessThan(lastPage);
-    // And its sends stayed in. They are made in the hook between the head
-    // write and the wait for its ack, so failing the wait after the command
-    // had been issued let them out for a commit that never landed: the
-    // shipment durable and the row not.
+    expect(sentAtCancel, 'the signal went in before the handler ended').toBeLessThan(sent.length);
+    const after = sent.slice(sentAtCancel).filter((m) => m.type >= 0x0400 && m.type < 0x8000);
     expect(
-      r.sent().some((m) => m.type === TYPE.oneWayCall),
-      "the cancelled commit's sends went out",
+      after.map((m) => m.type),
+      'the cancelled transaction issued commands',
+    ).toEqual([TYPE.output]);
+    // Its sends are made in the hook between a commit's head write and the
+    // wait for that write's ack, so they are the first thing to escape a
+    // commit that is failed late.
+    expect(
+      sent.some((m) => m.type === TYPE.oneWayCall),
+      "the cancelled transaction's sends went out",
     ).toBe(false);
     // Every head write asks for its own ack: that ack is the commit's sync.
     expect(written.filter((w) => w.key === HEAD_KEY).every((w) => w.acked)).toBe(true);

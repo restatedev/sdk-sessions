@@ -206,15 +206,24 @@ the selector did:
 
 - `explicitCancellation: true` — `cancelled(ctx)` resolves and nothing else
   happens. The handler stops its own work.
-- otherwise — the calls in flight are cancelled, and every promise waiting on
-  Restate rejects with the SDK's `CancelledError`, as a cancelled invocation's
-  awaits do. A call's invocation id still settles, since cancelling that call
-  needs it. The database's waits are in the addon, so the VM fails those
-  (`cancel_state_waits`) and `database.ts` restores the class from the text.
-- A cancellation that finds **nothing** waiting is carried to the next wait,
-  once. A retry of a cancelled invocation learns of it before the handler
-  starts, and the selector's path fails its first call all the same
-  (`cancellation.test.ts`, "a retry of a cancelled invocation").
+- otherwise — the calls in flight are cancelled, and every promise of the
+  driver's that waits on Restate rejects with the SDK's `CancelledError`, as
+  a cancelled invocation's awaits do. A call's invocation id still settles,
+  since cancelling that call needs it.
+- A cancellation that failed **nothing the handler awaits** is carried to its
+  next await, once: a result of Restate's, or a call of `ctx.db`. A retry of
+  a cancelled invocation learns of it before the handler starts, and the
+  selector's path fails its first call all the same (`cancellation.test.ts`,
+  "a retry of a cancelled invocation").
+- **The database's waits are not failed.** They are in the addon — a state
+  read, the ack of a commit's head write — and Restate answers them promptly.
+  `ctx.db` gets a cancellation only where the handler calls it
+  (`Attempt.asked`, `session.ts`), before the call issues anything. So a
+  `ctx.db` call that fails with `CancelledError` did nothing, and one already
+  under way runs to its end. See "One carry, in the driver" below for how
+  this was arrived at; it is a change from the selector, where a commit's
+  await could fail after its writes were out and `CancelledError` did not say
+  whether it had committed.
 
 What is awaited _after_ a cancellation is not cancelled, on either path; the
 selector says so in those words.
@@ -415,54 +424,66 @@ this itself is the better end state.
   `journalValueCodecProvider`). Unpinning needs those checked against a newer
   SDK, which is its own piece of work.
 
-- **`concurrency` fails on this, and so CI is red.** Its acceptance test "a
-  cancellation fails one await, once; what committed is sent, and the handler
-  compensates after it" sees two cancellations where it expects one. It was
-  not introduced by a commit of this branch — it fails at `e626ec7` too — but
-  moving `concurrency` onto the VM is what exposed it, so it is this branch's
-  to answer before merging.
+- ~~**A cancellation could be delivered twice**, and `concurrency` failed on
+  it.~~ Fixed: **one carry, in the driver.** Its acceptance test "a
+  cancellation fails one await, once" saw two. The driver carried a
+  cancellation when nothing of its own was waiting, and the addon
+  (`cancel_state_waits`) failed the store's waits and carried one when
+  nothing of the store's was — independently, so one signal could fail a
+  commit in the addon and then a call in the driver.
 
-- **A cancellation can still be delivered twice, and a read never sees one.**
-  The driver carries a cancellation when nothing of its own is waiting, and
-  `cancel_state_waits` carries one when nothing of the store's is —
-  independently, so both can fire, and a handler that catches
-  `CancelledError` and compensates with a write sees that write fail too. The
-  other end of the same knot: a handler that only reads never sees the
-  cancellation at all, because a read is answered in the addon without a wait
-  on Restate for the carry to land on. Implicit cancellation only: a handler
-  with `explicitCancellation` returns before either carry, which is every
-  handler in @restatedev/agents.
-
-  **One carry owned by `VmInner`, taken by whichever side waits next, is the
-  obvious fix and it is not enough** — tried, and reverted. The store's own
-  machinery waits through the same `issue_and_wait`: opening the database
-  reads its head, and a flush waits for its head's ack (`node.rs`'s `wait`
-  and `write_acked`). None of that is a wait the handler made. A single carry
-  is consumed by the first of them, so the handler's own next await succeeds
-  and the cancellation is lost — the same shape as a send's invocation id
-  swallowing it on the driver's side, one layer down. The two tests that
-  cover a carried cancellation reaching a call's result both go red that way.
-
-  A fix has to tell a wait the handler is owed from one the session makes for
-  itself, on both sides of the boundary — `Waits` does it for the driver, and
-  the store would need the same — and only then share one carry between them.
-
-  Three attempts, each stopped by a different consumer of the carry, which is
-  worth having written down:
+  Sharing one carry between the two was tried three ways, each stopped by a
+  different wait of the session's own taking what the handler was owed:
 
   1. **One carry in `VmInner`, taken by whichever side waits next.** The
-     database's head read, while it opens, takes it before the handler's
-     first await.
+     database's head read, while it opens, took it before the handler's first
+     await.
   2. **Each side telling the other what it failed**, so at most one carries.
-     Better — the first two of `concurrency`'s five iterations pass — but the
-     store counts its own in-flight open read as a delivery, and when neither
-     side was waiting both still carry.
+     The store counted its own in-flight open read as a delivery, and when
+     neither side was waiting both still carried.
   3. **Only an acked write may take the carry**, reads never. The schema's own
-     commit is an acked write, so it takes it.
+     commit is an acked write, so it took it.
 
-  The common thread: the store cannot tell from inside which of its waits the
-  handler is owed. That has to come from the caller, in `database.ts` and
-  `session.ts`, where the handler's own operations are named.
+  The store cannot tell from inside which of its waits the handler is owed:
+  the open, the object's schema, the sends a crashed attempt left unmade and
+  the emptying of the outbox after a commit all go through the same
+  `issue_and_wait` as a handler's statement. Marking the handler's calls from
+  outside — a counter around `Connection`'s methods, or around
+  `Attempt.call` — was considered and not built, since reading the code says
+  it has the same flaw: `start()` runs its own statements on the same
+  `Connection`, and `transaction()` empties the outbox through `Attempt.call`
+  _after_ its commit, so a carry taken there would report a committed
+  transaction as cancelled.
+
+  What works is to stop failing the store's waits at all. The carry is the
+  driver's alone, and `ctx.db` takes it in exactly one place: the three
+  closures `Attempt`'s constructor hands the handler (`asked`, `session.ts`),
+  before the call issues a command. Nothing the session does for itself
+  passes through there. The addon has no cancellation state left —
+  `cancel_next_wait`, `cancel_state_waits` and the text `database.ts` matched
+  are gone — and a call of the database costs no call into the addon for it.
+
+  It also settles two things that were open beside it. A read that asks
+  Restate nothing now sees the cancellation (`handler.test.ts`, "a read that
+  asks Restate nothing"). And a cancellation that
+  arrived while a commit waited for its head's ack used to fail that wait
+  with the head already out: the commit landed and reported
+  `CancelledError`. It now runs to its end and says so, and the rule is one
+  rule: a `ctx.db` call that fails with `CancelledError` did nothing.
+
+  **`concurrency`'s check changed with it**, and that is a change to an
+  acceptance test older than this branch. It ran its compensation once and
+  expected the row whichever await the cancellation reached, which is the
+  selector's rule (the write is out before the await that fails). Under this
+  one a compensation the cancellation reaches did nothing, so the handler
+  makes it again, and the check asserts the row is there exactly once — a
+  cancelled call that had landed would show as a second row. Locally the
+  cancellation reaches the compensation every time (30 of 30); the commit in
+  flight followed by a call is `handler.test.ts`'s.
+
+  The store's waits are bounded by Restate answering a read or an ack. One
+  that never comes, on a connection that stays up, would hold a cancellation
+  back; the attempt's end still fails them (`end_state_waits`).
 
 - **A Restate below protocol v7 cannot serve a session object at all.** It
   once reached the SDK's VM through the selector. With the selector gone

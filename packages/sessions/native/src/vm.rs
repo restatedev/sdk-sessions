@@ -193,11 +193,6 @@ pub(crate) struct VmInner {
     /// Whether a tick is already asked for: one is enough until it runs, and
     /// a commit's writes would otherwise each wake JavaScript's thread.
     asked_to_tick: bool,
-    /// A cancellation that found nothing waiting, to be carried to the next
-    /// wait. A retry of a cancelled invocation knows it was cancelled before
-    /// the handler starts, and the selector's path fails its first call all
-    /// the same.
-    cancel_next_wait: bool,
 }
 
 impl VmInner {
@@ -268,11 +263,9 @@ impl Identity {
 pub struct Vm(pub(crate) Arc<Mutex<VmInner>>);
 
 /// What the database's store's pending reads and acks fail with when the
-/// invocation is cancelled. It crosses the addon as the text of an error, so
-/// `src/database.ts` matches it to give the handler a `CancelledError`.
-pub(crate) const CANCELLED: &str = "restate-sessions: the invocation was cancelled";
-
-/// The same, for an attempt Restate shut down or that failed.
+/// attempt is over: Restate shut it down, or it failed. It crosses the addon
+/// as the text of an error, so `src/database.ts` matches it to give the
+/// handler the error of an attempt's end.
 pub(crate) const ATTEMPT_OVER: &str = "restate-sessions: the attempt is over";
 
 /// A VM error as JavaScript gets it. The attempt's shutdown carries the code
@@ -362,43 +355,17 @@ impl Vm {
     ) -> std::result::Result<oneshot::Receiver<std::result::Result<Value, Error>>, Error> {
         let (result, scheduler) = {
             let mut vm = lock(inner);
-            // A cancellation that found nothing waiting is carried to this
-            // one, and fails it as a wait in flight would have been failed.
-            //
-            // The command is not issued at all. Failing the waiter after
-            // `act` had run left the command out on the wire: a commit's head
-            // write landed and was durable while its `await` reported
-            // `CancelledError`, so a handler compensating on that believed a
-            // write had not happened when it had. Not issuing it is what the
-            // storage already means by a commit that did not finish — the
-            // head is what makes one visible, and a commit without its head
-            // is as if it never started, exactly as after a crash.
-            let result = if std::mem::take(&mut vm.cancel_next_wait) {
-                // An error, not a receiver already carrying one. A caller
-                // that reads the receiver only at the end does work in
-                // between: a commit's `put_and_sync` runs the JavaScript hook
-                // that sends a transaction's messages between its head write
-                // and the wait for that write's ack. A pre-failed receiver
-                // let those sends go out for a commit whose head was never
-                // written — the shipment durable and the row not, which is
-                // worse than landing both.
-                Err(Error::new(
-                    restate_sdk_shared_core::error::codes::INTERNAL,
-                    CANCELLED.to_owned(),
-                ))
-            } else {
-                act(&mut vm.vm).map(|handle| {
-                    let (sender, receiver) = oneshot::channel();
-                    vm.rust_waiters.insert(handle, sender);
-                    // Still under the lock: a result the VM already has — a
-                    // state value the invocation knows, or that this attempt
-                    // wrote — reaches the waiter here, instead of waiting for
-                    // a tick to route it and so taking a turn of JavaScript's
-                    // event loop to answer a read that needed nothing.
-                    let _ = vm.route();
-                    receiver
-                })
-            };
+            let result = act(&mut vm.vm).map(|handle| {
+                let (sender, receiver) = oneshot::channel();
+                vm.rust_waiters.insert(handle, sender);
+                // Still under the lock: a result the VM already has — a
+                // state value the invocation knows, or that this attempt
+                // wrote — reaches the waiter here, instead of waiting for
+                // a tick to route it and so taking a turn of JavaScript's
+                // event loop to answer a read that needed nothing.
+                let _ = vm.route();
+                receiver
+            });
             let scheduler = vm.scheduler.clone();
             (result, scheduler)
         };
@@ -406,17 +373,21 @@ impl Vm {
         result
     }
 
-    /// Fail every read and ack the database's store is waiting for, with
-    /// `reason`. Their notifications may still arrive, and are then queued for
-    /// JavaScript and dropped: nothing waits for them any more.
-    fn fail_waiters(inner: &Arc<Mutex<VmInner>>, reason: &str, carry: bool) {
+    /// Fail every read and ack the database's store is waiting for: the
+    /// attempt is over, and nothing will answer them.
+    ///
+    /// Only the attempt's end does this. A cancellation does not: a wait of
+    /// the store's is a state read or the ack of a commit's head write, which
+    /// Restate answers promptly, and failing the ack of a head that is already
+    /// out reports a commit as cancelled that landed. The driver delivers a
+    /// cancellation where the handler calls, before anything is issued
+    /// (`session.ts`).
+    fn fail_waiters(inner: &Arc<Mutex<VmInner>>) {
         let mut vm = lock(inner);
-        // Nothing was waiting, so carry it to whatever waits next.
-        vm.cancel_next_wait = carry && vm.rust_waiters.is_empty();
         for (_, waiter) in vm.rust_waiters.drain() {
             let _ = waiter.send(Err(Error::new(
                 restate_sdk_shared_core::error::codes::INTERNAL,
-                reason.to_owned(),
+                ATTEMPT_OVER.to_owned(),
             )));
         }
     }
@@ -468,7 +439,6 @@ impl Vm {
             for_js: Default::default(),
             scheduler: None,
             asked_to_tick: false,
-            cancel_next_wait: false,
         }))))
     }
 
@@ -739,18 +709,11 @@ impl Vm {
         self.lock().vm.is_cancelled()
     }
 
-    /// Fail what the database's store waits for, as a cancelled invocation's
-    /// awaits fail. The driver calls it when a cancellation arrives that the
-    /// handler does not take care of itself.
-    #[napi]
-    pub fn cancel_state_waits(&self) {
-        Self::fail_waiters(&self.0, CANCELLED, true);
-    }
-
-    /// The same, for an attempt that is over: nothing more will answer.
+    /// Fail what the database's store waits for: the attempt is over, and
+    /// nothing more will answer.
     #[napi]
     pub fn end_state_waits(&self) {
-        Self::fail_waiters(&self.0, ATTEMPT_OVER, false);
+        Self::fail_waiters(&self.0);
     }
 
     /// Let go of the scheduler, which holds JavaScript's tick, and so the

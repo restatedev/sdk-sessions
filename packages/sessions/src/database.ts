@@ -5,8 +5,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { Buffer } from 'node:buffer';
 import { addon as loaded } from './addon.ts';
-import { STATE_WAIT_CANCELLED, STATE_WAIT_OVER, type Vm } from './vm.ts';
-import { CancelledError } from '@restatedev/restate-sdk';
+import { STATE_WAIT_OVER, type Vm } from './vm.ts';
 import { AttemptShutDown } from './driver.ts';
 
 /** An SQL value. Integers come back as numbers, or as bigints beyond 2^53. */
@@ -287,10 +286,10 @@ abstract class Sql implements DatabaseWriter {
    */
   protected failure(error: unknown): unknown {
     if (error instanceof SqlError) return error;
-    // The state is read and written in the addon on the VM's path, so a
-    // cancellation fails those waits there and its text is all that crosses
-    // back. Give the handler the class it catches, as the store's own
-    // rejection did when the store was JavaScript's.
+    // The state is read and written in the addon on the VM's path, so the
+    // end of the attempt fails those waits there and its text is all that
+    // crosses back. Give the handler the class the driver's own awaits fail
+    // with.
     const stateWait = stateWaitFailure(error);
     if (stateWait !== undefined) return stateWait;
     const failed = this.boundary.failed;
@@ -306,13 +305,12 @@ const REFUSED = 'InvalidArg';
 
 /**
  * The error of a call that failed because the attempt's state waits were
- * failed in the addon: a cancellation, or the end of the attempt. `undefined`
- * for anything else.
+ * failed in the addon, at the end of the attempt. `undefined` for anything
+ * else.
  */
 function stateWaitFailure(error: unknown): unknown {
   const message = (error as { message?: unknown }).message;
   if (typeof message !== 'string') return undefined;
-  if (message.includes(STATE_WAIT_CANCELLED)) return new CancelledError();
   if (message.includes(STATE_WAIT_OVER)) return new AttemptShutDown();
   return undefined;
 }
