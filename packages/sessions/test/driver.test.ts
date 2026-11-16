@@ -1,0 +1,189 @@
+// One attempt on the explicit recovery VM (`src/driver.ts`), with Restate's
+// side played by wire bytes. What the selector had to fake — several promises
+// awaited at once, each waiting on Restate — falls out of the VM here: an
+// action returns a handle, and the tick settles the promise of that handle.
+import { describe, expect, it } from 'vitest';
+import { Attempt, AttemptShutDown } from '../src/driver.ts';
+import { frame, uint, field } from './wire.ts';
+import { drain, messages, startedVm, TYPE, types, value } from './vm-support.ts';
+
+/** An attempt over a started VM, with the bytes it writes. */
+function attempt(options?: { partial?: boolean; state?: Record<string, string> }) {
+  const written: Uint8Array[] = [];
+  const vm = startedVm('"hello"', options);
+  const a = new Attempt(vm, (chunk) => written.push(chunk));
+  return {
+    attempt: a,
+    vm,
+    written,
+    /** Everything written so far, as messages. */
+    sent: () => messages(Buffer.concat(written)),
+    /** Restate answers the ephemeral get of `key` with `answer`. */
+    answerGet(key: string, answer: string) {
+      const get = messages(Buffer.concat(written)).find(
+        (m) => m.type === TYPE.getStateEphemeral && String(m.fields.get(2)?.[0]) === key,
+      );
+      if (get === undefined) throw new Error(`no ephemeral get of ${key} was sent`);
+      const id = get.fields.get(1)![0] as number;
+      a.notifyInput(frame(TYPE.getStateEphemeralNotification, [...uint(1, id), ...field(5, 2, value(answer))]));
+    },
+    /** Restate acks the `nth` command it was sent (1-based, as the journal numbers them). */
+    ack(nth: number) {
+      a.notifyInput(frame(TYPE.commandAck, uint(1, nth)));
+    },
+  };
+}
+
+/** Let the queued microtasks run. */
+const turn = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+describe('an attempt on the explicit recovery VM', () => {
+  it('settles two reads awaited at once, which is what the selector existed to do', async () => {
+    const r = attempt({ partial: true });
+    // Both issued in the same turn, both waiting on Restate. On the SDK's own
+    // loop this is "awaitNext already pending".
+    const both = Promise.all([r.attempt.getState('one'), r.attempt.getState('two')]);
+    await turn();
+    expect(types(Buffer.concat(r.written))).toEqual([TYPE.getStateEphemeral, TYPE.getStateEphemeral]);
+    r.answerGet('one', '"1"');
+    r.answerGet('two', '"2"');
+    await turn();
+    expect((await both).map((v) => (v === null ? null : Buffer.from(v).toString()))).toEqual(['"1"', '"2"']);
+  });
+
+  it('batches the output of the actions issued in one turn into a single write', async () => {
+    const r = attempt({ partial: true });
+    void r.attempt.getState('one');
+    void r.attempt.getState('two');
+    r.attempt.setState('three', Buffer.from('3'));
+    expect(r.written).toHaveLength(0); // nothing is written before the tick
+    await turn();
+    expect(r.written).toHaveLength(1);
+    expect(types(r.written[0]!)).toEqual([TYPE.getStateEphemeral, TYPE.getStateEphemeral, TYPE.setState]);
+  });
+
+  it('a sync resolves once Restate acks it, and not before', async () => {
+    const r = attempt();
+    r.attempt.setState('a', Buffer.from('1'));
+    let synced = false;
+    const sync = r.attempt.sync().then(() => (synced = true));
+    await turn();
+    // The write, then the sync's own acked clear.
+    expect(types(Buffer.concat(r.written))).toEqual([TYPE.setState, TYPE.clearState]);
+    expect(synced).toBe(false);
+    r.ack(2); // the clear is the second command of the journal after the input
+    await turn();
+    await sync;
+    expect(synced).toBe(true);
+  });
+
+  it('a value this attempt wrote is read back without asking Restate', async () => {
+    const r = attempt({ partial: true });
+    r.attempt.setState('greeting', Buffer.from('"hi"'));
+    const read = await r.attempt.getState('greeting');
+    expect(Buffer.from(read!).toString()).toBe('"hi"');
+    await turn();
+    expect(types(Buffer.concat(r.written))).toEqual([TYPE.setState]); // no get went out
+  });
+
+  it('a call gives its invocation id and its result, each from its own notification', async () => {
+    const r = attempt();
+    const call = r.attempt.call({ service: 'Store', handler: 'reserve', key: 'k', input: Buffer.from('"x"') });
+    await turn();
+    const sent = r.sent();
+    expect(sent.map((m) => m.type)).toEqual([TYPE.call]);
+    // Restate answers the id, then the result.
+    const command = sent[0]!.fields;
+    const idHandle = command.get(10)![0] as number;
+    const resultHandle = command.get(11)![0] as number;
+    r.attempt.notifyInput(
+      frame(TYPE.callInvocationIdCompletion, [...uint(1, idHandle), ...bytesField(16, 'inv_called')]),
+    );
+    await turn();
+    expect(await call.invocationId).toBe('inv_called');
+    r.attempt.notifyInput(frame(TYPE.callCompletion, [...uint(1, resultHandle), ...field(5, 2, value('"done"'))]));
+    await turn();
+    expect(Buffer.from((await call.result)!).toString()).toBe('"done"');
+  });
+
+  it('the attempt Restate shuts down rejects everything still waiting', async () => {
+    const r = attempt({ partial: true });
+    const read = r.attempt.getState('one');
+    const sync = r.attempt.sync();
+    await turn();
+    r.attempt.notifyInputClosed();
+    await turn();
+    await expect(read).rejects.toBeInstanceOf(AttemptShutDown);
+    await expect(sync).rejects.toBeInstanceOf(AttemptShutDown);
+    expect(r.attempt.over).toBeInstanceOf(AttemptShutDown);
+    // An action after the end throws rather than hanging.
+    await expect(r.attempt.getState('two')).rejects.toBeInstanceOf(AttemptShutDown);
+  });
+
+  it('tells its listeners once when the attempt ends', async () => {
+    const r = attempt({ partial: true });
+    let ended = 0;
+    r.attempt.whenEnded(() => ended++);
+    const unregister = r.attempt.whenEnded(() => ended++);
+    unregister();
+    r.attempt.notifyInputClosed();
+    await turn();
+    expect(ended).toBe(1);
+    // A listener registered after the end is told at once.
+    r.attempt.whenEnded(() => ended++);
+    expect(ended).toBe(2);
+  });
+
+  it('resolves cancelled() when the cancel signal arrives, and nothing suspends on it', async () => {
+    const r = attempt();
+    let cancelled = false;
+    void r.attempt.cancelled().then(() => (cancelled = true));
+    await turn();
+    expect(cancelled).toBe(false);
+    expect(r.attempt.isCancelled()).toBe(false);
+    // The signal has no notification of its own: a tick notices the flag.
+    r.attempt.notifyInput(frame(TYPE.signal, [...uint(2, 1), ...bytesField(4, '')]));
+    await turn();
+    expect(cancelled).toBe(true);
+    expect(r.attempt.isCancelled()).toBe(true);
+    // Nothing was sent for it: the attempt never told Restate it waits.
+    expect(drain(r.vm)).toEqual([]);
+  });
+
+  it('cancels the calls it made, by the ids Restate gave them', async () => {
+    const r = attempt();
+    const call = r.attempt.call({ service: 'Store', handler: 'reserve', input: Buffer.from('"x"') });
+    await turn();
+    const command = r.sent()[0]!.fields;
+    r.attempt.notifyInput(
+      frame(TYPE.callInvocationIdCompletion, [...uint(1, command.get(10)![0] as number), ...bytesField(16, 'inv_a')]),
+    );
+    await turn();
+    await call.invocationId;
+    r.written.length = 0;
+    expect(r.attempt.cancelCalls()).toEqual(['inv_a']);
+    await turn();
+    expect(types(Buffer.concat(r.written))).toEqual([0x0410]); // SendSignalCommand: the cancellation
+  });
+
+  it('ends the handler with its output, and writes it', async () => {
+    const r = attempt();
+    r.attempt.endSuccess(Buffer.from('"done"'));
+    await turn();
+    expect(types(Buffer.concat(r.written))).toEqual([TYPE.output, TYPE.end]);
+  });
+
+  it('a failed attempt writes an error and ends no invocation', async () => {
+    const r = attempt();
+    r.attempt.fail('the model is down', 'at model.ts:1');
+    await turn();
+    expect(types(Buffer.concat(r.written))).toEqual([TYPE.error]);
+    // Taking notifications now raises the error that closed the attempt.
+    expect(r.attempt.over?.name).toBe('AttemptFailed');
+  });
+});
+
+/** A bytes field, for the completions that carry a plain string. */
+function bytesField(number: number, text: string): number[] {
+  return field(number, 2, [...new TextEncoder().encode(text)]);
+}

@@ -3,73 +3,22 @@
 // back the bytes it would get. Nothing of @restatedev/sessions stands between,
 // and no SDK: this is the binding alone.
 import { describe, expect, it } from 'vitest';
-import { isShutDown, Vm, type VmNotification } from '../src/vm.ts';
-import { bytes, decode, field, frame, TYPE as WIRE, uint } from './wire.ts';
-
-/** The message types this file sends, beside the ones wire.ts names. */
-const TYPE = {
-  ...WIRE,
-  commandAck: 0x0004,
-  // On V8 a state value the attempt does not know is read with an ephemeral
-  // get, which is not journaled; V7 records one in the journal instead.
-  getStateEphemeral: 0x0200,
-  getStateEphemeralNotification: 0x0300,
-  setState: 0x0403,
-} as const;
-
-/** A `Value` message: its content is field 1. */
-const value = (content: string) => bytes(1, content);
-
-/** An attempt's VM, started for `key` with `input`, and ready to execute. */
-function started(
-  input: unknown,
-  { partial = false, state = {} }: { partial?: boolean; state?: Record<string, string> } = {},
-): Vm {
-  const vm = new Vm([{ key: 'content-type', value: 'application/vnd.restate.invocation.v8' }], true);
-  const entries = Object.entries(state).flatMap(([key, v]) => field(4, 2, [...bytes(1, key), ...bytes(2, v)]));
-  vm.notifyInput(
-    frame(TYPE.start, [
-      ...bytes(1, [1, 2, 3, 4]),
-      ...bytes(2, 'inv_test'),
-      ...uint(3, 1), // known_entries: the input
-      ...entries,
-      ...(partial ? uint(5, 1) : []),
-      ...bytes(6, 'thekey'),
-    ]),
-  );
-  vm.notifyInput(frame(TYPE.input, bytes(14, value(JSON.stringify(input)))));
-  return vm;
-}
-
-/** Every notification ready now. */
-function drain(vm: Vm): VmNotification[] {
-  const out: VmNotification[] = [];
-  for (let n = vm.takeNotification(); n !== null; n = vm.takeNotification()) out.push(n);
-  return out;
-}
-
-/** The types of the messages in `output`, in order. */
-function types(output: Buffer): number[] {
-  const out: number[] = [];
-  for (let at = 0; at < output.length;) {
-    out.push(output.readUInt16BE(at));
-    at += 8 + output.readUInt32BE(at + 4);
-  }
-  return out;
-}
+import { isShutDown, Vm } from '../src/vm.ts';
+import { bytes, decode, field, frame, uint } from './wire.ts';
+import { drain, startedVm as started, TYPE, types, V8, value } from './vm-support.ts';
 
 describe('the attempt VM on the wire', () => {
   it('negotiates the service protocol and answers a response head', () => {
-    const vm = new Vm([{ key: 'content-type', value: 'application/vnd.restate.invocation.v8' }], true);
+    const vm = new Vm([{ key: 'content-type', value: V8 }], true);
     expect(vm.getResponseHead()).toEqual({
       statusCode: 200,
-      headers: [{ key: 'content-type', value: 'application/vnd.restate.invocation.v8' }],
+      headers: [{ key: 'content-type', value: V8 }],
     });
     expect(vm.state()).toBe('starting');
   });
 
   it('is ready once the start and the input are in, and gives the input', () => {
-    const vm = new Vm([{ key: 'content-type', value: 'application/vnd.restate.invocation.v8' }], true);
+    const vm = new Vm([{ key: 'content-type', value: V8 }], true);
     vm.notifyInput(
       frame(TYPE.start, [...bytes(1, [1, 2, 3, 4]), ...bytes(2, 'inv_test'), ...uint(3, 1), ...bytes(6, 'thekey')]),
     );
@@ -84,7 +33,7 @@ describe('the attempt VM on the wire', () => {
   });
 
   it('a request/response transport fails the invocation at once', () => {
-    const vm = new Vm([{ key: 'content-type', value: 'application/vnd.restate.invocation.v8' }], false);
+    const vm = new Vm([{ key: 'content-type', value: V8 }], false);
     // Nothing is asked of it: the attempt is over before the handler starts.
     expect(vm.state()).toBe('closed');
     expect(types(vm.takeOutput())).toContain(TYPE.error);
