@@ -21,6 +21,14 @@ const INACTIVITY = 3000;
 /** Well inside it, as the default 20s is inside Restate's default minute. */
 process.env.RESTATE_SESSIONS_HEARTBEAT = '750';
 
+/** A plain journaled object, called by the session object: the SDK serves it. */
+const callee = restate.object({
+  name: 'Callee',
+  handlers: {
+    echo: async (_ctx: restate.ObjectContext, what: string) => what,
+  },
+});
+
 const probe = restate.sessionObject({
   name: 'Recovery',
   schema: ['CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)'],
@@ -31,15 +39,25 @@ const probe = restate.sessionObject({
       const row = await ctx.db.get<{ n: number }>('SELECT count(*) AS n FROM notes');
       return row!.n;
     },
-    /** Two reads of the database awaited at once: what the selector existed to allow. */
+    /**
+     * Two calls awaited at once. This is what the selector existed to allow:
+     * the SDK's own loop lets one promise wait on Restate at a time, so two
+     * of these would fail the attempt with `awaitNext already pending`.
+     * (Two `ctx.db` reads would not do: the database runs its calls one at a
+     * time, so they never wait on Restate together.)
+     */
     both: async (ctx: restate.SessionContext) => {
       const [a, b] = await Promise.all([
-        ctx.db.get<{ n: number }>('SELECT count(*) AS n FROM notes'),
-        ctx.db.get<{ n: number }>('SELECT count(*) AS n FROM notes'),
+        ctx.rpc({ service: 'Callee', key: 'x', handler: 'echo', input: 'a' }),
+        ctx.rpc({ service: 'Callee', key: 'y', handler: 'echo', input: 'b' }),
       ]);
-      return (a?.n ?? -1) + (b?.n ?? -1);
+      return `${String(a)}${String(b)}`;
     },
-    /** Works outside Restate for longer than the inactivity timeout. */
+    /**
+     * Works outside Restate for longer than the inactivity timeout, then
+     * writes a row. Each attempt runs from the start, so the number of rows
+     * is the number of attempts: one row means the heartbeat kept it alive.
+     */
     slow: async (ctx: restate.SessionContext, ms: number) => {
       await sleep(ms);
       await ctx.db.execute('INSERT INTO notes (body) VALUES (?)', ['slow']);
@@ -94,7 +112,7 @@ for (const deadline = Date.now() + 60_000; ; await sleep(200)) {
 // This is the point: `sessions.serve` routes the session object's invocations
 // to the explicit recovery VM, and the SDK keeps everything else.
 process.env.PORT = String(PORT);
-await restate.serve(probe);
+await restate.serve(probe, callee);
 
 for (const deadline = Date.now() + 60_000; ; await sleep(200)) {
   const ok = await fetch(`${ADMIN}/deployments`, {
@@ -148,26 +166,19 @@ check(
 
 // 3. Two reads of Restate awaited at once, which the selector existed to allow.
 const both = await call('Recovery/k1/both', null);
-check('two reads awaited at once both answer', both.text === '2', both.text);
+check('two calls awaited at once both answer', both.text === '"ab"', both.text);
 
 // 4. Work longer than the inactivity timeout finishes in one attempt: the
 //    heartbeat says the handler makes progress, as the working run did.
-const slowKey = 'k2';
-const slow = await call(`Recovery/${slowKey}/slow`, INACTIVITY * 2.5);
-check('work past the inactivity timeout answers', slow.text === '1', slow.text);
-const slowId = (
-  await query<{ id: string }>(
-    `SELECT id FROM sys_invocation WHERE target_service_name = 'Recovery' AND target_handler_name = 'slow' LIMIT 1`,
-  )
-)[0]?.id;
-const attempts =
-  slowId === undefined
-    ? []
-    : await query<{ retry_count: number }>(`SELECT retry_count FROM sys_invocation_state WHERE id = '${slowId}'`);
+//
+//    Each attempt runs the handler from the start and writes one row, so the
+//    count it answers *is* the number of attempts it took. Reading Restate's
+//    own retry count would pass vacuously when the row is already gone.
+const slow = await call('Recovery/k2/slow', INACTIVITY * 2.5);
 check(
-  'it took one attempt: the heartbeat kept it alive',
-  (attempts[0]?.retry_count ?? 0) === 0,
-  `retry_count=${attempts[0]?.retry_count}`,
+  'work past the inactivity timeout answers in one attempt: the heartbeat kept it alive',
+  slow.text === '1',
+  `rows=${slow.text}, so that many attempts`,
 );
 
 console.log(failures.length === 0 ? '\nall checks passed' : `\n${failures.length} FAILED: ${failures.join('; ')}`);

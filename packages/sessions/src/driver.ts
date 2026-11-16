@@ -43,9 +43,6 @@ function heartbeatMs(): number {
   return Number.isFinite(set) && set > 0 ? set : 20_000;
 }
 
-/** What a cancelled invocation's awaits fail with. */
-const CANCELLED = 409;
-
 /**
  * Restate shut the attempt down: it is over, and a new attempt runs the
  * handler from the start.
@@ -104,6 +101,13 @@ function settled(notification: VmNotification): { value: unknown } | { error: Er
   }
 }
 
+/** A call this attempt made: its invocation id, and whether it is over. */
+interface Call {
+  id: Promise<string>;
+  done: boolean;
+  cancelled: boolean;
+}
+
 /** A promise waiting for the notification of a handle. */
 interface Waiting {
   resolve: (value: unknown) => void;
@@ -139,8 +143,10 @@ export class AttemptDriver {
   private readonly waiting = new Map<number, Waiting>();
   private readonly onEnd = new Set<() => void>();
   private queued = false;
-  /** The invocation ids of the calls this attempt made, by the handle of their result. */
-  private readonly inFlight = new Map<number, string>();
+  /** The calls this attempt made, by the handle of their result. */
+  private readonly calls = new Map<number, Call>();
+  /** Issuing the cancellations of the calls, which the handler's end waits for. */
+  private cancelling: Promise<void> | undefined;
   private cancelledResolve: (() => void) | undefined;
   private readonly cancelledPromise: Promise<void>;
   private heartbeats: ReturnType<typeof setInterval> | undefined;
@@ -198,18 +204,16 @@ export class AttemptDriver {
     let notification: VmNotification | null;
     try {
       while ((notification = this.vm.takeNotification()) !== null) {
+        // A call is over once its result arrives, whatever it is.
+        const call = this.calls.get(notification.handle);
+        if (call !== undefined) call.done = true;
         const waiting = this.waiting.get(notification.handle);
-        this.inFlight.delete(notification.handle);
         // A handle this attempt did not issue, or settled already: nothing waits for it.
         if (waiting === undefined) continue;
         this.waiting.delete(notification.handle);
         const result = settled(notification);
-        if ('error' in result) {
-          waiting.reject(result.error);
-        } else {
-          if (waiting.invocationId) this.inFlight.set(notification.handle, String(result.value));
-          waiting.resolve(result.value);
-        }
+        if ('error' in result) waiting.reject(result.error);
+        else waiting.resolve(result.value);
       }
     } catch (error) {
       this.end(isShutDown(error) ? new AttemptShutDown() : new AttemptFailed(String(error)));
@@ -263,8 +267,10 @@ export class AttemptDriver {
     this.cancelledResolve?.();
     this.cancelledResolve = undefined;
     if (!first || this.options.explicitCancellation) return;
-    this.cancelPreviousCalls();
-    const failure = new restate.TerminalError('cancelled', { errorCode: CANCELLED });
+    // The calls in flight are cancelled, which waits for the ids that have not
+    // arrived yet: `serveSession` holds the handler's end for it.
+    this.cancelling = quiet(this.cancelPreviousCalls().then(() => undefined));
+    const failure = new restate.CancelledError();
     // Deleting the entry the loop is on is defined, and a rejection runs its
     // handlers in a later microtask, so nothing is added under the iteration.
     for (const [handle, waiting] of this.waiting) {
@@ -273,6 +279,11 @@ export class AttemptDriver {
       this.waiting.delete(handle);
       waiting.reject(failure);
     }
+  }
+
+  /** Issuing the cancellations of the calls, if a cancellation started them. */
+  get cancellingCalls(): Promise<void> | undefined {
+    return this.cancelling;
   }
 
   /** Resolves once a cancellation arrived, in this attempt or an earlier one. */
@@ -285,11 +296,30 @@ export class AttemptDriver {
     return this.vm.isCancelled();
   }
 
-  /** Cancel the invocations this attempt called and that have not answered; returns their ids. */
-  cancelPreviousCalls(): string[] {
-    const ids = [...this.inFlight.values()];
-    for (const id of ids) this.cancel(id);
-    return ids;
+  /**
+   * Cancel the calls this attempt made that have not answered; returns their
+   * ids. A call whose invocation id has not arrived yet is waited for: it was
+   * made, so Restate will answer with its id, and leaving it uncancelled would
+   * leave an invocation running that nothing waits for any more.
+   */
+  async cancelPreviousCalls(): Promise<string[]> {
+    const cancelled: string[] = [];
+    // A snapshot: the loop awaits, and a call made meanwhile is the handler's
+    // own business, not one this cancellation set out to stop.
+    for (const call of Array.from(this.calls.values())) {
+      if (call.done || call.cancelled) continue;
+      let id: string;
+      try {
+        id = await call.id;
+      } catch {
+        continue; // its id never came: the attempt is over, or the call failed
+      }
+      if (call.done || call.cancelled) continue;
+      call.cancelled = true;
+      this.cancel(id);
+      cancelled.push(id);
+    }
+    return cancelled;
   }
 
   // --- Actions
@@ -412,6 +442,8 @@ export class AttemptDriver {
     const result = quiet(
       this.promise(handles.result).then((value) => (value === undefined ? null : (value as Uint8Array))),
     );
+    // Keyed by the result's handle, which is what says the call is over.
+    this.calls.set(handles.result, { id: invocationId, done: false, cancelled: false });
     return { result, invocationId };
   }
 

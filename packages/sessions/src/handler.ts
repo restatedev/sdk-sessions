@@ -95,8 +95,12 @@ export async function serveSession(
     driver.startHeartbeats();
     const input = entry.inputSerde.deserialize(driver.body);
     const output = await invoke(definition, name, contextOf(driver, stream.headers), input);
+    // A cancellation that arrived while the handler ran is still cancelling
+    // its calls: they go out before the attempt ends, or not at all.
+    await driver.cancellingCalls;
     driver.endSuccess(entry.outputSerde.serialize(output));
   } catch (error) {
+    await driver.cancellingCalls;
     endWith(driver, error);
   } finally {
     await pump;
@@ -185,7 +189,7 @@ function contextOf(
           .then((value) => (serde ?? restate.serde.json).deserialize(value ?? new Uint8Array())),
     }),
     cancellation: () => driver.cancellation(),
-    cancelPreviousCalls: () => void driver.cancelPreviousCalls(),
+    cancelPreviousCalls: () => driver.cancelPreviousCalls(),
     invocationEndPromise: { promise: ending.promise },
     defaultSerde: restate.serde.json,
   };

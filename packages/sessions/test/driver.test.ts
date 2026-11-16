@@ -178,7 +178,7 @@ describe('an attempt on the explicit recovery VM', () => {
     await turn();
     await call.invocationId;
     r.written.length = 0;
-    expect(r.attempt.cancelPreviousCalls()).toEqual(['inv_a']);
+    expect(await r.attempt.cancelPreviousCalls()).toEqual(['inv_a']);
     await turn();
     expect(types(Buffer.concat(r.written))).toEqual([0x0410]); // SendSignalCommand: the cancellation
   });
@@ -203,8 +203,9 @@ describe('an attempt on the explicit recovery VM', () => {
       () => undefined,
       (e: unknown) => e as Error & { code?: number },
     );
-    expect(failed?.name).toBe('TerminalError');
-    expect(failed?.message).toBe('cancelled');
+    // The class everything downstream classifies on: `cancellation.test.ts`
+    // asserts it, and @restatedev/agents branches on it in a dozen places.
+    expect(failed?.name).toBe('CancelledError');
     // ...and the call in flight was cancelled.
     expect(types(Buffer.concat(r.written))).toContain(0x0410);
   });
@@ -230,6 +231,48 @@ describe('an attempt on the explicit recovery VM', () => {
     r.answerGet('one', '"1"');
     await turn();
     expect(Buffer.from((await read)!).toString()).toBe('"1"');
+  });
+
+  it('does not cancel a call that already answered', async () => {
+    const r = attempt();
+    const call = r.attempt.call({ service: 'Store', handler: 'reserve', input: Buffer.from('"x"') });
+    await turn();
+    const command = r.sent()[0]!.fields;
+    r.attempt.notifyInput(
+      frame(TYPE.callInvocationIdCompletion, [...uint(1, command.get(10)![0] as number), ...bytesField(16, 'inv_a')]),
+    );
+    r.attempt.notifyInput(
+      frame(TYPE.callCompletion, [...uint(1, command.get(11)![0] as number), ...field(5, 2, value('"done"'))]),
+    );
+    await turn();
+    await call.result;
+    r.written.length = 0;
+    // It is over: cancelling it would cancel an invocation that already ended.
+    expect(await r.attempt.cancelPreviousCalls()).toEqual([]);
+    await turn();
+    expect(types(Buffer.concat(r.written))).toEqual([]);
+  });
+
+  it('cancels a call whose invocation id arrives only after the cancellation', async () => {
+    const r = attempt();
+    const call = r.attempt.call({ service: 'Store', handler: 'reserve', input: Buffer.from('"x"') });
+    call.result.catch(() => {});
+    await turn();
+    const command = r.sent()[0]!.fields;
+    // The cancellation lands while the id is still outstanding.
+    r.attempt.notifyInput(frame(TYPE.signal, [...uint(2, 1), ...bytesField(4, '')]));
+    await turn();
+    r.written.length = 0;
+    r.attempt.notifyInput(
+      frame(TYPE.callInvocationIdCompletion, [
+        ...uint(1, command.get(10)![0] as number),
+        ...bytesField(16, 'inv_late'),
+      ]),
+    );
+    await turn();
+    await r.attempt.cancellingCalls;
+    await turn();
+    expect(types(Buffer.concat(r.written))).toContain(0x0410); // the cancellation went out
   });
 
   it("a view's sync writes nothing: it stored nothing to sync", async () => {
