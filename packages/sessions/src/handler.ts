@@ -96,7 +96,18 @@ export async function serveSession(
     await ready.promise;
     if (driver.over !== undefined || !driver.isReadyToExecute()) return;
     driver.startHeartbeats();
-    const input = entry.inputSerde.deserialize(driver.body);
+    // Input this handler cannot read will not read on the next attempt
+    // either: a terminal failure ends the invocation, where a retryable one
+    // would have Restate send the same bytes forever. The SDK's own handler
+    // does the same for input its journal codec cannot decode.
+    let input: unknown;
+    try {
+      input = entry.inputSerde.deserialize(driver.body);
+    } catch (error) {
+      throw new restate.TerminalError(`failed to deserialize the input: ${(error as Error).message}`, {
+        errorCode: 400,
+      });
+    }
     const output = await invoke(definition, name, contextOf(driver, stream.headers, vm), input);
     // A cancellation that arrived while the handler ran is still cancelling
     // its calls: they go out before the attempt ends, or not at all.

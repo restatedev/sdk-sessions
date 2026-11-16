@@ -28,7 +28,7 @@ const text = (b: Uint8Array | undefined) => (b === undefined ? undefined : Buffe
  * Restate's side: it holds the object's state, answers the reads, applies the
  * writes, and acks the commands that asked to be acked.
  */
-function restateSide(state = new Map<string, Uint8Array>(), { cancelOnCommit = false } = {}) {
+function restateSide(state = new Map<string, Uint8Array>(), { cancelOnCommit = false, cancelAtStart = false } = {}) {
   const chunks: Uint8Array[] = [];
   let resolveChunk: (() => void) | undefined;
   let closed = false;
@@ -98,6 +98,9 @@ function restateSide(state = new Map<string, Uint8Array>(), { cancelOnCommit = f
         ]),
       );
       toSdk.push(frame(TYPE.input, bytes(14, value(JSON.stringify(input)))));
+      // A retry of a cancelled invocation: the signal is among the entries of
+      // the earlier attempts, so the VM knows before the handler starts.
+      if (cancelAtStart) toSdk.push(frame(TYPE.signal, [...uint(2, 1), ...bytes(4, [])]));
     },
     /**
      * Answer what the attempt asks for until it ends, then close the request
@@ -214,6 +217,18 @@ const notes = restate.sessionObject({
         return error instanceof CancelledError ? 'CancelledError' : (error as Error).name;
       }
     },
+    /** Two commits, each reporting whether it failed and how. */
+    twice: async (ctx: restate.SessionContext) => {
+      const once = async () => {
+        try {
+          await ctx.db.execute('INSERT INTO notes (body) VALUES (?)', ['x']);
+          return 'ok';
+        } catch (error) {
+          return error instanceof CancelledError ? 'CancelledError' : (error as Error).name;
+        }
+      };
+      return `${await once()},${await once()}`;
+    },
     /** A database of its own, beside the object's: its keys are named apart. */
     beside: async (ctx: restate.SessionContext) => {
       const own = database(ctx.db, 'notes2');
@@ -292,6 +307,22 @@ describe('a session object served on the explicit recovery VM', () => {
     const output = r.sent().find((m) => m.type === TYPE.output);
     const answered = decode(output!.fields.get(14)![0] as Uint8Array);
     expect(text(answered.get(1)![0] as Uint8Array)).toBe('"CancelledError"');
+  }, 30_000);
+
+  it('a retry of a cancelled invocation fails its first call, and works after it', async () => {
+    // The cancel signal is among the earlier attempts' entries, so the VM
+    // knows before the handler starts and nothing is in flight to reject.
+    // The selector's path fails the first call all the same
+    // (`cancellation.test.ts`, "a retry of a cancelled invocation"), so a
+    // cancellation nothing was waiting for is carried to the next wait.
+    const r = restateSide(new Map(), { cancelAtStart: true });
+    const serving = serveSession(notes, 'twice', r.stream);
+    r.start('k7', null);
+    await r.settle();
+    await serving;
+    const output = r.sent().find((m) => m.type === TYPE.output);
+    const answered = decode(output!.fields.get(14)![0] as Uint8Array);
+    expect(text(answered.get(1)![0] as Uint8Array)).toBe('"CancelledError,ok"');
   }, 30_000);
 
   it('a database beside the object keeps its keys apart, as the addon names them', async () => {

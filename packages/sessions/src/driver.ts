@@ -148,6 +148,13 @@ export class AttemptDriver {
   /** Issuing the cancellations of the calls, which the handler's end waits for. */
   private cancelling: Promise<void> | undefined;
   private cancelledResolve: (() => void) | undefined;
+  /**
+   * A cancellation that found nothing of the driver's waiting, carried to the
+   * next wait: a retry of a cancelled invocation knows it was cancelled before
+   * the handler starts, and the selector's path fails its first call all the
+   * same. The addon carries its own, for the database's waits.
+   */
+  private carriedCancellation = false;
   private readonly cancelledPromise: Promise<void>;
   private heartbeats: ReturnType<typeof setInterval> | undefined;
   private readonly aborter = new AbortController();
@@ -284,6 +291,7 @@ export class AttemptDriver {
     // reject them: the VM fails them, and `database.ts` gives the handler the
     // `CancelledError` the store's own failure gave it on the SDK's path.
     this.vm.cancelStateWaits();
+    this.carriedCancellation = this.waiting.size === 0;
     // The calls in flight are cancelled, which waits for the ids that have not
     // arrived yet: `serveSession` holds the handler's end for it.
     this.cancelling = quiet(this.cancelPreviousCalls().then(() => undefined));
@@ -360,6 +368,10 @@ export class AttemptDriver {
   /** The promise the notification of `handle` settles. */
   private promise(handle: number, invocationId = false): Promise<unknown> {
     if (this.ended !== undefined) return quiet(Promise.reject(this.ended));
+    if (this.carriedCancellation) {
+      this.carriedCancellation = false;
+      return quiet(Promise.reject(new restate.CancelledError()));
+    }
     return quiet(
       new Promise<unknown>((resolve, reject) => {
         this.waiting.set(handle, { resolve, reject, invocationId });

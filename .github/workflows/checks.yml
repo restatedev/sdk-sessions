@@ -37,15 +37,22 @@ jobs:
       - run: pnpm lint
       - run: pnpm -r --workspace-concurrency=1 test
       # Against the Restate server @restatedev/restate-server installs: the
-      # promise selector (which pins the SDK), Restate's agent tools, steering,
-      # and the agents and sessions through crashes.
+      # promise selector (which pins the SDK), the explicit recovery VM,
+      # Restate's agent tools, steering, and the agents and sessions through
+      # crashes.
       - run: pnpm --filter e2e concurrency
       - run: pnpm --filter e2e suspension
       - run: pnpm --filter e2e versions
       - run: pnpm --filter e2e tools
       - run: pnpm --filter e2e steering
+      # The same agents on the selector, which `connect` still uses.
+      - run: E2E_SDK_SERVE=1 pnpm --filter e2e steering
       - run: pnpm --filter e2e agentlib
       - run: pnpm --filter e2e crash
+      # Session objects on the explicit recovery VM, and whether an attempt's
+      # VM is freed once the attempt ends.
+      - run: pnpm --filter e2e explicit-recovery
+      - run: pnpm --filter e2e leak
       # A failed crash run keeps its services' and the server's logs.
       - if: failure()
         uses: actions/upload-artifact@v4

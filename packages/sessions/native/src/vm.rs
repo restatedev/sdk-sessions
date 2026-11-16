@@ -193,6 +193,11 @@ pub(crate) struct VmInner {
     /// Whether a tick is already asked for: one is enough until it runs, and
     /// a commit's writes would otherwise each wake JavaScript's thread.
     asked_to_tick: bool,
+    /// A cancellation that found nothing waiting, to be carried to the next
+    /// wait. A retry of a cancelled invocation knows it was cancelled before
+    /// the handler starts, and the selector's path fails its first call all
+    /// the same.
+    cancel_next_wait: bool,
 }
 
 impl VmInner {
@@ -323,8 +328,18 @@ impl Vm {
     ) -> std::result::Result<oneshot::Receiver<std::result::Result<Value, Error>>, Error> {
         let (result, scheduler) = {
             let mut vm = lock(inner);
+            let carried = std::mem::take(&mut vm.cancel_next_wait);
             let result = act(&mut vm.vm).map(|handle| {
                 let (sender, receiver) = oneshot::channel();
+                if carried {
+                    // A cancellation that found nothing waiting: this is the
+                    // next wait, and it fails as one in flight would have.
+                    let _ = sender.send(Err(Error::new(
+                        restate_sdk_shared_core::error::codes::INTERNAL,
+                        CANCELLED.to_owned(),
+                    )));
+                    return receiver;
+                }
                 vm.rust_waiters.insert(handle, sender);
                 // Still under the lock: a result the VM already has — a state
                 // value the invocation knows, or that this attempt wrote —
@@ -344,8 +359,10 @@ impl Vm {
     /// Fail every read and ack the database's store is waiting for, with
     /// `reason`. Their notifications may still arrive, and are then queued for
     /// JavaScript and dropped: nothing waits for them any more.
-    fn fail_waiters(inner: &Arc<Mutex<VmInner>>, reason: &str) {
+    fn fail_waiters(inner: &Arc<Mutex<VmInner>>, reason: &str, carry: bool) {
         let mut vm = lock(inner);
+        // Nothing was waiting, so carry it to whatever waits next.
+        vm.cancel_next_wait = carry && vm.rust_waiters.is_empty();
         for (_, waiter) in vm.rust_waiters.drain() {
             let _ = waiter.send(Err(Error::new(
                 restate_sdk_shared_core::error::codes::INTERNAL,
@@ -401,6 +418,7 @@ impl Vm {
             for_js: Default::default(),
             scheduler: None,
             asked_to_tick: false,
+            cancel_next_wait: false,
         }))))
     }
 
@@ -676,13 +694,13 @@ impl Vm {
     /// handler does not take care of itself.
     #[napi]
     pub fn cancel_state_waits(&self) {
-        Self::fail_waiters(&self.0, CANCELLED);
+        Self::fail_waiters(&self.0, CANCELLED, true);
     }
 
     /// The same, for an attempt that is over: nothing more will answer.
     #[napi]
     pub fn end_state_waits(&self) {
-        Self::fail_waiters(&self.0, ATTEMPT_OVER);
+        Self::fail_waiters(&self.0, ATTEMPT_OVER, false);
     }
 
     /// Let go of the scheduler, which holds JavaScript's tick, and so the
