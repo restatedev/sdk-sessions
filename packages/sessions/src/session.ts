@@ -69,6 +69,13 @@ export interface SqlHost {
   /** The object's state keys. */
   stateKeys(): PromiseLike<string[]>;
   run(name: string, action: () => void): PromiseLike<void>;
+  /**
+   * Every write issued before it is stored once it resolves. The explicit
+   * recovery VM has it (a write of its own that asks Restate to ack it); on
+   * the SDK's journaled context there is none, and the empty `sync` run below
+   * stands for it.
+   */
+  sync?(): PromiseLike<void>;
   genericSend(send: restate.GenericSend<Uint8Array>): unknown;
 }
 
@@ -181,7 +188,7 @@ function objectStore(ctx: SqlHost, end: AttemptEnd, dbName: string | undefined):
       return keys.flatMap((key) => own(key) ?? []);
     },
     sync: async () => {
-      await request(ctx.run('sync', () => {}));
+      await request(ctx.sync === undefined ? ctx.run('sync', () => {}) : ctx.sync());
     },
   };
 }

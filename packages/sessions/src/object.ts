@@ -147,6 +147,9 @@ export function host(
     clear: (name, entry) => exclusive.clear(name, entry),
     stateKeys: () => ctx.stateKeys(),
     run: (name, action) => exclusive.run(name, action),
+    // The explicit recovery VM's context has a sync of its own; the SDK's has
+    // none, and `session.ts` falls back to the empty `sync` run.
+    sync: (ctx as { sync?: () => PromiseLike<void> }).sync?.bind(ctx),
     genericSend: (send) => ctx.genericSend(send),
   };
 }
@@ -157,13 +160,33 @@ interface ObjectState {
   definition?: object;
 }
 
-/** A handler or view of a session object: its function, kind, and object. */
+/** A handler or view of a session object: its function, kind, serdes, and object. */
 interface HandlerEntry {
   fn: Fn<never>;
   view: boolean;
   explicit: boolean;
+  /** How its input and output are encoded, as its options set them; JSON by default. */
+  inputSerde: Serde<unknown>;
+  outputSerde: Serde<unknown>;
   object: ObjectState;
 }
+
+/**
+ * The handler or view `name` of `definition`, if it is a session object's:
+ * what {@link serveSession} needs to run an attempt of it on the VM.
+ */
+export function handlerEntry(
+  definition: object,
+  name: string,
+): { view: boolean; explicit: boolean; inputSerde: Serde<unknown>; outputSerde: Serde<unknown> } | undefined {
+  const entry = OBJECT.of(definition)?.entries.get(name);
+  if (entry === undefined) return undefined;
+  const { view, explicit, inputSerde, outputSerde } = entry;
+  return { view, explicit, inputSerde, outputSerde };
+}
+
+/** Whether `definition` is a session object: it has handlers this package runs. */
+export const isSessionObject = (definition: object): boolean => OBJECT.of(definition) !== undefined;
 
 /** A session object's own, on its definition: for {@link invoke} and {@link withStoreWrapper}. */
 const OBJECT = new Link<{ object: ObjectState; entries: Map<string, HandlerEntry> }>('a session object');
@@ -304,7 +327,15 @@ function handlerOf(objectName: string, name: string, entry: unknown, view: boole
   }
   const opts = { ...options, ...recovery() } as HandlerOptions;
   const explicit = (options as HandlerOptions).explicitCancellation === true;
-  const made: HandlerEntry = { fn: fn as Fn<never>, view, explicit, object };
+  const serdes = options as { input?: Serde<unknown>; output?: Serde<unknown> };
+  const made: HandlerEntry = {
+    fn: fn as Fn<never>,
+    view,
+    explicit,
+    inputSerde: serdes.input ?? (restate.serde.json as Serde<unknown>),
+    outputSerde: serdes.output ?? (restate.serde.json as Serde<unknown>),
+    object,
+  };
   const sdk = wrap(made) as never;
   const handler = view ? restate.handlers.object.shared(opts, sdk) : restate.handlers.object.exclusive(opts, sdk);
   return { handler, entry: made };
