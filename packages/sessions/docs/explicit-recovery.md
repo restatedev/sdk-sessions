@@ -82,6 +82,31 @@ Two hops per _write_ survived the first cut, and both are gone:
 A read the VM can answer locally is routed under the lock that issued it, so it
 never costs a turn of the event loop either.
 
+**Measured**, with `pnpm --filter e2e bench` (`BENCH_VM=1` serves through this
+package, so the store is the addon's; without it the SDK serves and the store
+is JavaScript's). Medians of three runs each, p50 in milliseconds, ± half the
+spread:
+
+| phase                              | calls | JavaScript store | on the VM  | change     |
+| ---------------------------------- | ----- | ---------------- | ---------- | ---------- |
+| insert, new key, 32 at once        | 2000  | 120.8 ±8.9       | 86.1 ±13.8 | **−28.7%** |
+| insert 2 KiB, 16 keys, 16 at once  | 4000  | 41.2 ±4.0        | 29.8 ±4.4  | **−27.7%** |
+| read, 16 keys, warm                | 1600  | 55.9 ±3.8        | 49.9 ±4.2  | **−10.7%** |
+| bulk 200 rows, one key, sequential | 50    | 32.4 ±2.3        | 32.1 ±1.0  | −0.9%      |
+| count, one key, sequential         | 500   | 10.2 ±0.6        | 10.1 ±0.2  | −1.0%      |
+| 10 MB: update a row, warm          | 200   | 9.8 ±0.4         | 10.2 ±1.0  | +4.1%      |
+| 10 MB: read a row, warm            | 200   | 7.2 ±0.1         | 7.6 ±0.8   | +5.6%      |
+| 10 MB: read a row, view            | 50    | 8.6 ±0.6         | 9.0 ±0.8   | +4.7%      |
+
+The gain is in concurrency: with many pages moving at once, two hops and two
+copies saved per page compound, and a third of the latency goes. Sequential
+work on one key shows nothing either way — there is no queue to shorten.
+
+The last three rows are slower by about 0.4 ms on 7 to 10 ms, which their own
+spread very nearly covers; three runs cannot tell a real cost of that size from
+the machine. Worth a closer look before anyone quotes a number for a single
+sequential read, and not worth undoing the change for.
+
 **The race the GIL hides.** sdk-python#314 issues a command and registers the
 waiter for its handle in two separate borrows of the VM. That is safe there
 only because the GIL will not run its tick in between. Behind a `Mutex` it is
