@@ -16,12 +16,11 @@
 // Scheduling a tick after every call batches the output of the actions issued
 // in the same turn, and flushes it before the event loop can wait on anything.
 //
-// Restate shuts an attempt down by closing the request body (its inactivity
-// timeout). From then on the attempt is over: every action throws, the
-// promises still pending reject, and a new attempt runs the handler from the
-// start. Work that may outlast the timeout keeps the attempt alive with
-// `heartbeat`.
-import type * as restate from '@restatedev/restate-sdk';
+// Restate shuts an attempt down by closing the request body, after its
+// inactivity timeout. From then on the attempt is over: every action throws,
+// the promises still pending reject, and a new attempt runs the handler from
+// the start. See the heartbeats on what keeps an attempt at work alive.
+import * as restate from '@restatedev/restate-sdk';
 import { isShutDown, type Vm, type VmFailure, type VmNotification } from './vm.ts';
 
 /** The state key a sync clears with an ack, under the prefix tooling hides. */
@@ -31,9 +30,18 @@ const SYNC_KEY = 'v22/sync';
 const KEYS_NAME = 'v22/keys';
 
 /**
+ * How often an attempt at work of its own tells Restate it makes progress.
+ * Restate shuts down an attempt it has heard nothing from for its inactivity
+ * timeout, a minute by default; this is well inside it.
+ */
+const HEARTBEAT_MS = 20_000;
+
+/** What a cancelled invocation's awaits fail with. */
+const CANCELLED = 409;
+
+/**
  * Restate shut the attempt down: it is over, and a new attempt runs the
- * handler from the start. The SDK's own suspension error is not reused: this
- * one never leaves @restatedev/sessions.
+ * handler from the start.
  */
 export class AttemptShutDown extends Error {
   constructor() {
@@ -50,12 +58,23 @@ export class AttemptFailed extends Error {
   }
 }
 
-/** A terminal failure of an action, as a handler sees it. */
-function terminal(failure: VmFailure): Error {
-  const error = new Error(failure.message) as Error & { code: number };
-  error.name = 'TerminalError';
-  error.code = failure.code;
-  return error;
+/** A failed action's terminal error, as the SDK's own, so that user code catches it. */
+function terminal(failure: VmFailure): restate.TerminalError {
+  return new restate.TerminalError(failure.message, {
+    errorCode: failure.code,
+    metadata: Object.fromEntries(failure.metadata.map(({ key, value }) => [key, value])),
+  });
+}
+
+/**
+ * Keep an unawaited rejection from reaching the process: the attempt's end
+ * rejects every promise still waiting, and a handler that stopped awaiting one
+ * — a race it lost, say — would otherwise bring the process down. Attaching a
+ * handler marks the promise handled; the caller still sees the rejection.
+ */
+function quiet<T>(promise: Promise<T>): Promise<T> {
+  promise.catch(() => {});
+  return promise;
 }
 
 /** What a notification settles its promise with. */
@@ -72,51 +91,58 @@ function settled(notification: VmNotification): { value: unknown } | { error: Er
     case 'invocationId':
       return { value: notification.id };
     default:
-      // A kind this version does not know: treat it as no value rather than
-      // leaving the action's promise pending forever.
+      // A kind this version does not know: no value, rather than an action
+      // whose promise stays pending forever.
       return { value: undefined };
   }
-}
-
-/**
- * Keep an unawaited rejection from reaching the process: the attempt's end
- * rejects every promise still waiting, and a handler that stopped awaiting one
- * (a race it lost, say) would otherwise crash the process. Attaching a handler
- * marks the promise handled; the caller still sees the rejection.
- */
-function quiet<T>(promise: Promise<T>): Promise<T> {
-  promise.catch(() => {});
-  return promise;
 }
 
 /** A promise waiting for the notification of a handle. */
 interface Waiting {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
+  /** Whether it is a call's invocation id: a cancellation leaves those to settle. */
+  invocationId: boolean;
+}
+
+/** What the attempt is of: the target it was invoked on, and how it handles cancellation. */
+export interface AttemptOptions {
+  service: string;
+  handler: string;
+  /** A view: it reads beside the handlers, and writes nothing. */
+  shared?: boolean;
+  /**
+   * The handler stops its own work at a cancellation (`cancelled(ctx)`), so
+   * the attempt does not fail its awaits or cancel its calls for it.
+   */
+  explicitCancellation?: boolean;
 }
 
 /**
  * Drives one attempt over its VM: the input pump, the tick, and the promises
  * of the actions it issued.
  */
-export class Attempt {
+export class AttemptDriver {
+  private readonly vm: Vm;
+  private readonly write: (chunk: Uint8Array) => void;
+  private readonly options: AttemptOptions;
+
   /** Set once the attempt is over, to what ended it. */
   private ended: Error | undefined;
   private readonly waiting = new Map<number, Waiting>();
   private readonly onEnd = new Set<() => void>();
   private queued = false;
-  /** The invocation ids of the calls this attempt made, for `cancelPreviousCalls`. */
-  private readonly called = new Set<string>();
+  /** The invocation ids of the calls this attempt made, by the handle of their result. */
+  private readonly inFlight = new Map<number, string>();
   private cancelledResolve: (() => void) | undefined;
   private readonly cancelledPromise: Promise<void>;
-  private heartbeats: NodeJS.Timeout | undefined;
+  private heartbeats: ReturnType<typeof setInterval> | undefined;
+  private readonly aborter = new AbortController();
 
-  private readonly vm: Vm;
-  private readonly write: (chunk: Uint8Array) => void;
-
-  constructor(vm: Vm, write: (chunk: Uint8Array) => void) {
+  constructor(vm: Vm, write: (chunk: Uint8Array) => void, options: AttemptOptions) {
     this.vm = vm;
     this.write = write;
+    this.options = options;
     this.cancelledPromise = new Promise<void>((resolve) => {
       this.cancelledResolve = resolve;
     });
@@ -142,18 +168,12 @@ export class Attempt {
 
   /** Schedule a tick, once per turn of the event loop. */
   private schedule(): void {
-    if (this.queued || this.ended !== undefined) {
-      // A closed attempt still flushes what it last wrote (an error, an end).
-      if (this.queued) return;
-      this.queued = true;
-      queueMicrotask(() => this.flush());
-      return;
-    }
+    if (this.queued) return;
     this.queued = true;
-    queueMicrotask(() => this.tick());
+    queueMicrotask(() => (this.ended === undefined ? this.tick() : this.flush()));
   }
 
-  /** Write what the VM has buffered. */
+  /** Write what the VM has buffered. A closed attempt still flushes its last words. */
   private flush(): void {
     this.queued = false;
     const output = this.vm.takeOutput();
@@ -166,19 +186,23 @@ export class Attempt {
    */
   private tick(): void {
     this.queued = false;
-    const output = this.vm.takeOutput();
-    if (output.length > 0) this.write(output);
+    this.flush();
     if (this.ended !== undefined) return;
     let notification: VmNotification | null;
     try {
       while ((notification = this.vm.takeNotification()) !== null) {
         const waiting = this.waiting.get(notification.handle);
-        // A handle this attempt did not issue, or already settled: nothing waits for it.
+        this.inFlight.delete(notification.handle);
+        // A handle this attempt did not issue, or settled already: nothing waits for it.
         if (waiting === undefined) continue;
         this.waiting.delete(notification.handle);
         const result = settled(notification);
-        if ('error' in result) waiting.reject(result.error);
-        else waiting.resolve(result.value);
+        if ('error' in result) {
+          waiting.reject(result.error);
+        } else {
+          if (waiting.invocationId) this.inFlight.set(notification.handle, String(result.value));
+          waiting.resolve(result.value);
+        }
       }
     } catch (error) {
       this.end(isShutDown(error) ? new AttemptShutDown() : new AttemptFailed(String(error)));
@@ -186,7 +210,7 @@ export class Attempt {
     }
     // The VM says whether a cancellation arrived, in this attempt or an
     // earlier one; it has no notification of its own.
-    if (this.vm.isCancelled()) this.cancelledResolve?.();
+    if (this.vm.isCancelled()) this.cancelled();
     if (this.vm.state() === 'closed') this.end(new AttemptShutDown());
   }
 
@@ -197,7 +221,8 @@ export class Attempt {
     const waiting = [...this.waiting.values()];
     this.waiting.clear();
     for (const one of waiting) one.reject(reason);
-    if (this.heartbeats !== undefined) clearInterval(this.heartbeats);
+    this.stopHeartbeats();
+    this.aborter.abort(reason);
     const listeners = [...this.onEnd];
     this.onEnd.clear();
     for (const listener of listeners) listener();
@@ -216,6 +241,54 @@ export class Attempt {
     }
     this.onEnd.add(listener);
     return () => this.onEnd.delete(listener);
+  }
+
+  // --- Cancellation
+
+  /**
+   * Restate cancelled the invocation. A handler with `explicitCancellation`
+   * stops its own work and nothing else happens; otherwise the calls in flight
+   * are cancelled and every await of Restate fails, as a cancelled
+   * invocation's do.
+   */
+  private cancelled(): void {
+    const first = this.cancelledResolve !== undefined;
+    this.cancelledResolve?.();
+    this.cancelledResolve = undefined;
+    if (!first || this.options.explicitCancellation) return;
+    this.cancelPreviousCalls();
+    const failure = new restate.TerminalError('cancelled', { errorCode: CANCELLED });
+    // Deleting the entry the loop is on is defined, and a rejection runs its
+    // handlers in a later microtask, so nothing is added under the iteration.
+    for (const [handle, waiting] of this.waiting) {
+      // A call's invocation id still settles: cancelling the call needs it.
+      if (waiting.invocationId) continue;
+      this.waiting.delete(handle);
+      waiting.reject(failure);
+    }
+  }
+
+  /** Resolves once a cancellation arrived, in this attempt or an earlier one. */
+  cancellation(): Promise<void> {
+    if (this.vm.isCancelled()) this.cancelled();
+    return this.cancelledPromise;
+  }
+
+  isCancelled(): boolean {
+    return this.vm.isCancelled();
+  }
+
+  /** Cancel the invocations this attempt called and that have not answered; returns their ids. */
+  cancelPreviousCalls(): string[] {
+    const ids = [...this.inFlight.values()];
+    for (const id of ids) {
+      try {
+        this.cancel(id);
+      } catch {
+        // The attempt ended: nothing left to cancel.
+      }
+    }
+    return ids;
   }
 
   // --- Actions
@@ -237,11 +310,11 @@ export class Attempt {
   }
 
   /** The promise the notification of `handle` settles. */
-  private promise(handle: number): Promise<unknown> {
+  private promise(handle: number, invocationId = false): Promise<unknown> {
     if (this.ended !== undefined) return quiet(Promise.reject(this.ended));
     return quiet(
       new Promise<unknown>((resolve, reject) => {
-        this.waiting.set(handle, { resolve, reject });
+        this.waiting.set(handle, { resolve, reject, invocationId });
       }),
     );
   }
@@ -252,7 +325,7 @@ export class Attempt {
     try {
       handle = this.act(act);
     } catch (error) {
-      return Promise.reject(error instanceof Error ? error : new Error(String(error)));
+      return quiet(Promise.reject(error instanceof Error ? error : new Error(String(error))));
     }
     return this.promise(handle);
   }
@@ -282,8 +355,11 @@ export class Attempt {
    * Every write issued before this is stored once it resolves: a write of its
    * own that asks Restate to ack it, which it does only after the writes
    * before it. This is what the empty `sync` run was.
+   *
+   * A view wrote nothing, and an acked clear would be a write: it syncs at once.
    */
   sync(): Promise<void> {
+    if (this.options.shared === true) return Promise.resolve();
     return quiet(this.issue((vm) => vm.clearState(SYNC_KEY, SYNC_KEY, true)).then(() => undefined));
   }
 
@@ -313,16 +389,10 @@ export class Attempt {
         ),
       );
     } catch (error) {
-      const rejected = Promise.reject(error instanceof Error ? error : new Error(String(error)));
-      rejected.catch(() => {});
+      const rejected = quiet(Promise.reject(error instanceof Error ? error : new Error(String(error))));
       return { result: rejected, invocationId: rejected };
     }
-    const invocationId = quiet(
-      this.promise(handles.invocationId).then((id) => {
-        this.called.add(String(id));
-        return String(id);
-      }),
-    );
+    const invocationId = quiet(this.promise(handles.invocationId, true).then((id) => String(id)));
     const result = quiet(
       this.promise(handles.result).then((value) => (value === undefined ? null : (value as Uint8Array))),
     );
@@ -368,23 +438,6 @@ export class Attempt {
     this.act((vm) => vm.cancelInvocation(invocationId, name, false));
   }
 
-  /** Cancel the invocations this attempt called, as a cancelled invocation's would be. */
-  cancelCalls(): string[] {
-    const ids = [...this.called];
-    for (const id of ids) this.cancel(id);
-    return ids;
-  }
-
-  /** Resolves once a cancellation arrived, in this attempt or an earlier one. */
-  cancelled(): Promise<void> {
-    if (this.vm.isCancelled()) this.cancelledResolve?.();
-    return this.cancelledPromise;
-  }
-
-  isCancelled(): boolean {
-    return this.vm.isCancelled();
-  }
-
   // --- Traces, shown in Restate's UI as runs
 
   startTrace(name: string, parent?: number): number {
@@ -395,16 +448,20 @@ export class Attempt {
     this.act((vm) => vm.endTraceSuccess(trace, output));
   }
 
-  // --- Keeping the attempt alive
+  // --- Keeping an attempt at work alive
+  //
+  // Restate shuts an attempt down once its inactivity timeout passes with
+  // nothing heard. The selector reported a working run to stop that while the
+  // handler worked outside Restate; a heartbeat does it here, on the same
+  // rule: only while nothing of this attempt waits on Restate. With something
+  // waiting, a shutdown is what should happen — Restate starts a new attempt
+  // when the answer comes, instead of holding a connection open meanwhile.
 
-  /**
-   * Tell Restate the attempt makes progress every `everyMs`, until it ends:
-   * work outside Restate that may outlast its inactivity timeout.
-   */
-  heartbeatEvery(everyMs: number): void {
+  /** Start the heartbeats of a running handler. */
+  startHeartbeats(everyMs = HEARTBEAT_MS): void {
     if (this.heartbeats !== undefined || this.ended !== undefined) return;
     this.heartbeats = setInterval(() => {
-      if (this.ended !== undefined) return;
+      if (this.ended !== undefined || this.waiting.size > 0) return;
       try {
         this.act((vm) => vm.heartbeat());
       } catch {
@@ -414,38 +471,82 @@ export class Attempt {
     this.heartbeats.unref?.();
   }
 
+  private stopHeartbeats(): void {
+    if (this.heartbeats === undefined) return;
+    clearInterval(this.heartbeats);
+    this.heartbeats = undefined;
+  }
+
   // --- The input, and the end
 
-  input(): restate.Request & { key: string } {
+  /** The invocation's key, once the VM is ready to execute. */
+  get key(): string {
+    return this.vm.input().key;
+  }
+
+  /** The handler's input. */
+  get body(): Uint8Array {
+    return this.vm.input().input;
+  }
+
+  /** The invocation's request, as a handler's `ctx.request` has it. */
+  request(attemptHeaders: ReadonlyMap<string, string | string[] | undefined> = new Map()): restate.Request {
     const input = this.vm.input();
-    const headers = new Map(input.headers.map(({ key, value }) => [key, value]));
+    const target = {
+      service: this.options.service,
+      handler: this.options.handler,
+      key: input.key || undefined,
+      toString(): string {
+        return this.key === undefined
+          ? `${this.service}/${this.handler}`
+          : `${this.service}/${this.key}/${this.handler}`;
+      },
+    };
     return {
+      target,
       id: input.invocationId,
-      key: input.key,
-      headers,
-      attemptHeaders: headers,
+      headers: new Map(input.headers.map(({ key, value }) => [key, value])),
+      attemptHeaders,
       body: input.input,
       extraArgs: [],
       idempotencyKey: input.idempotencyKey,
-      target: undefined as never,
-      attemptCompletedSignal: undefined as never,
-    } as unknown as restate.Request & { key: string };
+      scope: input.scope,
+      limitKey: input.limitKey,
+      attemptCompletedSignal: this.aborter.signal,
+    } as unknown as restate.Request;
   }
 
   /** The handler ended with its output. */
   endSuccess(output: Uint8Array): void {
-    this.act((vm) => vm.endSuccess(output));
+    this.last((vm) => vm.endSuccess(output));
   }
 
   /** The handler ended with a terminal failure. */
-  endFailure(failure: VmFailure): void {
-    this.act((vm) => vm.endFailure(failure));
+  endFailure(error: restate.TerminalError): void {
+    this.last((vm) =>
+      vm.endFailure({
+        code: (error as { code?: number }).code ?? 500,
+        message: error.message,
+        metadata: Object.entries(error.metadata ?? {}).map(([key, value]) => ({ key, value })),
+      }),
+    );
   }
 
   /** The attempt failed, and Restate retries it. */
-  fail(message: string, stacktrace?: string): void {
+  fail(message: string, stacktrace?: string, retryAfterMs?: number): void {
     if (this.ended !== undefined) return;
-    this.vm.notifyError(message, stacktrace);
+    this.vm.notifyError(message, stacktrace, retryAfterMs);
+    this.schedule();
+  }
+
+  /** End the attempt with `act`, unless it ended already. */
+  private last(act: (vm: Vm) => void): void {
+    if (this.ended !== undefined) return;
+    try {
+      act(this.vm);
+    } catch {
+      // The attempt ended under us: the VM wrote why.
+    }
     this.schedule();
   }
 }

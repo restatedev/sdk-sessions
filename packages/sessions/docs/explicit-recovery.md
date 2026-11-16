@@ -82,11 +82,64 @@ repository's owner, 2026-11-16) to leave `connect` on the selector until
 `@restatedev/restate-sdk` can hand sessions the invocation, and to ask for that
 upstream. Two paths meanwhile.
 
-### 5. Identity verification stays the SDK's
+### 5. Fronting `serve` bypasses no identity verification, because it can set none
 
-The SDK verifies request signatures in its handler, before dispatch. Fronting
-only the invoke path of a session object would bypass it. So the router runs
-**after** the SDK's verification, not instead of it.
+An earlier draft of this document claimed the router runs after the SDK's
+verification. It does not: fronting the handler runs _before_ it. What makes
+that safe is narrower, and worth stating exactly.
+
+`restate.serve({ port, ...options })` passes `options.identityKeys` to
+`withOptions`, which calls `withIdentityV1` only when keys are given. They come
+from the caller, never from the environment. @restatedev/sessions' own `serve`
+takes services and nothing else:
+
+```ts
+export const serve = (...services: Service[]) =>
+  restate.serve({ services: served(services, process.env.RESTATE_SERVE_ONLY), port: ... });
+```
+
+So a deployment served by `sessions.serve` has no request signature verification
+today, with or without this change, and fronting it takes nothing away.
+
+Verification is for the user who builds their own endpoint with `served()` and
+`withIdentityV1`. That endpoint is the SDK's throughout, so it keeps the SDK's
+verification _and_ stays on the selector. If `serve` ever takes identity keys,
+it must delegate to the SDK path whenever keys are set, or verify them itself.
+
+### 6. A heartbeat while the handler works, and only then
+
+The selector reported a working run so that Restate would not shut an attempt
+down while the handler worked outside Restate — a model request, say. The VM
+has no runs, and shuts an attempt down whenever its inactivity timeout passes
+with nothing heard, so a model request longer than the timeout would restart
+the attempt forever.
+
+The rule here: heartbeat every 20 seconds while the handler runs **and nothing
+of the attempt waits on Restate**. That is the working run's behaviour. When
+something is waiting, a shutdown is the right outcome: Restate starts a new
+attempt when the answer arrives, rather than holding a connection open.
+
+sdk-python#314 heartbeats while an annotation is open instead. sessions has no
+annotations, so there is nothing to hang that on; if it grows them, the rule
+can narrow to match.
+
+### 7. Cancellation: implicit fails the awaits, explicit only tells the handler
+
+The VM has no notification for a cancel signal — `isCancelled()` is a flag the
+tick reads. What follows from it is this package's choice, and it keeps what
+the selector did:
+
+- `explicitCancellation: true` — `cancelled(ctx)` resolves and nothing else
+  happens. The handler stops its own work.
+- otherwise — the calls in flight are cancelled, and every promise waiting on
+  Restate rejects with the SDK's `TerminalError('cancelled', 409)`, as a
+  cancelled invocation's awaits do. A call's invocation id still settles, since
+  cancelling that call needs it.
+
+**Behaviour change.** Nothing suspends on the cancel signal any more. The
+selector had to ask for the cancellation together with the working run so that
+Restate would not take it for the only thing the handler awaited; here the
+attempt never reports what it waits for at all.
 
 ## What the server negotiates
 

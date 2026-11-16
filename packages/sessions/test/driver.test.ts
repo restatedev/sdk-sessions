@@ -3,15 +3,29 @@
 // awaited at once, each waiting on Restate — falls out of the VM here: an
 // action returns a handle, and the tick settles the promise of that handle.
 import { describe, expect, it } from 'vitest';
-import { Attempt, AttemptShutDown } from '../src/driver.ts';
+import { AttemptDriver, AttemptShutDown } from '../src/driver.ts';
 import { frame, uint, field } from './wire.ts';
 import { drain, messages, startedVm, TYPE, types, value } from './vm-support.ts';
 
 /** An attempt over a started VM, with the bytes it writes. */
-function attempt(options?: { partial?: boolean; state?: Record<string, string> }) {
+function attempt(
+  options: {
+    partial?: boolean;
+    state?: Record<string, string>;
+    shared?: boolean;
+    explicitCancellation?: boolean;
+  } = {},
+) {
   const written: Uint8Array[] = [];
+  /** Everything ever written, which clearing `written` for an assertion keeps. */
+  const all: Uint8Array[] = [];
   const vm = startedVm('"hello"', options);
-  const a = new Attempt(vm, (chunk) => written.push(chunk));
+  const a = new AttemptDriver(vm, (chunk: Uint8Array) => void (written.push(chunk), all.push(chunk)), {
+    service: 'Probe',
+    handler: 'run',
+    shared: options.shared,
+    explicitCancellation: options.explicitCancellation,
+  });
   return {
     attempt: a,
     vm,
@@ -20,7 +34,7 @@ function attempt(options?: { partial?: boolean; state?: Record<string, string> }
     sent: () => messages(Buffer.concat(written)),
     /** Restate answers the ephemeral get of `key` with `answer`. */
     answerGet(key: string, answer: string) {
-      const get = messages(Buffer.concat(written)).find(
+      const get = messages(Buffer.concat(all)).find(
         (m) => m.type === TYPE.getStateEphemeral && String(m.fields.get(2)?.[0]) === key,
       );
       if (get === undefined) throw new Error(`no ephemeral get of ${key} was sent`);
@@ -48,7 +62,10 @@ describe('an attempt on the explicit recovery VM', () => {
     r.answerGet('one', '"1"');
     r.answerGet('two', '"2"');
     await turn();
-    expect((await both).map((v) => (v === null ? null : Buffer.from(v).toString()))).toEqual(['"1"', '"2"']);
+    expect((await both).map((v: Uint8Array | null) => (v === null ? null : Buffer.from(v).toString()))).toEqual([
+      '"1"',
+      '"2"',
+    ]);
   });
 
   it('batches the output of the actions issued in one turn into a single write', async () => {
@@ -137,7 +154,7 @@ describe('an attempt on the explicit recovery VM', () => {
   it('resolves cancelled() when the cancel signal arrives, and nothing suspends on it', async () => {
     const r = attempt();
     let cancelled = false;
-    void r.attempt.cancelled().then(() => (cancelled = true));
+    void r.attempt.cancellation().then(() => (cancelled = true));
     await turn();
     expect(cancelled).toBe(false);
     expect(r.attempt.isCancelled()).toBe(false);
@@ -161,9 +178,95 @@ describe('an attempt on the explicit recovery VM', () => {
     await turn();
     await call.invocationId;
     r.written.length = 0;
-    expect(r.attempt.cancelCalls()).toEqual(['inv_a']);
+    expect(r.attempt.cancelPreviousCalls()).toEqual(['inv_a']);
     await turn();
     expect(types(Buffer.concat(r.written))).toEqual([0x0410]); // SendSignalCommand: the cancellation
+  });
+
+  it('an implicit cancellation fails what waits on Restate, and cancels the calls in flight', async () => {
+    const r = attempt({ partial: true });
+    const call = r.attempt.call({ service: 'Store', handler: 'reserve', input: Buffer.from('"x"') });
+    await turn();
+    const command = r.sent()[0]!.fields;
+    r.attempt.notifyInput(
+      frame(TYPE.callInvocationIdCompletion, [...uint(1, command.get(10)![0] as number), ...bytesField(16, 'inv_a')]),
+    );
+    await turn();
+    await call.invocationId;
+    const read = r.attempt.getState('one');
+    await turn();
+    r.written.length = 0;
+    r.attempt.notifyInput(frame(TYPE.signal, [...uint(2, 1), ...bytesField(4, '')]));
+    await turn();
+    // The read fails as a cancelled invocation's awaits do...
+    const failed = await read.then(
+      () => undefined,
+      (e: unknown) => e as Error & { code?: number },
+    );
+    expect(failed?.name).toBe('TerminalError');
+    expect(failed?.message).toBe('cancelled');
+    // ...and the call in flight was cancelled.
+    expect(types(Buffer.concat(r.written))).toContain(0x0410);
+  });
+
+  it('an explicit cancellation only resolves cancelled(), leaving the handler to stop its own work', async () => {
+    const r = attempt({ partial: true, explicitCancellation: true });
+    let cancelled = false;
+    void r.attempt.cancellation().then(() => (cancelled = true));
+    const read = r.attempt.getState('one');
+    let settled = false;
+    void read.then(
+      () => (settled = true),
+      () => (settled = true),
+    );
+    await turn();
+    r.written.length = 0;
+    r.attempt.notifyInput(frame(TYPE.signal, [...uint(2, 1), ...bytesField(4, '')]));
+    await turn();
+    expect(cancelled).toBe(true);
+    // The read is left alone: the handler decides what to stop.
+    expect(settled).toBe(false);
+    expect(types(Buffer.concat(r.written))).toEqual([]);
+    r.answerGet('one', '"1"');
+    await turn();
+    expect(Buffer.from((await read)!).toString()).toBe('"1"');
+  });
+
+  it("a view's sync writes nothing: it stored nothing to sync", async () => {
+    const r = attempt({ shared: true });
+    await r.attempt.sync();
+    await turn();
+    expect(r.written).toHaveLength(0);
+  });
+
+  it('the request names its target, and its signal aborts when the attempt ends', async () => {
+    const r = attempt();
+    const request = r.attempt.request(new Map([['content-type', 'application/vnd.restate.invocation.v8']]));
+    expect(request.target.service).toBe('Probe');
+    expect(String(request.target)).toBe('Probe/thekey/run');
+    expect(request.id).toBe('inv_test');
+    expect(request.attemptHeaders.get('content-type')).toContain('invocation.v8');
+    expect(request.attemptCompletedSignal.aborted).toBe(false);
+    r.attempt.notifyInputClosed();
+    await turn();
+    expect(request.attemptCompletedSignal.aborted).toBe(true);
+  });
+
+  it('heartbeats only while nothing of the attempt waits on Restate', async () => {
+    const r = attempt({ partial: true });
+    r.attempt.startHeartbeats(5);
+    // Nothing waits: the handler is at work of its own, so the attempt says so.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(types(Buffer.concat(r.written))).toContain(TYPE.awaitingOn);
+    // With a read outstanding, Restate knows what it waits for: no heartbeat,
+    // so that a shutdown can happen and a new attempt resume on the answer.
+    const read = r.attempt.getState('one');
+    await turn();
+    r.written.length = 0;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(types(Buffer.concat(r.written))).not.toContain(TYPE.awaitingOn);
+    r.answerGet('one', '"1"');
+    await read;
   });
 
   it('ends the handler with its output, and writes it', async () => {
