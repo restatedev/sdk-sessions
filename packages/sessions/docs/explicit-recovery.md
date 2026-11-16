@@ -210,6 +210,11 @@ the selector; both pass. It is the agents library's only coverage of the VM.
 The rest of the scripts are still SDK-served, and pointing them here is a
 change to them, not to this package.
 
+**Run the suites on Node 24**, which this repository requires. On Node 22 the
+agents package reports 1172 passed with 2 files skipped; on Node 24 it is 1237
+passed across 34 files. Sixty-five tests are silently skipped otherwise, and
+several e2e scripts do not start at all (`@opencode/util` uses `await using`).
+
 ### 8. The heartbeat interval is configurable, because the timeout is
 
 The first end-to-end run failed here. 20 seconds is well inside Restate's
