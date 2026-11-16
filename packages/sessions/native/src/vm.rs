@@ -216,6 +216,14 @@ impl VmInner {
 #[napi]
 pub struct Vm(pub(crate) Arc<Mutex<VmInner>>);
 
+/// What the database's store's pending reads and acks fail with when the
+/// invocation is cancelled. It crosses the addon as the text of an error, so
+/// `src/database.ts` matches it to give the handler a `CancelledError`.
+pub(crate) const CANCELLED: &str = "restate-sessions: the invocation was cancelled";
+
+/// The same, for an attempt Restate shut down or that failed.
+pub(crate) const ATTEMPT_OVER: &str = "restate-sessions: the attempt is over";
+
 /// A VM error as JavaScript gets it. The attempt's shutdown carries the code
 /// `ATTEMPT_SHUT_DOWN`, which the driver tells apart from a failure.
 fn vm_error(error: Error) -> Error_ {
@@ -295,6 +303,12 @@ impl Vm {
             let result = act(&mut vm.vm).map(|handle| {
                 let (sender, receiver) = oneshot::channel();
                 vm.rust_waiters.insert(handle, sender);
+                // Still under the lock: a result the VM already has — a state
+                // value the invocation knows, or that this attempt wrote —
+                // reaches the waiter here, instead of waiting for a tick to
+                // route it and so taking a turn of JavaScript's event loop to
+                // answer a read that needed nothing.
+                let _ = vm.route();
                 receiver
             });
             let scheduler = vm.scheduler.clone();
@@ -302,6 +316,19 @@ impl Vm {
         };
         Self::schedule(scheduler);
         result
+    }
+
+    /// Fail every read and ack the database's store is waiting for, with
+    /// `reason`. Their notifications may still arrive, and are then queued for
+    /// JavaScript and dropped: nothing waits for them any more.
+    fn fail_waiters(inner: &Arc<Mutex<VmInner>>, reason: &str) {
+        let mut vm = lock(inner);
+        for (_, waiter) in vm.rust_waiters.drain() {
+            let _ = waiter.send(Err(Error::new(
+                restate_sdk_shared_core::error::codes::INTERNAL,
+                reason.to_owned(),
+            )));
+        }
     }
 
     /// Act on the VM without waiting for anything, then ask JavaScript to tick.
@@ -608,6 +635,27 @@ impl Vm {
     #[napi]
     pub fn is_cancelled(&self) -> bool {
         self.lock().vm.is_cancelled()
+    }
+
+    /// Fail what the database's store waits for, as a cancelled invocation's
+    /// awaits fail. The driver calls it when a cancellation arrives that the
+    /// handler does not take care of itself.
+    #[napi]
+    pub fn cancel_state_waits(&self) {
+        Self::fail_waiters(&self.0, CANCELLED);
+    }
+
+    /// The same, for an attempt that is over: nothing more will answer.
+    #[napi]
+    pub fn end_state_waits(&self) {
+        Self::fail_waiters(&self.0, ATTEMPT_OVER);
+    }
+
+    /// Let go of the scheduler, which holds JavaScript's tick, and so the
+    /// driver and this VM: an attempt that kept it would never be freed.
+    #[napi]
+    pub fn clear_scheduler(&self) {
+        self.lock().scheduler = None;
     }
 
     /// `"starting"`, `"running"` or `"closed"`.

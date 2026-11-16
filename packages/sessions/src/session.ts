@@ -183,7 +183,12 @@ const unbeside = (name: string) => (key: string) => {
  * anything else is a bug in the addon, and says so rather than going quiet.
  */
 function commitOnly(): Store {
-  return { get: servedByVm('get'), set: servedByVm('set'), clear: servedByVm('clear'), sync: async () => {} };
+  return {
+    get: servedByVm('get'),
+    set: servedByVm('set'),
+    clear: servedByVm('clear'),
+    sync: async () => {},
+  };
 }
 
 /** What a store the addon never calls does if it is called after all. */
@@ -595,10 +600,18 @@ export class Attempt {
     const key = `${ctx.request().target.service}/${encodeURIComponent(ctx.key)}`;
     const namespace = this.name === undefined ? key : `${key}/${this.name}`;
     const wrap = this.config.wrapStore;
-    // The VM reads and writes the state in the addon, so nothing of the store
-    // crosses into JavaScript — but only when no test wraps the store, since a
-    // wrapper (fault injection) has nothing to wrap otherwise.
-    const onVm = ctx.vm !== undefined && wrap === undefined;
+    // With a VM, the addon reads and writes the state itself and nothing of
+    // the store crosses into JavaScript. A wrapper (fault injection, through
+    // `withStoreWrapper`) would then have nothing to wrap, and using the
+    // JavaScript store instead would quietly test the other path: the tests
+    // that wrap give their attempts no VM, so this says so rather than
+    // choosing for them.
+    if (ctx.vm !== undefined && wrap !== undefined) {
+      throw new TerminalError(
+        'withStoreWrapper wraps the store of an attempt served by the SDK; an attempt on the VM has none to wrap',
+      );
+    }
+    const onVm = ctx.vm !== undefined;
     const object = onVm ? commitOnly() : objectStore(ctx, end, this.name);
     const db = onVm
       ? await openOnVm(namespace, object, ctx.vm, { name: this.name, reader: ctx.shared })

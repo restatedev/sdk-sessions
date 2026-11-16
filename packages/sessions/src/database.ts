@@ -5,7 +5,9 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { Buffer } from 'node:buffer';
 import { addon as loaded } from './addon.ts';
-import type { Vm } from './vm.ts';
+import { STATE_WAIT_CANCELLED, STATE_WAIT_OVER, type Vm } from './vm.ts';
+import { CancelledError } from '@restatedev/restate-sdk';
+import { AttemptShutDown } from './driver.ts';
 
 /** An SQL value. Integers come back as numbers, or as bigints beyond 2^53. */
 export type SqlValue = null | number | bigint | string | Uint8Array;
@@ -169,7 +171,10 @@ export async function openOnVm(
   try {
     return new Connection(await addon.openOnVm(namespace, boundary, vm, name, reader), boundary);
   } catch (error) {
-    throw boundary.failed?.error ?? error;
+    // The open reads the database's head. On this path that read waits in the
+    // addon, so its failure arrives as text and `boundary.failed` is never
+    // set: a cancellation here must still reach the handler as one.
+    throw stateWaitFailure(error) ?? boundary.failed?.error ?? error;
   }
 }
 
@@ -282,6 +287,12 @@ abstract class Sql implements DatabaseWriter {
    */
   protected failure(error: unknown): unknown {
     if (error instanceof SqlError) return error;
+    // The state is read and written in the addon on the VM's path, so a
+    // cancellation fails those waits there and its text is all that crosses
+    // back. Give the handler the class it catches, as the store's own
+    // rejection did when the store was JavaScript's.
+    const stateWait = stateWaitFailure(error);
+    if (stateWait !== undefined) return stateWait;
     const failed = this.boundary.failed;
     if (failed !== undefined && !this.native.isUsable()) return failed.error;
     const repeats = (error as { code?: unknown }).code === REFUSED || this.native.isUsable();
@@ -292,6 +303,19 @@ abstract class Sql implements DatabaseWriter {
 // The code of the addon's errors that a retry would repeat even though they
 // ended the session (its `Refused`), and of arguments it cannot convert.
 const REFUSED = 'InvalidArg';
+
+/**
+ * The error of a call that failed because the attempt's state waits were
+ * failed in the addon: a cancellation, or the end of the attempt. `undefined`
+ * for anything else.
+ */
+function stateWaitFailure(error: unknown): unknown {
+  const message = (error as { message?: unknown }).message;
+  if (typeof message !== 'string') return undefined;
+  if (message.includes(STATE_WAIT_CANCELLED)) return new CancelledError();
+  if (message.includes(STATE_WAIT_OVER)) return new AttemptShutDown();
+  return undefined;
+}
 
 /**
  * A session of a database: calls run one at a time, in call order, and a

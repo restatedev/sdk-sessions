@@ -85,10 +85,11 @@ gave `withCommit` — the same hook sdk-python#314 spends its `COMMIT` op on.
 
 **When the JavaScript store is still used.** `open` is unchanged and still
 takes one, for the tests that bring their own (fault injection through
-`withStoreWrapper`, the in-memory stores of `database.test.ts`), and for an
-attempt with no VM. A session takes the VM path only when its host has a VM
-_and_ no wrapper is set — a wrapper has nothing to wrap otherwise, and silently
-ignoring it would turn the fault tests green for the wrong reason.
+`withStoreWrapper`, the in-memory stores of `database.test.ts`) and for an
+attempt with no VM. An attempt _with_ a VM always takes the VM path. Wrapping
+the store of one is refused rather than quietly served by the JavaScript store,
+which would test the other path under the name of this one; the tests that wrap
+give their attempts no VM.
 
 ### 4. `serve` now; `connect` once the SDK can
 

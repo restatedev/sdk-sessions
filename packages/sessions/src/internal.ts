@@ -11,6 +11,10 @@ export { Link } from './link.ts';
 export { ScopeKey } from './scope.ts';
 export { open, type Connection, type Store, type ConnectionTransaction } from './database.ts';
 export { failpoints, PromiseSelector, type Failpoint } from './selector.ts';
+// The attempt on the explicit recovery VM, for the tests that drive one.
+export { AttemptDriver, AttemptFailed, AttemptShutDown } from './driver.ts';
+export { Vm, isShutDown } from './vm.ts';
+export { serveSession, servedHere, type Stream } from './handler.ts';
 export { needing, served } from './serve.ts';
 export {
   attach,

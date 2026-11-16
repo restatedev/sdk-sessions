@@ -8,7 +8,8 @@
 // whose head write carries its own sync, and no run in the journal.
 import { describe, expect, it } from 'vitest';
 import * as restate from '@restatedev/sessions';
-import { start } from '@restatedev/sessions/internal';
+import { database, start } from '@restatedev/sessions/internal';
+import { CancelledError } from '@restatedev/restate-sdk';
 import { serveSession, servedHere, type Stream } from '../src/handler.ts';
 import { bytes, decode, field, frame, uint } from './wire.ts';
 import { messages, REQUESTED_ACK, TYPE as BASE, V8, value } from './vm-support.ts';
@@ -27,7 +28,7 @@ const text = (b: Uint8Array | undefined) => (b === undefined ? undefined : Buffe
  * Restate's side: it holds the object's state, answers the reads, applies the
  * writes, and acks the commands that asked to be acked.
  */
-function restateSide(state = new Map<string, Uint8Array>()) {
+function restateSide(state = new Map<string, Uint8Array>(), { cancelOnCommit = false } = {}) {
   const chunks: Uint8Array[] = [];
   let resolveChunk: (() => void) | undefined;
   let closed = false;
@@ -35,7 +36,7 @@ function restateSide(state = new Map<string, Uint8Array>()) {
    * The journal index of the last command seen. Restate numbers *every*
    * command, so an ack must count the calls too, not only the writes.
    */
-  let index = 1; // the input is the first
+  let index = 0; // the input is the journal's first command, at index 0
 
   const inbound: Uint8Array[] = [];
   const toSdk = {
@@ -65,6 +66,8 @@ function restateSide(state = new Map<string, Uint8Array>()) {
   let ended = false;
   /** How many of the attempt's messages have been answered. */
   let answered = 0;
+  /** Whether the one cancel signal has been sent (`cancelOnCommit`). */
+  let signalled = false;
   const stream: Stream = {
     headers: { 'content-type': V8 },
     body,
@@ -115,8 +118,23 @@ function restateSide(state = new Map<string, Uint8Array>()) {
             index++;
             // Restate acks a stored command; the VM waits for the ack of the
             // sync's clear, and ignores the rest.
-            if (message.type === TYPE.setState || message.type === TYPE.clearState) {
-              toSdk.push(frame(TYPE.commandAck, uint(1, index)));
+            // Restate acks a command only if it asked to be acked, and the
+            // ack of one covers every command before it. Acking the rest
+            // would answer a commit that is still waiting.
+            if ((message.flags & REQUESTED_ACK) !== 0) {
+              // Cancelling instead of acking is a cancellation that lands
+              // with the database waiting on Restate.
+              // Restate signals a cancellation once, not on every commit:
+              // what follows it is acked as usual, so the handler can see
+              // its first call fail and carry on, as it does on the
+              // selector's path.
+              const signalNow = cancelOnCommit && !signalled;
+              signalled ||= signalNow;
+              toSdk.push(
+                signalNow
+                  ? frame(TYPE.signal, [...uint(2, 1), ...bytes(4, [])])
+                  : frame(TYPE.commandAck, uint(1, index)),
+              );
             }
           }
           if (message.type === TYPE.getStateEphemeral) {
@@ -187,6 +205,23 @@ const notes = restate.sessionObject({
     starts: async (ctx: restate.SessionContext) => {
       return await start(ctx, { service: 'Callee', key: 'k', handler: 'echo', input: 'x' });
     },
+    /** Commits, and says what its failure was if it did not. */
+    commits: async (ctx: restate.SessionContext) => {
+      try {
+        await ctx.db.execute('INSERT INTO notes (body) VALUES (?)', ['x']);
+        return 'committed';
+      } catch (error) {
+        return error instanceof CancelledError ? 'CancelledError' : (error as Error).name;
+      }
+    },
+    /** A database of its own, beside the object's: its keys are named apart. */
+    beside: async (ctx: restate.SessionContext) => {
+      const own = database(ctx.db, 'notes2');
+      await own.execute('CREATE TABLE IF NOT EXISTS n (id INTEGER PRIMARY KEY)');
+      await own.execute('INSERT INTO n (id) VALUES (1)');
+      const row = await own.get<{ n: number }>('SELECT count(*) AS n FROM n');
+      return row!.n;
+    },
     /** A send with a delay given as a `Duration`, not milliseconds. */
     sends: async (ctx: restate.SessionContext) => {
       ctx.send({ service: 'Callee', key: 'k', handler: 'echo', input: 'x', delay: { seconds: 30 } });
@@ -243,6 +278,40 @@ describe('a session object served on the explicit recovery VM', () => {
 
     // The database landed in the object's state.
     expect([...r.state.keys()].some((k) => k.startsWith('v22/'))).toBe(true);
+  }, 30_000);
+
+  it('a cancellation fails what the database waits for, with the CancelledError', async () => {
+    // The state is read and written in the addon now, so the driver cannot
+    // reject those waits: the VM fails them and `database.ts` restores the
+    // class. On the selector's path the store's own rejection carried it.
+    const r = restateSide(new Map(), { cancelOnCommit: true });
+    const serving = serveSession(notes, 'commits', r.stream);
+    r.start('k5', null);
+    await r.settle();
+    await serving;
+    const output = r.sent().find((m) => m.type === TYPE.output);
+    const answered = decode(output!.fields.get(14)![0] as Uint8Array);
+    expect(text(answered.get(1)![0] as Uint8Array)).toBe('"CancelledError"');
+  }, 30_000);
+
+  it('a database beside the object keeps its keys apart, as the addon names them', async () => {
+    const r = restateSide();
+    const serving = serveSession(notes, 'beside', r.stream);
+    r.start('k6', null);
+    await r.settle();
+    await serving;
+    const output = r.sent().find((m) => m.type === TYPE.output);
+    const answered = decode(output!.fields.get(14)![0] as Uint8Array);
+    expect(text(answered.get(1)![0] as Uint8Array)).toBe('1');
+    // `VmStore::key` reimplements `beside` in Rust; these are the keys the
+    // JavaScript store would have written, so the two cannot drift apart.
+    // `beside('notes2')` puts the name after the format's prefix, so
+    // `v22/head` becomes `v22/db/notes2/head`. The object's own database is
+    // open too (it has a schema), and keeps its keys unprefixed.
+    const written = [...r.state.keys()].toSorted();
+    expect(written).toContain('v22/db/notes2/head');
+    expect(written).toContain('v22/head');
+    expect(written.every((k) => k.startsWith('v22/'))).toBe(true);
   }, 30_000);
 
   it('a handler that starts a call and returns leaves no unhandled rejection', async () => {

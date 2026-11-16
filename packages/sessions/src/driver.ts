@@ -242,6 +242,10 @@ export class AttemptDriver {
     this.waiting.clear();
     for (const one of waiting) one.reject(reason);
     this.stopHeartbeats();
+    // Nothing will answer the database's outstanding reads now, and the
+    // scheduler holds this driver and the VM alive through the addon.
+    this.vm.endStateWaits();
+    this.vm.clearScheduler();
     this.aborter.abort(reason);
     const listeners = [...this.onEnd];
     this.onEnd.clear();
@@ -276,6 +280,10 @@ export class AttemptDriver {
     this.cancelledResolve?.();
     this.cancelledResolve = undefined;
     if (!first || this.options.explicitCancellation) return;
+    // The database's reads and acks wait in the addon, where this cannot
+    // reject them: the VM fails them, and `database.ts` gives the handler the
+    // `CancelledError` the store's own failure gave it on the SDK's path.
+    this.vm.cancelStateWaits();
     // The calls in flight are cancelled, which waits for the ids that have not
     // arrived yet: `serveSession` holds the handler's end for it.
     this.cancelling = quiet(this.cancelPreviousCalls().then(() => undefined));
