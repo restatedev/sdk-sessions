@@ -179,6 +179,28 @@ The read is a journaled `GetLazyState` rather than an ephemeral get, because
 the server negotiated V7. Both are shared-core's; the unit tests drive V8 and
 this drives V7.
 
+### What else runs on it
+
+`pnpm --filter e2e versions` also goes through `sessions.serve`, and passes in
+full on the VM: a session object across two deployments, invocations pinned to
+the deployment they started on, a schema step running once per key, a view of a
+key only the older version wrote, and a rollback and roll-forward. It needs
+Node 24, which the repository requires and this container does not default to.
+
+**What does not run on it, and should before release.** Most of the e2e scripts
+— `serve`, `steering`, `agentlib`, `restate-tools`, `crash`, `concurrency`,
+`suspension`, `bench` — build their endpoint with the SDK's own
+`restate.serve` or `restate.endpoint().listen()`, not this package's. They are
+on the selector whatever this change does, so none of them exercises the new
+path, and @restatedev/agents has never run on it. A deployment reaches the VM
+only by calling `sessions.serve` or `sessions.http2Handler`.
+
+That matters most for agents: its handlers are session objects, and it
+classifies cancellation on `restate.CancelledError` in a dozen places
+(`tools.ts`, `companion.ts`, `agentlib/runtime.ts`, `pi/index.ts`). The driver
+rejects with that class for exactly this reason — but it is untested through
+agents.
+
 ### 8. The heartbeat interval is configurable, because the timeout is
 
 The first end-to-end run failed here. 20 seconds is well inside Restate's
