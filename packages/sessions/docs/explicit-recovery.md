@@ -25,6 +25,14 @@ no single await point, no selector, no working run.
 
 ## Decisions
 
+### 0. shared-core 8.7.0, from the registry
+
+`ExplicitRecoveryVM` was unreleased while this was written, so the addon was
+pinned to a git revision, which could not ship. 8.7.0 carries it, and the
+addon takes it as an ordinary version.
+
+8.7.0 also undoes the one problem the bump brought with it (see below).
+
 ### 1. The VM is bound in this addon, not taken from the SDK
 
 The SDK builds its own `WasmVM` per invocation, from its own copy of
@@ -300,8 +308,9 @@ Not opened from here: drafted for a person to send.
 ## Open
 
 - **The `connect` path**, above.
-- **foyer's debug print.** shared-core#117 pins foyer 0.22.6, whose
-  `foyer-storage/src/io/device/file.rs:103` has a stray
-  `println!("==========> {capacity}")`. Every process that opens a disk page
-  cache prints it. 0.22.6 is the newest release, so there is no version to move
-  to; it needs raising upstream, and it affects sdk-python#314 equally.
+- ~~**foyer's debug print.**~~ Fixed. shared-core#117 pinned foyer 0.22.6,
+  whose `foyer-storage/src/io/device/file.rs:103` had a stray
+  `println!("==========> {capacity}")`, so every process that opened a disk
+  page cache printed it; 0.22.6 was the newest release, so there was no version
+  to move to. shared-core 8.7.0 went back to foyer 0.22.3 for exactly this
+  reason, and the line is gone from the suites and the end-to-end run.

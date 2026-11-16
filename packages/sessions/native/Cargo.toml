@@ -18,7 +18,7 @@ napi-derive = "3"
 # checkpoints' packs in the object store RESTATE_SQL_OBJECT_STORE names
 # (`state::ObjectStoreL1`): S3, GCS or Azure, with their features, or a
 # directory.
-restate-sdk-shared-core = { version = "8.5.0", features = [
+restate-sdk-shared-core = { version = "8.7.0", features = [
   "sql",
   "object_store_aws",
   "object_store_gcp",
@@ -44,8 +44,3 @@ inherits = "release"
 lto = "fat"
 codegen-units = 1
 strip = "symbols"
-
-# The explicit recovery VM of session objects (restatedev/sdk-shared-core#118),
-# until shared-core releases it.
-[patch.crates-io]
-restate-sdk-shared-core = { git = "https://github.com/restatedev/sdk-shared-core", rev = "a1d7c08" }
