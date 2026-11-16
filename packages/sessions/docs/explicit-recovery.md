@@ -42,10 +42,11 @@ bound there too (`native/src/vm.rs`) and the two share one shared-core.
 ### 2. The VM lives behind a `Mutex`
 
 `CoreExplicitRecoveryVM` is `Send` but not `Sync` (shared-core asserts the
-`Send` bound itself). Only JavaScript's thread touches it today, but a store in
-Rust would reach it from the runtime's thread too, where a database call that
-waits goes on (`node::answer`). So it lives behind a `Mutex` that every call
-takes briefly and never holds across an await.
+`Send` bound itself), and two threads reach it: JavaScript's, which ticks it,
+and the runtime's, where a database call that waits for the store goes on
+(`node::answer`). So it lives behind a `Mutex` that every call takes briefly
+and never holds across an await, and a call from the runtime's thread asks
+JavaScript for a tick once it lets the lock go.
 
 sdk-python needs none: the GIL serializes its binding.
 
@@ -82,30 +83,39 @@ Two hops per _write_ survived the first cut, and both are gone:
 A read the VM can answer locally is routed under the lock that issued it, so it
 never costs a turn of the event loop either.
 
-**Measured**, with `pnpm --filter e2e bench` (`BENCH_VM=1` serves through this
-package, so the store is the addon's; without it the SDK serves and the store
-is JavaScript's). Medians of three runs each, p50 in milliseconds, ± half the
-spread:
+**Measured**, three ways, so that the store's share is its own. `pnpm --filter
+e2e bench` runs the workload; `BENCH_VM=1` serves through this package.
 
-| phase                              | calls | JavaScript store | on the VM  | change     |
-| ---------------------------------- | ----- | ---------------- | ---------- | ---------- |
-| insert, new key, 32 at once        | 2000  | 120.8 ±8.9       | 86.1 ±13.8 | **−28.7%** |
-| insert 2 KiB, 16 keys, 16 at once  | 4000  | 41.2 ±4.0        | 29.8 ±4.4  | **−27.7%** |
-| read, 16 keys, warm                | 1600  | 55.9 ±3.8        | 49.9 ±4.2  | **−10.7%** |
-| bulk 200 rows, one key, sequential | 50    | 32.4 ±2.3        | 32.1 ±1.0  | −0.9%      |
-| count, one key, sequential         | 500   | 10.2 ±0.6        | 10.1 ±0.2  | −1.0%      |
-| 10 MB: update a row, warm          | 200   | 9.8 ±0.4         | 10.2 ±1.0  | +4.1%      |
-| 10 MB: read a row, warm            | 200   | 7.2 ±0.1         | 7.6 ±0.8   | +5.6%      |
-| 10 MB: read a row, view            | 50    | 8.6 ±0.6         | 9.0 ±0.8   | +4.7%      |
+- **selector** — the SDK's VM and journaled context, the store in JavaScript;
+- **VM + JS store** — this branch at `e3db16a`, the commit before `VmStore`:
+  the explicit recovery VM and the driver, but the store still JavaScript's;
+- **VM + Rust store** — this branch.
 
-The gain is in concurrency: with many pages moving at once, two hops and two
-copies saved per page compound, and a third of the latency goes. Sequential
-work on one key shows nothing either way — there is no queue to shorten.
+Medians of three runs each, p50 in milliseconds:
 
-The last three rows are slower by about 0.4 ms on 7 to 10 ms, which their own
-spread very nearly covers; three runs cannot tell a real cost of that size from
-the machine. Worth a closer look before anyone quotes a number for a single
-sequential read, and not worth undoing the change for.
+| phase                              | calls | selector | VM + JS store | VM + Rust store | the store  | in all |
+| ---------------------------------- | ----- | -------- | ------------- | --------------- | ---------- | ------ |
+| insert, new key, 32 at once        | 2000  | 120.8    | 117.0         | 86.1            | **−26.4%** | −28.7% |
+| insert 2 KiB, 16 keys, 16 at once  | 4000  | 41.2     | 42.3          | 29.8            | **−29.6%** | −27.7% |
+| read, 16 keys, warm                | 1600  | 55.9     | 57.6          | 49.9            | **−13.4%** | −10.7% |
+| count, one key, sequential         | 500   | 10.2     | 10.9          | 10.1            | −7.3%      | −1.0%  |
+| bulk 200 rows, one key, sequential | 50    | 32.4     | 33.9          | 32.1            | −5.3%      | −0.9%  |
+| 10 MB: update a row, warm          | 200   | 9.8      | 10.2          | 10.2            | 0.0%       | +4.1%  |
+| 10 MB: read a row, warm            | 200   | 7.2      | 7.7           | 7.6             | −1.3%      | +5.6%  |
+| 10 MB: read a row, view            | 50    | 8.6      | 8.6           | 9.0             | +4.7%      | +4.7%  |
+
+**Nearly all of it is the store.** The middle column is level with the
+selector, or a little behind it: moving to the VM buys correctness and drops
+the SDK pin, not speed. The gain is in concurrency, where the hops cost most —
+with many pages moving at once, two thread hops and two copies saved per page
+compound, and about a third of the latency goes. Sequential work on one key has
+no queue to shorten and shows nothing either way.
+
+The three small databases' single-row phases cost about 0.4 ms more on 7 to 10
+ms, and the middle column places that with the **VM**, not the store: 7.2 to
+7.7 ms before the store moved, 7.6 after. Three runs cannot tell a cost of that
+size from the machine, and it is worth a closer look before anyone quotes a
+figure for one sequential read.
 
 **The race the GIL hides.** sdk-python#314 issues a command and registers the
 waiter for its handle in two separate borrows of the VM. That is safe there
@@ -213,9 +223,17 @@ the selector did:
 - `explicitCancellation: true` — `cancelled(ctx)` resolves and nothing else
   happens. The handler stops its own work.
 - otherwise — the calls in flight are cancelled, and every promise waiting on
-  Restate rejects with the SDK's `TerminalError('cancelled', 409)`, as a
-  cancelled invocation's awaits do. A call's invocation id still settles, since
-  cancelling that call needs it.
+  Restate rejects with the SDK's `CancelledError`, as a cancelled invocation's
+  awaits do. A call's invocation id still settles, since cancelling that call
+  needs it. The database's waits are in the addon, so the VM fails those
+  (`cancel_state_waits`) and `database.ts` restores the class from the text.
+- A cancellation that finds **nothing** waiting is carried to the next wait,
+  once. A retry of a cancelled invocation learns of it before the handler
+  starts, and the selector's path fails its first call all the same
+  (`cancellation.test.ts`, "a retry of a cancelled invocation").
+
+What is awaited _after_ a cancellation is not cancelled, on either path; the
+selector says so in those words.
 
 **Behaviour change.** Nothing suspends on the cancel signal any more. The
 selector had to ask for the cancellation together with the working run so that
