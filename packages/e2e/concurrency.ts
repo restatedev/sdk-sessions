@@ -1,9 +1,9 @@
 // Session objects (@restatedev/sessions), against a real Restate server: their
 // handlers run with explicit recovery (a retried attempt starts over, against
 // the database as committed), and their operations are awaited concurrently,
-// with native or hand-written combinators (@restatedev/sessions' promise selector
-// drives them all); a suspension waits for any of them, and a cancellation
-// reaches all of them. With lazy state, every page the database reads is a
+// with native or hand-written combinators: the explicit recovery VM settles
+// each as its result arrives. A cancellation reaches what the handler awaits
+// of Restate, once. With lazy state, every page the database reads is a
 // request to the server. A wait is a call to a journaled service, `Helper`,
 // which sleeps.
 //
