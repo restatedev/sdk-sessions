@@ -25,11 +25,18 @@ no single await point, no selector, no working run.
 
 ## Decisions
 
-### 0. shared-core 8.7.0, from the registry
+### 0. shared-core 8.7.0 and one commit, from git until the next release
 
 `ExplicitRecoveryVM` was unreleased while this was written, so the addon was
-pinned to a git revision, which could not ship. 8.7.0 carries it, and the
-addon takes it as an ordinary version.
+pinned to a git revision, which could not ship. 8.7.0 carries it.
+
+The addon is pinned to a git revision again: shared-core's main at `b15c972`,
+one commit after 8.7.0 (sdk-shared-core#120). With it, the suspension of an
+attempt Restate shut down names the cancellation next to the calls, so that
+cancelling an invocation suspended on a call starts its next attempt; on 8.7.0
+the cancellation took effect only when the call answered. The pin is for the
+time until shared-core releases that commit, and the addon then takes an
+ordinary version again.
 
 8.7.0 also undoes the one problem the bump brought with it (see below).
 
