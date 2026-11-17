@@ -520,7 +520,8 @@ async function settled(host: Host, messageId: string): Promise<Outcome> {
   for (let idleSince = Date.now(); ;) {
     const now = await outcome(host, messageId);
     if (now.state !== 'running') return now;
-    if (!(await active(host))) {
+    const running = await active(host);
+    if (!running) {
       const [first] = await inbox(host);
       if (first !== undefined) {
         await host.call(
@@ -535,7 +536,9 @@ async function settled(host: Host, messageId: string): Promise<Outcome> {
       }
     }
     await host.call(host.client.session.wait({ sessionID: SESSION }));
-    if (await active(host)) {
+    // A turn that ran until `wait` returned was not stalled meanwhile: its
+    // outcome is read again before the clock counts.
+    if (running || (await active(host))) {
       idleSince = Date.now();
       continue;
     }
