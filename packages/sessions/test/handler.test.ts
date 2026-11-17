@@ -402,6 +402,32 @@ const notes = restate.sessionObject({
   },
 });
 
+/**
+ * Run `cleansUp` on `key` until Restate shuts its attempt down, after a
+ * cancellation that nothing was waiting for if `cancelFirst`; what its
+ * clean-up saw.
+ */
+async function shutDown(key: string, cancelFirst: boolean): Promise<string | undefined> {
+  goOn = undefined;
+  const r = restateSide();
+  const serving = serveSession(notes, 'cleansUp', r.stream);
+  r.start(key, null);
+  const settling = r.settle();
+  // The session opened, and the handler is working outside Restate.
+  await pause(50);
+  expect(goOn, 'the handler is waiting').toBeDefined();
+  if (cancelFirst) {
+    r.cancel();
+    await pause(20); // nothing waits: the cancellation is carried
+  }
+  r.shutDown();
+  await pause(20); // the attempt is over
+  goOn!();
+  await serving;
+  await settling;
+  return afterShutDown.pop();
+}
+
 describe('a session object served on the explicit recovery VM', () => {
   it('serves only the protocol versions the VM accepts', () => {
     expect(servedHere({ 'content-type': V8 })).toBe(true);
@@ -491,26 +517,6 @@ describe('a session object served on the explicit recovery VM', () => {
     // and the attempt that follows gets the cancellation. A `CancelledError`
     // there is terminal to whatever cleans up, for an invocation that will
     // be retried.
-    const shutDown = async (key: string, cancelFirst: boolean) => {
-      goOn = undefined;
-      const r = restateSide();
-      const serving = serveSession(notes, 'cleansUp', r.stream);
-      r.start(key, null);
-      const settling = r.settle();
-      // The session opened, and the handler is working outside Restate.
-      await pause(50);
-      expect(goOn, 'the handler is waiting').toBeDefined();
-      if (cancelFirst) {
-        r.cancel();
-        await pause(20); // nothing waits: the cancellation is carried
-      }
-      r.shutDown();
-      await pause(20); // the attempt is over
-      goOn!();
-      await serving;
-      await settling;
-      return afterShutDown.pop();
-    };
     const without = await shutDown('ks1', false);
     const carried = await shutDown('ks2', true);
     expect(carried).not.toContain('CancelledError');
