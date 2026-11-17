@@ -18,10 +18,9 @@ napi-derive = "3"
 # checkpoints' packs in the object store RESTATE_SQL_OBJECT_STORE names
 # (`state::ObjectStoreL1`): S3, GCS or Azure, with their features, or a
 # directory.
-# This is sdk-shared-core's main at the commit of sdk-shared-core#120 (a
-# cancellation resumes an invocation shut down while it waits for a call). Go
-# back to a version at the next shared-core release.
-restate-sdk-shared-core = { git = "https://github.com/restatedev/sdk-shared-core", rev = "b15c9724cde752ff6f563c815e6da7dbc26a55e5", features = [
+# 8.7.1: a cancellation resumes an invocation shut down while it waits for a
+# call (sdk-shared-core#120).
+restate-sdk-shared-core = { version = "8.7.1", features = [
   "sql",
   "object_store_aws",
   "object_store_gcp",
