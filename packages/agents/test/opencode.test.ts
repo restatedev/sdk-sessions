@@ -431,6 +431,28 @@ describe.skipIf(!NODE_24)('the OpenCode agent', () => {
     expect(await c.attempt('inv1', 'Who are you?')).toContain('You are Ada.');
   }, 60_000);
 
+  it('answers a turn that runs longer than its stall window on the first attempt', async () => {
+    // A tool that works for longer than the 5 s a turn may go without running or ending.
+    const slow = tool({
+      name: 'slow',
+      description: 'Work for a while.',
+      input: z.object({}),
+      run: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 6_000));
+        return 'worked';
+      },
+    });
+    fake.script.reply = ({ prompt: asked }) =>
+      asked.some((m) => m.role === 'tool')
+        ? { text: 'Done: worked' }
+        : { call: { id: 'call_slow', name: 'slow', input: {} } };
+    const c = conversation(opencode.chat({ tools: [slow] }), 'slow');
+    // The first attempt answers: it does not fail with a stall, to be answered by a retry.
+    expect(await c.attempt('inv1', 'Take your time')).toBe('Done: worked');
+    // The model was asked twice (the call, then the answer): nothing was retried.
+    expect(fake.script.requests).toHaveLength(2);
+  }, 60_000);
+
   it('answers a message once after a crash at any of its state requests', async () => {
     // One at a time: the teller's script is shared.
     expect(
