@@ -114,6 +114,13 @@ function restateSide(state = new Map<string, Uint8Array>(), { cancelOnCommit = f
       toSdk.push(frame(TYPE.signal, [...uint(2, 1), ...bytes(4, [])]));
     },
     /**
+     * Restate closes the request body while the handler runs, as its
+     * inactivity timeout does: the attempt is shut down.
+     */
+    shutDown() {
+      toSdk.close();
+    },
+    /**
      * Answer what the attempt asks for until it ends, then close the request
      * body. Closing it earlier is what Restate's inactivity timeout does, and
      * would shut the attempt down.
@@ -213,6 +220,34 @@ async function said(step: () => Promise<unknown>): Promise<string> {
   }
 }
 
+/**
+ * The state an earlier invocation of `key` left: its schema is applied. On a
+ * key never written, an attempt's first commit is the schema's, made as the
+ * session opens, and that is the one `cancelOnCommit` would land on. After
+ * this, it is the handler's own.
+ */
+async function seeded(key: string): Promise<Map<string, Uint8Array>> {
+  const state = new Map<string, Uint8Array>();
+  const r = restateSide(state);
+  const serving = serveSession(notes, 'add', r.stream);
+  r.start(key, 'seed');
+  await r.settle();
+  await serving;
+  return state;
+}
+
+/** Let the event loop run for `ms`, so the attempt takes in what it was sent. */
+const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** How many of the attempt's commands asked for an ack: a commit each. */
+const commits = (sent: ReturnType<ReturnType<typeof restateSide>['sent']>) =>
+  sent.filter((m) => m.type >= 0x0400 && m.type < 0x8000 && (m.flags & REQUESTED_ACK) !== 0).length;
+
+/** What `cleansUp` saw once its attempt was shut down: nothing such an attempt returns is written. */
+const afterShutDown: string[] = [];
+/** Lets `cleansUp` go on, once it is waiting. */
+let goOn: (() => void) | undefined;
+
 const notes = restate.sessionObject({
   name: 'Notes',
   schema: ['CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)'],
@@ -245,6 +280,17 @@ const notes = restate.sessionObject({
       await new Promise((resolve) => setTimeout(resolve, 300));
       const read = () => ctx.db.get('SELECT count(*) AS n FROM notes');
       return `${commit},${await said(read)},${await said(read)}`;
+    },
+    /**
+     * Works outside Restate until the test lets it go on, then cleans up with
+     * its database and a call, and notes how each ended.
+     */
+    cleansUp: async (ctx: restate.SessionContext) => {
+      await new Promise<void>((resolve) => (goOn = resolve));
+      const db = await said(() => ctx.db.execute('INSERT INTO notes (body) VALUES (?)', ['x']));
+      const call = await said(() => ctx.rpc({ service: 'Callee', key: 'a', handler: 'echo', input: 'A' }));
+      afterShutDown.push(`${db},${call}`);
+      return 'unwritten';
     },
     /** A commit, then a call: which of the two a cancellation failed. */
     commitThenCall: async (ctx: restate.SessionContext) => {
@@ -399,7 +445,7 @@ describe('a session object served on the explicit recovery VM', () => {
     // a handler could not tell from `CancelledError` whether its write
     // happened. The commit runs to its end and says so; the cancellation is
     // owed to the handler's next await, and this handler has none.
-    const state = new Map<string, Uint8Array>();
+    const state = await seeded('k5');
     const r = restateSide(state, { cancelOnCommit: true });
     const serving = serveSession(notes, 'commits', r.stream);
     r.start('k5', null);
@@ -409,6 +455,17 @@ describe('a session object served on the explicit recovery VM', () => {
     const answered = decode(output!.fields.get(14)![0] as Uint8Array);
     expect(text(answered.get(1)![0] as Uint8Array)).toBe('"committed"');
     expect(state.has(HEAD_KEY)).toBe(true);
+    // The premise: the attempt made one commit, the handler's, so that is
+    // the one the signal landed on.
+    expect(commits(r.sent())).toBe(1);
+    // And what it committed is there to read: the seed's row, and this one.
+    const after = restateSide(state);
+    const reading = serveSession(notes, 'add', after.stream);
+    after.start('k5', 'third');
+    await after.settle();
+    await reading;
+    const count = after.sent().find((m) => m.type === TYPE.output);
+    expect(text(decode(count!.fields.get(14)![0] as Uint8Array).get(1)![0] as Uint8Array)).toBe('3');
   }, 30_000);
 
   it('a cancellation that lands on a commit in flight is delivered once, to the await after it', async () => {
@@ -416,7 +473,7 @@ describe('a session object served on the explicit recovery VM', () => {
     // the addon once each decided whether to carry it: the addon failed the
     // commit, the driver carried its own to the call, and the handler saw
     // two.
-    const r = restateSide(new Map(), { cancelOnCommit: true });
+    const r = restateSide(await seeded('k6'), { cancelOnCommit: true });
     const serving = serveSession(notes, 'commitThenCall', r.stream);
     r.start('k6', null);
     await r.settle();
@@ -424,6 +481,41 @@ describe('a session object served on the explicit recovery VM', () => {
     const output = r.sent().find((m) => m.type === TYPE.output);
     const answered = decode(output!.fields.get(14)![0] as Uint8Array);
     expect(text(answered.get(1)![0] as Uint8Array)).toBe('"ok,CancelledError"');
+    // The premise: the attempt made one commit, the handler's, so that is
+    // the one the signal landed on.
+    expect(commits(r.sent())).toBe(1);
+  }, 30_000);
+
+  it('once the attempt is shut down, a carried cancellation is not delivered: the attempt is over', async () => {
+    // What the handler does after a shutdown fails with the attempt's end,
+    // and the attempt that follows gets the cancellation. A `CancelledError`
+    // there is terminal to whatever cleans up, for an invocation that will
+    // be retried.
+    const shutDown = async (key: string, cancelFirst: boolean) => {
+      goOn = undefined;
+      const r = restateSide();
+      const serving = serveSession(notes, 'cleansUp', r.stream);
+      r.start(key, null);
+      const settling = r.settle();
+      // The session opened, and the handler is working outside Restate.
+      await pause(50);
+      expect(goOn, 'the handler is waiting').toBeDefined();
+      if (cancelFirst) {
+        r.cancel();
+        await pause(20); // nothing waits: the cancellation is carried
+      }
+      r.shutDown();
+      await pause(20); // the attempt is over
+      goOn!();
+      await serving;
+      await settling;
+      return afterShutDown.pop();
+    };
+    const without = await shutDown('ks1', false);
+    const carried = await shutDown('ks2', true);
+    expect(carried).not.toContain('CancelledError');
+    expect(carried).toBe(without);
+    expect(without).toMatch(/,AttemptShutDown$/);
   }, 30_000);
 
   it('a view reads, and writes nothing: its sync has nothing to store', async () => {
