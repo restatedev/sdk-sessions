@@ -32,6 +32,7 @@ await serve(coder);
 | `plugins`   | OpenCode plugins of your own (`@opencode/plugin`)                                                                                                                                                                                                                                  |
 | `retry`     | How OpenCode asks the model again after a request failed for a reason that passes (an outage, a rate limit), as pi's `retry`: by default without limit, 2 s to a minute apart (`baseDelayMs`, `maxAgentDelayMs`, `maxRetries`, `enabled`; see [Through crashes](#through-crashes)) |
 | `approval`  | With a workspace, `true` has what OpenCode's permission rules ask about wait for a person's approval, the signal `approval`; without it, such an ask is denied ([Permissions](#permissions))                                                                                       |
+| `keepalive` | Names of OpenCode's own tools (`['shell']`) that keep the attempt alive while they run ([Keeping alive](#keeping-alive))                                                                                                                                                           |
 
 With a workspace, OpenCode's tools of background work are left out: its
 subagent and question tools are removed, and its shell runs a command in
@@ -182,6 +183,22 @@ The wait is the tool call's: a call that asks more than once (a directory,
 then the file) has each ask answered by the first's answer. OpenCode's hook
 does not tell an ask from a probe (an edit's hint on a miss), so a probe
 that would ask waits too.
+
+## Keeping alive
+
+Restate shuts an attempt down after its inactivity timeout (a minute) and starts it again, unless
+something keeps it alive. The adapter keeps it alive (`ctx.working`) while OpenCode's turn runs,
+which is while the model streams its requests, but not:
+
+- while a tool that is not kept alive runs: OpenCode's own tools (shell, read, write, edit, glob,
+  grep) are not by default; `keepalive: ['shell']` keeps the attempt alive while the shell runs,
+  for a command that may run longer than the timeout. Your own `tool()`s say so themselves
+  (`tool({ keepalive: true })`).
+- while it waits for an approval, even in a tool named in `keepalive`: a wait on Restate suspends.
+
+OpenCode has no hook at the end of a model's request, so this is the turn's scope with a gap for
+each tool that runs (tools may overlap: the scope reopens once none runs). A request OpenCode
+makes outside a turn (a session's title, say) is not kept alive.
 
 ## Not yet
 
