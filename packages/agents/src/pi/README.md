@@ -25,6 +25,7 @@ await serve(assistant);
 | `tools`       | `tool()`s and Restate's tools of `@restatedev/agents`, or pi-durable's `defineTool`s                                                                           |
 | `output`      | A zod object: the answer as data, which the agent replies with as JSON, and `chat` answers with (see [Structured answers](../../README.md#structured-answers)) |
 | `workspace`   | A directory for pi-durable's coding tools (`read`, `write`, `edit`, `bash`), on the local file system; use a sandbox                                           |
+| `keepalive`   | Names of the built-in coding tools (`bash`, say) that run kept alive: none by default, see [Kept alive](#kept-alive)                                           |
 | `serviceTier` | OpenAI's service tier for each request: `fast` for its fast mode (priced higher), `flex`, and so on                                                            |
 | `retry`       | How pi asks the model again after a request failed for a reason that passes (an outage, a rate limit): by default without limit, 2 s to a minute apart         |
 
@@ -93,6 +94,23 @@ each turn as it was asked and answered, not pi's summaries and handoffs.
 The files of a `workspace` are not in the database: they last as long as the
 disk does, and a coding tool a crash cut off is not run again (the model is
 told it was interrupted).
+
+## Kept alive
+
+An attempt of a session object is shut down by Restate after its inactivity
+timeout (a minute), and run again from the start, unless work keeps it alive
+(`ctx.working`). Each request of a model does, wherever pi makes it (a turn's,
+a deferred response's, a compaction's): the agent wraps the model registry (its
+own, or the `models` given), and a request is kept alive from its call until
+its response ends, fails, is abandoned or is aborted. A tool is not: neither a
+`tool()` (unless it sets `keepalive`) nor a built-in coding tool. A `bash` that
+runs for minutes is cut off and run again, so name it:
+
+```ts
+pi.agent({ name: 'coder', workspace: '/work', keepalive: ['bash'] });
+```
+
+A tool kept alive must not wait on Restate (a call, a signal) inside.
 
 ## Run
 
