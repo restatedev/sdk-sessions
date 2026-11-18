@@ -104,7 +104,9 @@ a deferred response's, a compaction's): the agent wraps the model registry (its
 own, or the `models` given), and a request is kept alive from its call until
 its response ends, fails, is abandoned or is aborted. A tool is not: neither a
 `tool()` (unless it sets `keepalive`) nor a built-in coding tool. A `bash` that
-runs for minutes is cut off and run again, so name it:
+runs for longer than the timeout is cut off, as by a crash: the next attempt
+tells the model it was interrupted (see above), and a model that runs it again
+has it cut off again. Name the coding tools that may run that long:
 
 ```ts
 pi.agent({ name: 'coder', workspace: '/work', keepalive: ['bash'] });
