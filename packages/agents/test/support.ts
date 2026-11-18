@@ -182,6 +182,8 @@ export function sqlAttempt(
     return method(c.parameter as never);
   };
   const sdk = {
+    // The handler's `ctx.working`, as the VM's attempt has it (a test's `scopes()`, say).
+    ...(options.working ? { working: options.working } : {}),
     key,
     request: () => ({ ...base.request(), target: { service, key, handler: 'chat' } }),
     // A call's invocation: one per target and key, as a workflow's run is,
