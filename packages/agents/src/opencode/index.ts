@@ -71,10 +71,10 @@
 // `approval`, its tool call waits for a person's approval, through Restate
 // (`permissionPlugin`).
 //
-// The attempt is kept alive (`ctx.working`) while OpenCode's turn runs, but
-// not while a tool that is not kept alive executes, nor while an approval is
-// waited for (`gateOf`): OpenCode has no hook at the end of a model's request.
-// Its built-in tools are not kept alive unless `keepalive` names them.
+// The attempt is kept alive (`ctx.working`) while OpenCode's turn runs, its
+// own tools (shell, read, edit...) included, but not while a tool of yours
+// executes (it says so itself: `tool({ keepalive })`), nor while an approval
+// is waited for (`gateOf`): OpenCode has no hook at the end of a model's request.
 //
 // TODO: a change of `model` on an existing session.
 import * as restate from '@restatedev/sessions';
@@ -714,16 +714,6 @@ export interface Options<O extends z.ZodObject | undefined = z.ZodObject | undef
    */
   approval?: boolean;
   /**
-   * Names of OpenCode's own tools (`['shell']`) that keep the turn alive
-   * while they run: Restate shuts an attempt down after its inactivity
-   * timeout and starts it again, so a command that runs longer than that
-   * needs it. By default only the model's requests are kept alive: a tool
-   * is not, and while it runs nothing is. The `tools` of your own say so
-   * themselves (`tool({ keepalive: true })`). A wait for an approval is never
-   * kept alive.
-   */
-  keepalive?: readonly string[];
-  /**
    * The answer as data: a zod object, whose JSON the agent replies with
    * (checked), and `chat` and `prompt` answer with (see output.ts).
    */
@@ -965,16 +955,7 @@ function permissionPlugin(
  */
 export const withOpenCode = async <T>(
   ctx: restate.SessionContext,
-  {
-    plugins = [],
-    model: named,
-    system,
-    tools = [],
-    workspace: where,
-    retry,
-    approval = false,
-    keepalive = [],
-  }: Options,
+  { plugins = [], model: named, system, tools = [], workspace: where, retry, approval = false }: Options,
   work: (opencode: OpenCodeSession) => Promise<T>,
 ): Promise<T> => {
   const model = typeof named === 'object' ? named : modelRef(modelOf(named));
@@ -982,9 +963,9 @@ export const withOpenCode = async <T>(
   if (workspace) await mkdir(workspace, { recursive: true });
   const fence: Fence = { closed: false };
   const gate = gateOf(ctx);
-  // Our own tools say so themselves (their `run` opens a scope of its own).
+  // OpenCode's own tools (shell, read, edit...) work on the machine and keep the turn alive; ours say so
+  // themselves (their `run` opens a scope of its own).
   const ours = new Set(tools.map((t) => t.name));
-  const kept = new Set(keepalive.filter((name) => !ours.has(name)));
   const { promise: failure, reject: failed } = Promise.withResolvers<never>();
   failure.catch(() => {});
   // A tool's error ends the attempt: nothing more is stored, and the tool
@@ -1087,7 +1068,7 @@ export const withOpenCode = async <T>(
             .then(() => toolCallStarted(ctx))
             .catch(fail);
         } finally {
-          if (kept.has(event.tool)) gate.resume(event.id);
+          if (!ours.has(event.tool)) gate.resume(event.id);
         }
       });
       const after = await plugin.tool.hook('execute.after', async (event) => {

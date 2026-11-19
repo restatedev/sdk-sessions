@@ -265,13 +265,6 @@ export interface Options<O extends z.ZodObject | undefined = z.ZodObject | undef
   model?: string;
   /** A pi-ai model registry; by default, one of the model's provider. */
   models?: MutableModels;
-  /**
-   * The built-in coding tools (`workspace`) that run kept alive, by name
-   * (`bash`, say): a tool that works for longer than Restate's inactivity
-   * timeout (a minute) is cut off, and done again, unless it is named here.
-   * None is by default. The model's requests are always kept alive.
-   */
-  keepalive?: readonly string[];
   /** The system prompt: who the agent is, and how it answers. */
   system?: string;
   /** The agent's tools: `tool()`s, Restate's (`call`, `signal`...), or pi-durable's `defineTool`s. */
@@ -332,7 +325,7 @@ async function extensions(
   system: string | undefined,
   workspace: string | undefined,
   afterTools: (conversation: ConversationId) => Promise<void>,
-  keepalive: { ctx: restate.SessionContext; tools: readonly string[] } | undefined,
+  ctx: restate.SessionContext,
 ) {
   const registry = createRegistry();
   registry.install(defineExtension({ name: 'tools', tools }));
@@ -349,16 +342,14 @@ async function extensions(
   registry.install(CodingTools);
   // Tell the model where the coding tools work.
   registry.install(defineExtension({ name: 'workspace', sections: [section('cwd', () => workspace)] }));
-  // The coding tools named run in `ctx.working`: after theirs, which they wrap.
-  if (keepalive && keepalive.tools.length > 0) {
-    const { ctx } = keepalive;
-    const kept = (t: ToolRegistration): ToolRegistration => ({
-      ...t,
-      execute: (args, api, context) => ctx.working(() => t.execute(args, api, context)),
-    });
-    const wraps = keepalive.tools.map((name): Wrap => ({ tool: name, wrap: kept }));
-    registry.install(defineExtension({ name: 'keepalive', wraps }));
-  }
+  // The coding tools run in `ctx.working`: they work on the machine (a `bash` may run for minutes), and never
+  // wait on Restate. Installed after theirs, which they wrap.
+  const kept = (t: ToolRegistration): ToolRegistration => ({
+    ...t,
+    execute: (args, api, context) => ctx.working(() => t.execute(args, api, context)),
+  });
+  const wraps = (CodingTools.tools ?? []).map((t): Wrap => ({ tool: t.name, wrap: kept }));
+  registry.install(defineExtension({ name: 'keepalive', wraps }));
   return { registry, env: () => new NodeExecutionEnv({ cwd: workspace }) };
 }
 
@@ -401,7 +392,7 @@ function unanswered(id: string, why: string | null | undefined, detail: unknown,
  */
 export const withPi = async <T>(
   ctx: restate.SessionContext,
-  { model: named, models, system, tools = [], workspace, serviceTier, retry, keepalive = [] }: Options,
+  { model: named, models, system, tools = [], workspace, serviceTier, retry }: Options,
   work: (pi: Pi) => Promise<T>,
 ): Promise<T> => {
   const model = modelOf(named);
@@ -482,7 +473,7 @@ export const withPi = async <T>(
       ending = false;
       if (!ends) await steering?.(of);
     },
-    { ctx, tools: keepalive },
+    ctx,
   );
   const settings = {
     // A task that crashes is run again however often Restate retries the attempt (its retry policy decides):

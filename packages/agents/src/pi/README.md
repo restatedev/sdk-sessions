@@ -25,7 +25,6 @@ await serve(assistant);
 | `tools`       | `tool()`s and Restate's tools of `@restatedev/agents`, or pi-durable's `defineTool`s                                                                           |
 | `output`      | A zod object: the answer as data, which the agent replies with as JSON, and `chat` answers with (see [Structured answers](../../README.md#structured-answers)) |
 | `workspace`   | A directory for pi-durable's coding tools (`read`, `write`, `edit`, `bash`), on the local file system; use a sandbox                                           |
-| `keepalive`   | Names of the built-in coding tools (`bash`, say) that run kept alive: none by default, see [Kept alive](#kept-alive)                                           |
 | `serviceTier` | OpenAI's service tier for each request: `fast` for its fast mode (priced higher), `flex`, and so on                                                            |
 | `retry`       | How pi asks the model again after a request failed for a reason that passes (an outage, a rate limit): by default without limit, 2 s to a minute apart         |
 
@@ -102,17 +101,14 @@ timeout (a minute), and run again from the start, unless work keeps it alive
 (`ctx.working`). Each request of a model does, wherever pi makes it (a turn's,
 a deferred response's, a compaction's): the agent wraps the model registry (its
 own, or the `models` given), and a request is kept alive from its call until
-its response ends, fails, is abandoned or is aborted. A tool is not: neither a
-`tool()` (unless it sets `keepalive`) nor a built-in coding tool. A `bash` that
-runs for longer than the timeout is cut off, as by a crash: the next attempt
-tells the model it was interrupted (see above), and a model that runs it again
-has it cut off again. Name the coding tools that may run that long:
+its response ends, fails, is abandoned or is aborted. So does each built-in
+coding tool (`read`, `write`, `edit`, `bash`): it works on the machine, and a
+`bash` may run for minutes.
 
-```ts
-pi.agent({ name: 'coder', workspace: '/work', keepalive: ['bash'] });
-```
-
-A tool kept alive must not wait on Restate (a call, a signal) inside.
+A tool of your own is not kept alive: a `tool()` sets `keepalive` if it may
+work for longer than the timeout, or it is cut off, as by a crash (the next
+attempt tells the model it was interrupted, see above). A tool kept alive must
+not wait on Restate (a call, a signal) inside.
 
 ## Run
 

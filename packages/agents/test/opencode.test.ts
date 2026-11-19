@@ -1605,7 +1605,7 @@ const sleeper = ({ prompt: asked }: Fake.Request): Fake.Reply =>
         },
       };
 /** What `open` was at each sample while the command ran. */
-const sampled = async (keepalive: string[]) => {
+const sampled = async () => {
   const kept = scopes();
   fake.script.reply = sleeper;
   const workspace = await workspaceOf();
@@ -1621,7 +1621,7 @@ const sampled = async (keepalive: string[]) => {
     })();
   }, 50);
   try {
-    const c = conversation(opencode.chat({ workspace, keepalive }), `shell-${keepalive.length}`, undefined, {
+    const c = conversation(opencode.chat({ workspace }), 'shell', undefined, {
       working: kept.working,
     });
     expect(await c.attempt('inv1', 'Sleep')).toBe('Slept');
@@ -1697,7 +1697,7 @@ describe.skipIf(!NODE_24)("the OpenCode agent's scopes of ctx.working", () => {
     const kept = scopes();
     fake.script.reply = runner;
     const workspace = await workspaceOf();
-    const chat = handlerOf(opencode.chat({ workspace, approval: true, plugins: [askShell], keepalive: ['shell'] }));
+    const chat = handlerOf(opencode.chat({ workspace, approval: true, plugins: [askShell] }));
     const asked = Promise.withResolvers<void>();
     const open: number[] = [];
     const sql = sqlAttempt({
@@ -1714,7 +1714,7 @@ describe.skipIf(!NODE_24)("the OpenCode agent's scopes of ctx.working", () => {
     const answering = sql.end(() => chat(sql.ctx, 'Run it'));
     answering.catch(() => {});
     await asked.promise;
-    // Even a tool kept alive waits for its approval outside a scope.
+    // Even OpenCode's shell, kept alive, waits for its approval outside a scope.
     expect(open).toEqual([0]);
     expect(kept.open).toBe(0);
     sql.cancel();
@@ -1722,17 +1722,9 @@ describe.skipIf(!NODE_24)("the OpenCode agent's scopes of ctx.working", () => {
     expect(kept.open).toBe(0);
   }, 60_000);
 
-  describe('the shell', () => {
-    it('runs outside a scope by default', async () => {
-      const samples = await sampled([]);
-      expect(samples.length).toBeGreaterThan(5);
-      expect(samples.every((open) => open === 0)).toBe(true);
-    }, 60_000);
-
-    it('runs in the turn\'s scope with `keepalive: ["shell"]`', async () => {
-      const samples = await sampled(['shell']);
-      expect(samples.length).toBeGreaterThan(5);
-      expect(samples.every((open) => open === 1)).toBe(true);
-    }, 60_000);
-  });
+  it("runs OpenCode's shell in the turn's scope", async () => {
+    const samples = await sampled();
+    expect(samples.length).toBeGreaterThan(5);
+    expect(samples.every((open) => open === 1)).toBe(true);
+  }, 60_000);
 });

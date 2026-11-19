@@ -579,10 +579,8 @@ describe('pi, kept alive', () => {
     expect(kept.open).toBe(0);
   });
 
-  it('runs a built-in coding tool not kept alive, unless `keepalive` names it', async () => {
-    expect(await sleeping({})).toEqual({ during: [0], after: 0 });
-    expect(await sleeping({ keepalive: ['write'] })).toEqual({ during: [0], after: 0 });
-    const { during, after } = await sleeping({ keepalive: ['bash'] });
+  it('runs a built-in coding tool kept alive', async () => {
+    const { during, after } = await sleeping({});
     expect(during[0]).toBeGreaterThan(0);
     expect(after).toBe(0);
   });
