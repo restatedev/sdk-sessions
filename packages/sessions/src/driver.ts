@@ -1,27 +1,42 @@
-// One attempt of a session object's handler, on the explicit recovery VM
-// (`vm.ts`, `native/src/vm.rs`).
+// One attempt of a session object's handler, on the explicit recovery
+// protocol's VM (`vm.ts`, `native/src/vm.rs`).
 //
-// The VM never replays a journal: every attempt runs the handler from the
-// start, and recovers from the state the earlier attempts stored. An action
-// returns a handle, and its result comes back as a notification of that
-// handle, which settles the action's promise here. Two things move the attempt
-// along:
+// The protocol has no journal: every attempt runs the handler from the start,
+// and recovers from the state the earlier attempts stored. An action returns
+// a handle, and its result comes back as a notification of that handle, which
+// settles the action's promise here. Two things move the attempt along:
 //
 //   - the input pump, the only reader of the request body: it hands the VM
 //     each chunk, and the end of the body;
 //   - the tick, scheduled after every call into the VM, at most one per turn
 //     of the event loop: it writes the VM's output, settles the promises of
-//     the actions that completed, and notices the end of the attempt.
+//     the actions that completed, and notices the end of the attempt. It is
+//     the only place notifications are taken: taking one is processing it,
+//     and it counts in the `ShutdownMessage` of an attempt shut down. The
+//     cancel signal is the notification of the reserved handle 1.
 //
 // Scheduling a tick after every call batches the output of the actions issued
 // in the same turn, and flushes it before the event loop can wait on anything.
 //
 // Restate shuts an attempt down by closing the request body, after its
-// inactivity timeout. From then on the attempt is over: every action throws,
-// the promises still pending reject, and a new attempt runs the handler from
-// the start, unless work in `working` keeps the attempt alive.
+// inactivity timeout; the VM answers with `ShutdownMessage` at once. From then
+// on the attempt is over: every action throws, the promises still pending
+// reject, and a new attempt runs the handler from the start, unless work in
+// `working` keeps the attempt alive. After the attempt's last message the
+// runtime closes its side first, and the response closes after it
+// (`whenClosable`). A process going away ends its attempts with an unasked
+// `ShutdownMessage` (`goAway`).
+import { AsyncLocalStorage } from 'node:async_hooks';
 import * as restate from '@restatedev/restate-sdk';
-import { isShutDown, type Vm, type VmFailure, type VmInput, type VmNotification } from './vm.ts';
+import {
+  isShutDown,
+  type Vm,
+  type VmActionOptions,
+  type VmFailure,
+  type VmInput,
+  type VmNotification,
+  type VmScope,
+} from './vm.ts';
 
 /**
  * How often an attempt in `working` tells Restate it makes progress, in
@@ -151,7 +166,13 @@ export class AttemptDriver {
   private ended: Error | undefined;
   private readonly waiting = new Map<number, Waiting>();
   private readonly onEnd = new Set<() => void>();
+  private readonly onClosable = new Set<() => void>();
+  private isClosable = false;
   private queued = false;
+  /** The reserved handle of the cancel signal. */
+  private readonly cancelHandle: number;
+  /** The span the code running now is inside of: actions it makes are inside it too. */
+  private readonly span = new AsyncLocalStorage<number>();
   /** The calls this attempt made, by the handle of their result. */
   private readonly calls = new Map<number, Call>();
   /** Issuing the cancellations of the calls, which the handler's end waits for. */
@@ -199,6 +220,7 @@ export class AttemptDriver {
     this.vm = vm;
     this.write = write;
     this.options = options;
+    this.cancelHandle = vm.cancelHandle();
     this.cancelledPromise = new Promise<void>((resolve) => {
       this.cancelledResolve = resolve;
     });
@@ -238,26 +260,72 @@ export class AttemptDriver {
     queueMicrotask(() => (this.ended === undefined ? this.tick() : this.flush()));
   }
 
-  /** Write what the VM has buffered. A closed attempt still flushes its last words. */
+  /**
+   * Write what the VM has buffered. A closed attempt still flushes its last
+   * words, and then, once the runtime closed its side too, the response
+   * closes.
+   */
   private flush(): void {
     this.queued = false;
     const output = this.vm.takeOutput();
-    if (output.length === 0) return;
-    this.write(output);
-    this.wroteAt = Date.now();
+    if (output.length > 0) {
+      this.write(output);
+      this.wroteAt = Date.now();
+    }
+    if (this.vm.shouldCloseOutput()) this.closable();
+  }
+
+  /** The response may close now: tell the listeners, once. */
+  private closable(): void {
+    const listeners = [...this.onClosable];
+    this.onClosable.clear();
+    this.isClosable = true;
+    for (const listener of listeners) listener();
+  }
+
+  /**
+   * Call `listener` once the response may close: the attempt's last message
+   * is written and the runtime closed its side (the runtime closes first).
+   */
+  whenClosable(listener: () => void): void {
+    if (this.isClosable) listener();
+    else this.onClosable.add(listener);
+  }
+
+  /**
+   * The process is going away (SIGTERM): end a running attempt with an
+   * unasked `ShutdownMessage`, after which Restate starts a new attempt
+   * elsewhere, and write it. The caller closes the response.
+   */
+  goAway(): void {
+    if (this.vm.state() !== 'closed') this.vm.shutdown();
+    this.tick();
+    this.end(this.ended ?? new AttemptShutDown());
+    this.flush();
   }
 
   /**
    * Write the VM's output, settle the promises of the actions that completed,
-   * and notice the end of the attempt.
+   * and notice the end of the attempt. The only taker of notifications.
    */
   private tick(): void {
     this.queued = false;
     this.flush();
     if (this.ended !== undefined) return;
+    // The actions of an atomic group the store aborted in the addon: never notified.
+    for (const handle of this.vm.takeAborted()) {
+      const waiting = this.waiting.get(handle);
+      if (waiting === undefined) continue;
+      this.waiting.delete(handle);
+      waiting.reject(new Error('the atomic group of this action was aborted'));
+    }
     let notification: VmNotification | null;
     try {
       while ((notification = this.vm.takeNotification()) !== null) {
+        if (notification.handle === this.cancelHandle) {
+          this.cancelled();
+          continue;
+        }
         // A call is over once its result arrives, whatever it is.
         const call = this.calls.get(notification.handle);
         if (call !== undefined) call.done = true;
@@ -271,10 +339,11 @@ export class AttemptDriver {
       }
     } catch (error) {
       this.end(isShutDown(error) ? new AttemptShutDown() : new AttemptFailed(String(error)));
+      this.flush();
       return;
     }
-    // The VM says whether a cancellation arrived, in this attempt or an
-    // earlier one; it has no notification of its own.
+    // Cancelled before this attempt (`StartMessage.cancelled`): the VM knows
+    // from the start, and no notification comes.
     if (this.vm.isCancelled()) this.cancelled();
     if (this.vm.state() === 'closed') this.end(new AttemptShutDown());
   }
@@ -469,6 +538,24 @@ export class AttemptDriver {
 
   // --- Calls
 
+  /**
+   * The options of an action named `name`, inside the span the code running
+   * now is inside of, if any.
+   */
+  optionsOf(name?: string, record?: VmActionOptions['record']): VmActionOptions {
+    const parentSpan = this.span.getStore();
+    return {
+      ...(name !== undefined ? { name } : {}),
+      ...(parentSpan !== undefined ? { parentSpan } : {}),
+      ...(record !== undefined ? { record } : {}),
+    };
+  }
+
+  /** The span the code running now is inside of, if any. */
+  get currentSpan(): number | undefined {
+    return this.span.getStore();
+  }
+
   /** A call: the promise of its result, and of its invocation id. */
   call(target: {
     service: string;
@@ -477,19 +564,23 @@ export class AttemptDriver {
     input: Uint8Array;
     idempotencyKey?: string;
     headers?: { key: string; value: string }[];
+    delay?: number;
     name?: string;
   }): { result: Promise<Uint8Array | null>; invocationId: Promise<string> } {
     let handles: { invocationId: number; result: number };
     try {
       handles = this.act((vm) =>
         vm.call(
-          target.service,
-          target.handler,
+          {
+            service: target.service,
+            handler: target.handler,
+            key: target.key,
+            idempotencyKey: target.idempotencyKey,
+            headers: target.headers,
+          },
           target.input,
-          target.key,
-          target.idempotencyKey,
-          target.headers,
-          target.name,
+          target.delay,
+          this.optionsOf(target.name ?? `${target.service}/${target.handler}`),
         ),
       );
     } catch (error) {
@@ -521,14 +612,16 @@ export class AttemptDriver {
     try {
       handle = this.act((vm) =>
         vm.send(
-          target.service,
-          target.handler,
+          {
+            service: target.service,
+            handler: target.handler,
+            key: target.key,
+            idempotencyKey: target.idempotencyKey,
+            headers: target.headers,
+          },
           target.input,
-          target.key,
           target.delay,
-          target.idempotencyKey,
-          target.headers,
-          target.name,
+          this.optionsOf(target.name ?? `${target.service}/${target.handler}`),
         ),
       );
     } catch (error) {
@@ -545,24 +638,108 @@ export class AttemptDriver {
   /** The result of an invocation, once it ends. */
   attach(invocationId: string, name?: string): Promise<Uint8Array | null> {
     return quiet(
-      this.issue((vm) => vm.attachInvocation(invocationId, name)).then((value) =>
+      this.issue((vm) => vm.attachInvocation(invocationId, this.optionsOf(name ?? 'attach'))).then((value) =>
         value === undefined ? null : (value as Uint8Array),
       ),
     );
   }
 
   cancel(invocationId: string, name?: string): void {
-    this.tell((vm) => vm.cancelInvocation(invocationId, name, false));
+    this.tell((vm) => vm.cancelInvocation(invocationId, false, this.optionsOf(name ?? 'cancel')));
   }
 
-  // --- Traces, shown in Restate's UI as runs
+  // --- Invocation state: this invocation's own, which every attempt of it
+  // finds, and which ends with it. Bytes only.
 
-  startTrace(name: string, parent?: number): number {
-    return this.act((vm) => vm.startTrace(name, parent));
+  stateGet(scope: VmScope, key: string): Promise<Uint8Array | null> {
+    return quiet(
+      this.issue((vm) => vm.getState(scope, key, this.optionsOf(key))).then((value) =>
+        value === undefined ? null : (value as Uint8Array),
+      ),
+    );
   }
 
-  endTrace(trace: number, output: Uint8Array): void {
-    this.act((vm) => vm.endTraceSuccess(trace, output));
+  stateKeys(scope: VmScope): Promise<string[]> {
+    return quiet(this.issue((vm) => vm.getStateKeys(scope, this.optionsOf())).then((keys) => keys as string[]));
+  }
+
+  stateSet(scope: VmScope, key: string, value: Uint8Array): void {
+    this.act((vm) => vm.setState(scope, key, value, false, this.optionsOf(key)));
+  }
+
+  stateClear(scope: VmScope, key: string): void {
+    this.act((vm) => vm.clearState(scope, key, false, this.optionsOf(key)));
+  }
+
+  stateClearAll(scope: VmScope): void {
+    this.act((vm) => vm.clearAllState(scope, false, this.optionsOf()));
+  }
+
+  // --- Signals: addressed to an invocation, by name
+
+  /**
+   * The signal `index` (from 0) of `name` this invocation received: its
+   * payload, `null` if it carries nothing, or a TerminalError if a failure.
+   */
+  signalRead(name: string, index: number): Promise<Uint8Array | null> {
+    return quiet(
+      this.issue((vm) => vm.signalRead(name, index, this.optionsOf(`${name}#${index}`))).then((value) =>
+        value === undefined ? null : (value as Uint8Array),
+      ),
+    );
+  }
+
+  /** A signal `name` to invocation `invocationId`, with `value`, a failure, or nothing. */
+  signalSend(invocationId: string, name: string, value?: Uint8Array | restate.TerminalError): void {
+    const failure =
+      value instanceof restate.TerminalError
+        ? {
+            code: (value as { code?: number }).code ?? 500,
+            message: value.message,
+            metadata: Object.entries(value.metadata ?? {}).map(([key, v]) => ({ key, value: v })),
+          }
+        : null;
+    const bytes = value instanceof Uint8Array ? value : null;
+    this.act((vm) => vm.signalSend(invocationId, name, bytes, failure, false, this.optionsOf(name)));
+  }
+
+  /** Resolves once every action made before it is applied. */
+  flushActions(): Promise<void> {
+    return quiet(this.issue((vm) => vm.flush(this.optionsOf())).then(() => undefined));
+  }
+
+  // --- Spans, shown in Restate's UI: the actions made inside one are nested
+  // under it
+
+  /**
+   * Run `fn` inside a span `name`: the actions it makes (calls, sends,
+   * commits) are inside it. It ends with `fn`: with its value (`output`
+   * serializes it, if given), or its failure. An attempt that ended leaves
+   * it to Restate, which ends what an attempt left open.
+   */
+  async inSpan<T>(name: string, fn: () => Promise<T>, output?: (value: T) => Uint8Array | undefined): Promise<T> {
+    if (this.ended !== undefined) return fn();
+    let span: number;
+    try {
+      span = this.act((vm) => vm.spanStart(name, this.span.getStore()));
+    } catch {
+      return fn();
+    }
+    let value: T;
+    try {
+      value = await this.span.run(span, fn);
+    } catch (error) {
+      this.tell((vm) =>
+        vm.spanEnd(span, null, {
+          code: (error as { code?: number }).code ?? 500,
+          message: error instanceof Error ? error.message : String(error),
+          metadata: [],
+        }),
+      );
+      throw error;
+    }
+    this.tell((vm) => vm.spanEnd(span, output?.(value) ?? null, null));
+    return value;
   }
 
   // --- Keeping an attempt at work alive
@@ -684,6 +861,8 @@ export class AttemptDriver {
       idempotencyKey: input.idempotencyKey,
       scope: input.scope,
       limitKey: input.limitKey,
+      // The number of this attempt, from 1: a field of this package's own.
+      attempt: input.attempt,
       attemptCompletedSignal: this.aborter.signal,
     } as unknown as restate.Request;
   }

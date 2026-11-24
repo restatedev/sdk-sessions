@@ -26,23 +26,26 @@
 //! one that waits for the store goes on in the runtime as one task that
 //! settles the promise it returns. The caller `await`s either.
 use crate::call::answer;
-use crate::vm::{Vm, VmInner};
+use crate::vm::{Vm, VmInner, VmTarget, Waited, invoke_at, span_of};
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::{JsValue, sys};
 use napi_derive::napi;
-use restate_sdk_shared_core::explicit_recovery::ExplicitRecoveryVM;
+use restate_sdk_shared_core::explicit_recovery::commit::{ATOMIC_GROUP_BUDGET, begin_commit};
+use restate_sdk_shared_core::explicit_recovery::{
+    ActionOptions, ExplicitRecoveryVM, RecordLevel, SpanId, StateScope,
+};
 use restate_sdk_shared_core::sql::{self, Numeric, Value};
 use restate_sdk_shared_core::state::{
     self, KvStore, ObjectStoreL1, PageCache, PageCacheConfig, StateOptions,
 };
-use restate_sdk_shared_core::{NotificationHandle, Value as VmValue};
+use restate_sdk_shared_core::{NotificationHandle, Target, Value as VmValue};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// What a request to the store does: the store's method it calls.
@@ -229,43 +232,75 @@ impl KvStore for JsQueue {
     }
 }
 
-/// The VM a store's command acts on, and what issuing one answers.
+/// The VM a store's action acts on, and what issuing one answers.
 type CoreVm = restate_sdk_shared_core::explicit_recovery::CoreExplicitRecoveryVM;
 type VmResult = std::result::Result<NotificationHandle, restate_sdk_shared_core::Error>;
-/// The ack of a write that asked for one.
-type Acked = futures::channel::oneshot::Receiver<
-    std::result::Result<VmValue, restate_sdk_shared_core::Error>,
->;
 
-/// The state key a sync clears with an ack, under the prefix tooling hides.
-const SYNC_KEY: &str = "v22/sync";
-/// The name the listing of the keys is given, under the same prefix.
-const KEYS_NAME: &str = "v22/keys";
+/// The options of the store's actions: recorded as nothing, so that the
+/// runtime keeps no record of the database's pages (what tooling hid by name
+/// before).
+fn page() -> ActionOptions {
+    ActionOptions::default().recorded(RecordLevel::None)
+}
+
+/// A send a committing transaction made (`tx.send`), which commits with it:
+/// inside the commit's atomic group, after its writes.
+struct GroupSend {
+    target: Target,
+    input: Bytes,
+    delay: Option<i64>,
+    options: ActionOptions,
+}
+
+/// What a commit in flight commits with, beside its writes: the
+/// transaction's sends, and the span the commit is inside of.
+#[derive(Default)]
+struct WithCommit {
+    sends: Vec<GroupSend>,
+    parent_span: Option<SpanId>,
+}
+
+impl WithCommit {
+    /// The options of the commit's group: named `commit`, inside the span.
+    fn group_options(&self) -> ActionOptions {
+        let options = ActionOptions::named("commit");
+        match self.parent_span {
+            Some(span) => options.inside(span),
+            None => options,
+        }
+    }
+}
 
 /// The store of a session's database over the attempt's VM ([`crate::vm`]):
-/// its reads, writes, listing and acks are the VM's commands, awaited here in
-/// Rust, so none of them reaches JavaScript.
+/// its reads, writes, flushes and listing of the keys are the VM's actions,
+/// all recorded as nothing ([`RecordLevel::None`]), and their results are
+/// awaited here in Rust, so none of them reaches JavaScript.
 ///
-/// JavaScript is still called at one point: a committing transaction's sends,
-/// which it makes between the commit's write of the head and the wait for that
-/// write's ack. That is the store's `sync`, which `src/database.ts` wraps to
-/// run what the transaction gave `withCommit`.
+/// A commit ([`KvStore::commit`]) is one atomic group, built in one critical
+/// section of the VM: what exceeds [`ATOMIC_GROUP_BUDGET`] leaves first as
+/// plain writes, then the group opens with the rest, the deletes and the head
+/// ([`begin_commit`]); the committing transaction's sends follow, inside it
+/// ([`Database::commit`] hands them over); the group closes, named `commit`,
+/// or is aborted on any error. Only then does the store wait, for the group's
+/// result: the commit. A sync with writes since the last result (garbage
+/// collection) is a flush.
 struct VmStore {
     vm: Arc<Mutex<VmInner>>,
-    /// The commit hook: the store's `sync`, on JavaScript's thread.
-    dispatch: Dispatch,
     /// The database beside the object's own, if this is one: its keys are
     /// named apart (see `beside` in `src/session.ts`).
     name: Option<String>,
     /// A view: it reads beside the owner and writes nothing.
     reader: bool,
-    /// The writes issued, and how many of them an ack covers.
+    /// The writes issued (a commit counts one), and how many of them a result covers.
     issued: AtomicU64,
     synced: AtomicU64,
-    /// Whether the commit in flight has work for JavaScript to run at its sync
-    /// (`withCommit`): set by `Database::commit`, which JavaScript tells. A
-    /// commit with none skips the hop, which would only run an empty function.
-    hook: AtomicBool,
+    /// What the commit in flight commits with: set by [`Database::commit`].
+    with_commit: Mutex<Option<WithCommit>>,
+}
+
+/// An error of the VM as the store's.
+fn vm_io(error: restate_sdk_shared_core::Error) -> io::Error {
+    io_error(error)
 }
 
 impl VmStore {
@@ -292,32 +327,11 @@ impl VmStore {
             .map(|rest| format!("{}{rest}", &key[..at]))
     }
 
-    /// The notification of the command `act` issues. Issuing it and waiting
+    /// The notification of the action `act` issues. Issuing it and waiting
     /// for it are one critical section (see [`Vm::issue_and_wait`]).
     async fn wait(&self, act: impl FnOnce(&mut CoreVm) -> VmResult) -> io::Result<VmValue> {
-        let receiver = Vm::issue_and_wait(&self.vm, act).map_err(io_error)?;
-        match receiver.await {
-            Ok(Ok(value)) => Ok(value),
-            Ok(Err(error)) => Err(io_error(error)),
-            Err(_) => Err(io_error("the attempt ended")),
-        }
-    }
-
-    /// Issue a write that asks for no ack; its count, for the sync that covers
-    /// it. The VM answers such a write at once, and nothing waits for that
-    /// answer, so it is dropped here rather than crossing into JavaScript.
-    fn write(&self, act: impl FnOnce(&mut CoreVm) -> VmResult) -> io::Result<u64> {
-        self.writable()?;
-        Vm::issue_and_discard(&self.vm, act).map_err(io_error)?;
-        Ok(self.issued.fetch_add(1, Ordering::SeqCst) + 1)
-    }
-
-    /// Issue a write that asks to be acked: its count, and the ack to await.
-    /// The waiter is registered with the command, under one lock.
-    fn write_acked(&self, act: impl FnOnce(&mut CoreVm) -> VmResult) -> io::Result<(u64, Acked)> {
-        self.writable()?;
-        let receiver = Vm::issue_and_wait(&self.vm, act).map_err(io_error)?;
-        Ok((self.issued.fetch_add(1, Ordering::SeqCst) + 1, receiver))
+        let receiver = Vm::issue_and_wait(&self.vm, act).map_err(vm_io)?;
+        received(receiver).await
     }
 
     fn writable(&self) -> io::Result<()> {
@@ -327,30 +341,116 @@ impl VmStore {
         }
     }
 
-    /// Wait for the ack of the write `issued`: every write up to it is stored
-    /// when it comes, since Restate acks a write only after those before it.
-    async fn stored(&self, issued: u64, acked: Acked) -> io::Result<()> {
-        match acked.await {
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => return Err(io_error(error)),
-            Err(_) => return Err(io_error("the attempt ended")),
-        }
+    /// Issue a write that wants no result; counted, for the sync that covers it.
+    fn write(
+        &self,
+        act: impl FnOnce(
+            &mut CoreVm,
+        ) -> std::result::Result<
+            Option<NotificationHandle>,
+            restate_sdk_shared_core::Error,
+        >,
+    ) -> io::Result<()> {
+        self.writable()?;
+        Vm::act(&self.vm, |vm| act(&mut vm.vm)).map_err(vm_io)?;
+        self.issued.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// What the commit in flight commits with, taken: nothing if it has none.
+    fn take_with_commit(&self) -> Option<WithCommit> {
+        self.with_commit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
+    /// The commit's synchronous section (see [`VmStore`]): its count, and the
+    /// result of its group to await.
+    fn begin(
+        &self,
+        puts: Vec<(String, Bytes)>,
+        deletes: &[String],
+        head_key: &str,
+        head: Bytes,
+    ) -> io::Result<(u64, Waited)> {
+        self.writable()?;
+        let puts: Vec<_> = puts.into_iter().map(|(k, v)| (self.key(&k), v)).collect();
+        let deletes: Vec<_> = deletes.iter().map(|k| self.key(k)).collect();
+        let head_key = self.key(head_key);
+        let with = self.take_with_commit().unwrap_or_default();
+        let waited = Vm::act(&self.vm, |vm| {
+            // On an error the attempt failed: the VM wrote why, and holds no group.
+            begin_commit(
+                &mut vm.vm,
+                StateScope::Object,
+                puts,
+                &deletes,
+                &head_key,
+                head,
+                ATOMIC_GROUP_BUDGET,
+            )?;
+            close_group(vm, with)
+        })
+        .map_err(vm_io)?;
+        Ok((self.issued.fetch_add(1, Ordering::SeqCst) + 1, waited))
+    }
+
+    /// Wait for `waited`, which covers every write issued up to `issued`.
+    async fn stored(&self, issued: u64, waited: Waited) -> io::Result<()> {
+        received(waited).await?;
         self.synced.fetch_max(issued, Ordering::SeqCst);
         Ok(())
     }
 
-    /// What a commit runs on JavaScript before it waits for its ack: the
-    /// committing transaction's sends.
-    async fn committing(&self) -> io::Result<()> {
-        if !self.hook.load(Ordering::SeqCst) {
+    /// The sends of a transaction whose commit wrote nothing, in an atomic
+    /// group of their own, named `commit`: resolves once it is applied.
+    async fn commit_alone(&self, with: WithCommit) -> io::Result<()> {
+        if with.sends.is_empty() {
             return Ok(());
         }
-        let promise = self
-            .dispatch
-            .call_async_catch((Op::Sync as u32, String::new(), None).into())
-            .await
-            .map_err(io_error)?;
-        promise.await.map_err(io_error).map(drop)
+        self.writable()?;
+        let waited = Vm::act(&self.vm, |vm| {
+            vm.vm.atomic_group_start()?;
+            close_group(vm, with)
+        })
+        .map_err(vm_io)?;
+        received(waited).await.map(drop)
+    }
+}
+
+/// Add `with`'s sends to the open group and close it, wanting its result: the
+/// waiter of that result. On an error the group is aborted, and its actions'
+/// handles never notified.
+fn close_group(
+    vm: &mut VmInner,
+    with: WithCommit,
+) -> std::result::Result<Waited, restate_sdk_shared_core::Error> {
+    let options = with.group_options();
+    let added = with.sends.into_iter().try_for_each(|send| {
+        vm.vm
+            .cmd_send(send.target, send.input, invoke_at(send.delay), send.options)
+            .map(drop)
+    });
+    let ended = added.and_then(|()| vm.vm.atomic_group_end(options, true));
+    match ended {
+        Ok(Some(handle)) => Ok(vm.wait_in_rust(handle)),
+        Ok(None) => unreachable!("an atomic group's result is wanted"),
+        Err(error) => {
+            if let Ok(handles) = vm.vm.atomic_group_abort() {
+                vm.forget(handles);
+            }
+            Err(error)
+        }
+    }
+}
+
+/// What a waiter of the VM received, as the store's result.
+async fn received(waited: Waited) -> io::Result<VmValue> {
+    match waited.await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => Err(io_error(error)),
+        Err(_) => Err(io_error("the attempt ended")),
     }
 }
 
@@ -359,7 +459,7 @@ impl KvStore for VmStore {
         Box::pin(async move {
             let key = self.key(key);
             match self
-                .wait(|vm| vm.cmd_state_get(key.clone(), Some(key)))
+                .wait(|vm| vm.cmd_state_get(StateScope::Object, key, page()))
                 .await?
             {
                 VmValue::Success(value) => Ok(Some(value)),
@@ -372,27 +472,26 @@ impl KvStore for VmStore {
 
     fn put(&self, key: &str, value: Bytes) -> io::Result<()> {
         let key = self.key(key);
-        self.write(|vm| vm.cmd_state_set(key.clone(), value, Some(key), false))
-            .map(drop)
+        self.write(|vm| vm.cmd_state_set(StateScope::Object, key, value, page(), false))
     }
 
     fn delete(&self, key: &str) -> io::Result<()> {
         let key = self.key(key);
-        self.write(|vm| vm.cmd_state_clear(key.clone(), Some(key), false))
-            .map(drop)
+        self.write(|vm| vm.cmd_state_clear(StateScope::Object, key, page(), false))
     }
 
-    /// The head of a flush, written and synced in one: Restate acks a write
-    /// only once the writes before it are stored, so its ack is the sync.
-    fn put_and_sync<'a>(&'a self, key: &'a str, value: Bytes) -> BoxFuture<'a, io::Result<()>> {
-        let named = self.key(key);
-        // Issued now, as a put is.
-        let written =
-            self.write_acked(|vm| vm.cmd_state_set(named.clone(), value, Some(named), true));
+    fn commit<'a>(
+        &'a self,
+        puts: Vec<(String, Bytes)>,
+        deletes: &'a [String],
+        head_key: &'a str,
+        head: Bytes,
+    ) -> BoxFuture<'a, io::Result<()>> {
+        // Issued now, before the first await, as a put is.
+        let begun = self.begin(puts, deletes, head_key, head);
         Box::pin(async move {
-            let (issued, acked) = written?;
-            self.committing().await?;
-            self.stored(issued, acked).await
+            let (issued, waited) = begun?;
+            self.stored(issued, waited).await
         })
     }
 
@@ -402,15 +501,12 @@ impl KvStore for VmStore {
                 // A view wrote nothing to sync.
                 return Ok(());
             }
-            if self.synced.load(Ordering::SeqCst) == self.issued.load(Ordering::SeqCst) {
-                // Nothing new to store: only what the commit itself makes.
-                return self.committing().await;
+            let issued = self.issued.load(Ordering::SeqCst);
+            if self.synced.load(Ordering::SeqCst) == issued {
+                return Ok(());
             }
-            let key = self.key(SYNC_KEY);
-            let (issued, acked) =
-                self.write_acked(|vm| vm.cmd_state_clear(key.clone(), Some(key), true))?;
-            self.committing().await?;
-            self.stored(issued, acked).await
+            let waited = Vm::issue_and_wait(&self.vm, |vm| vm.cmd_flush(page())).map_err(vm_io)?;
+            self.stored(issued, waited).await
         })
     }
 
@@ -422,9 +518,8 @@ impl KvStore for VmStore {
                     "a view lists no keys",
                 ));
             }
-            // Named under the state format's prefix, which tooling hides.
             let keys = match self
-                .wait(|vm| vm.cmd_state_get_keys(Some(KEYS_NAME.to_owned())))
+                .wait(|vm| vm.cmd_state_get_keys(StateScope::Object, page()))
                 .await?
             {
                 VmValue::StateKeys(keys) => keys,
@@ -439,6 +534,49 @@ impl KvStore for VmStore {
     }
 }
 
+/// A send of a committing transaction, as JavaScript hands it over: made
+/// inside the commit's atomic group (see [`VmStore`]).
+#[napi(object)]
+pub struct VmGroupSend {
+    pub target: VmTarget,
+    pub input: Uint8Array,
+    /// In milliseconds.
+    pub delay: Option<i64>,
+    pub name: Option<String>,
+}
+
+/// What a commit on the VM commits with beside its writes: the transaction's
+/// sends, and the span its group is inside of.
+#[napi(object)]
+pub struct VmCommit {
+    pub sends: Vec<VmGroupSend>,
+    pub parent_span: Option<u32>,
+}
+
+impl VmCommit {
+    fn made(self) -> Result<WithCommit> {
+        let parent_span = self.parent_span.map(span_of).transpose()?;
+        let sends = self
+            .sends
+            .into_iter()
+            .map(|send| {
+                let mut options = ActionOptions::default();
+                options.name = send.name;
+                if let Some(span) = parent_span {
+                    options = options.inside(span);
+                }
+                GroupSend {
+                    target: send.target.into(),
+                    input: Bytes::copy_from_slice(&send.input),
+                    delay: send.delay,
+                    options,
+                }
+            })
+            .collect();
+        Ok(WithCommit { sends, parent_span })
+    }
+}
+
 /// A failure of the database as JavaScript gets it: one a retry would repeat
 /// ([`sql::Refused`]) has the code `InvalidArg`, which `src/database.ts`
 /// tells apart, as it may have ended the session.
@@ -446,19 +584,6 @@ fn error(error: Box<dyn std::error::Error + Send + Sync>) -> Error {
     match error.is::<sql::Refused>() {
         true => Error::new(Status::InvalidArg, error.to_string()),
         false => Error::from_reason(error.to_string()),
-    }
-}
-
-/// Sets the hook of a VM's store back to `true` (the hop is made) when it is
-/// dropped: as the commit it was set for ends, however it ends, even if the
-/// call panics or is dropped without running.
-struct HookReset(Option<Arc<VmStore>>);
-
-impl Drop for HookReset {
-    fn drop(&mut self) {
-        if let Some(store) = &self.0 {
-            store.hook.store(true, Ordering::SeqCst);
-        }
     }
 }
 
@@ -574,29 +699,26 @@ fn object_store() -> io::Result<Option<ObjectStoreL1>> {
 }
 
 /// Open the database of `namespace` over the attempt's VM: its state is read
-/// and written as the VM's commands ([`VmStore`]), and `store` is called only
-/// at a commit, through its `sync`, to make the committing transaction's
-/// sends. `name` names a database beside the object's own.
+/// and written as the VM's actions ([`VmStore`]), and nothing of it crosses
+/// into JavaScript. `name` names a database beside the object's own.
 #[napi(
-    ts_args_type = "namespace: string, store: Store, vm: Vm, name?: string, reader?: boolean",
+    ts_args_type = "namespace: string, vm: Vm, name?: string, reader?: boolean",
     ts_return_type = "Promise<Database>"
 )]
 pub(crate) fn open_on_vm<'env>(
     env: &'env Env,
     namespace: String,
-    store: Object<'env>,
     vm: &Vm,
     name: Option<String>,
     reader: Option<bool>,
 ) -> Result<PromiseRaw<'env, Database>> {
     let store = Arc::new(VmStore {
         vm: vm.inner(),
-        dispatch: dispatcher(env, store)?,
         name,
         reader: reader == Some(true),
         issued: AtomicU64::new(0),
         synced: AtomicU64::new(0),
-        hook: AtomicBool::new(true),
+        with_commit: Mutex::new(None),
     });
     open_with(env, namespace, store.clone(), Some(store), reader)
 }
@@ -704,33 +826,44 @@ impl Database {
 
     /// See [`sql::Database::commit`]: `records` by name.
     ///
-    /// On the VM, `with_commit` says whether the committing transaction gave
-    /// `withCommit` work: without it (`false`) the commit does not call
-    /// JavaScript at its sync. Absent, it does.
+    /// On the VM, `withCommit` is what commits with the transaction: its
+    /// sends, made inside the commit's atomic group after its writes, and the
+    /// span the group is inside of. A commit that writes nothing makes its
+    /// sends in a group of their own, and resolves once that is applied.
     #[napi(
-        ts_args_type = "records?: Record<string, Buffer>, withCommit?: boolean",
+        ts_args_type = "records?: Record<string, Buffer>, withCommit?: VmCommit",
         ts_return_type = "Answer<void>"
     )]
     pub fn commit<'env>(
         &self,
         env: &'env Env,
         records: Option<HashMap<String, Buffer>>,
-        with_commit: Option<bool>,
+        with_commit: Option<VmCommit>,
     ) -> Result<Either<(), PromiseRaw<'env, ()>>> {
         let records: Vec<_> = (records.unwrap_or_default().into_iter())
             .map(|(name, value)| (name, Bytes::copy_from_slice(&value)))
             .collect();
+        let with_commit = with_commit.map(VmCommit::made).transpose()?;
         let db = self.0.clone();
         let vm_store = self.1.clone();
         if let Some(store) = &vm_store {
-            store
-                .hook
-                .store(with_commit != Some(false), Ordering::SeqCst);
+            *store
+                .with_commit
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = with_commit;
         }
-        let reset = HookReset(vm_store);
         answer(env, async move {
-            let _reset = reset;
-            db.commit(records).await.map_err(error)
+            let committed = db.commit(records).await.map_err(error);
+            // What the commit did not take: it wrote nothing, or it failed.
+            let left = vm_store.as_ref().and_then(|store| store.take_with_commit());
+            committed?;
+            if let (Some(store), Some(left)) = (&vm_store, left) {
+                store
+                    .commit_alone(left)
+                    .await
+                    .map_err(|e| Error::from_reason(e.to_string()))?;
+            }
+            Ok(())
         })
     }
 

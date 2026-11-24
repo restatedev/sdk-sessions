@@ -24,6 +24,7 @@ import { patchEndpoint } from './endpoint.ts';
 import { Link } from './link.ts';
 import { holding, Scope, scopeOf } from './scope.ts';
 import { type Database, Attempt, type ObjectConfig, type SqlHost, withAttempt } from './session.ts';
+import type { AttemptDriver } from './driver.ts';
 
 /**
  * The context of a session object's handler. A handler runs in attempts:
@@ -122,19 +123,12 @@ export const HEAD_KEY = 'v22/head';
 export const sqlOptions = { state: { preload: [HEAD_KEY] } } satisfies restate.ObjectOptions;
 
 /**
- * The metadata every session object has: Restate's UI hides the database
- * from the journal view (its head, tail, manifests and packs in the object's
- * state, `v22/...`; and the `sync` runs after its writes).
+ * Marks a session object's definition for discovery: its handlers are on the
+ * explicit recovery protocol (`protocolFamily` in manifest v6, `endpoint.ts`).
+ * The database's actions are recorded as nothing, so Restate's UI shows none
+ * of its pages, and nothing has to hide them by name.
  */
-export const sqlMetadata = {
-  'dev.restate.tooling.journal.hidden.names': 'sync',
-  'dev.restate.tooling.journal.hidden.name.prefix': 'v22/',
-};
-
-// The handler options of every handler: explicit recovery, which runs a
-// retried attempt from the start, since a later attempt makes different
-// reads than a replayed journal would have.
-export const recovery = () => restate.internal.explicitRecovery();
+export const PROTOCOL_FAMILY = 'EXPLICIT_RECOVERY';
 
 /** The SDK's runtime context, as far as the session needs it beyond its public type. */
 type Runtime = { invocationEndPromise: SqlHost['invocationEndPromise']; defaultSerde: SqlHost['defaultSerde'] };
@@ -167,6 +161,7 @@ export function host(
     vm: (ctx as { vm?: SqlHost['vm'] }).vm,
     takeCancellation: (ctx as { takeCancellation?: SqlHost['takeCancellation'] }).takeCancellation,
     working: workingOf(ctx),
+    ...spansOf(ctx),
     genericSend: (send) => ctx.genericSend(send),
   };
 }
@@ -295,6 +290,16 @@ export function contextOf(
 /** The `working` of an attempt on the VM's context `ctx` (`handler.ts`); none on the SDK's. */
 const workingOf = (ctx: object): Working | undefined => (ctx as { working?: Working }).working;
 
+/** The attempt's driver behind the VM's context `ctx` (`handler.ts`); none on a test's. */
+const driverOf = (ctx: object): AttemptDriver | undefined => (ctx as { driver?: AttemptDriver }).driver;
+
+/** The spans of the VM's attempt behind `ctx`, as the session's host takes them; none on a test's. */
+function spansOf(ctx: object): Pick<SqlHost, 'span' | 'currentSpan'> {
+  const driver = driverOf(ctx);
+  if (driver === undefined) return {};
+  return { span: (name, fn) => driver.inSpan(name, fn), currentSpan: () => driver.currentSpan };
+}
+
 /** {@link Cancel} over the SDK's context `ctx`. */
 const cancelOf =
   (ctx: Pick<restate.ObjectContext, 'invocation'>): Cancel =>
@@ -370,7 +375,7 @@ function handlerOf(objectName: string, name: string, entry: unknown, view: boole
         'Put journaled work in a restate.object, service or workflow, and call it with ctx.rpc',
     );
   }
-  const opts = { ...options, ...recovery() } as HandlerOptions;
+  const opts = { ...options } as HandlerOptions;
   const explicit = (options as HandlerOptions).explicitCancellation === true;
   const serdes = options as {
     input?: Serde<unknown>;
@@ -448,7 +453,7 @@ export function sessionObject<
     name,
     description,
     handlers: sdkHandlers,
-    metadata: { ...sqlMetadata, ...metadata },
+    ...(metadata !== undefined ? { metadata } : {}),
     options: { ...sqlOptions, ...options },
   });
   object.definition = made;
@@ -544,3 +549,78 @@ export const cancelled = async (ctx: SessionContext): Promise<void> => {
 export const cancelCalls = async (ctx: SessionContext): Promise<void> => {
   await explicitOf(ctx, 'cancelCalls').cancelPreviousCalls();
 };
+
+// --- What the explicit recovery protocol adds, for libraries (provisional:
+// the user-facing shape is still to design). Each works from a handler's or a
+// view's context of an attempt on the VM, and throws a TerminalError from any
+// other.
+
+/** The VM's driver of the attempt whose context `ctx` is. */
+function driverOfContext(ctx: SessionContext | ViewContext, of: string): AttemptDriver {
+  const driver = driverOf(scopeOfHandler(ctx as SessionContext, of).sdk);
+  if (driver === undefined) throw new restate.TerminalError(`${of} takes the context of an attempt served by Restate`);
+  return driver;
+}
+
+/**
+ * The invocation's own state: every attempt of the invocation finds it, no
+ * other invocation does, and it ends with the invocation. Bytes only. For
+ * progress a handler must find again on its next attempt (what it already
+ * did), apart from the object's database.
+ */
+export interface InvocationState {
+  get(key: string): Promise<Uint8Array | null>;
+  set(key: string, value: Uint8Array): void;
+  clear(key: string): void;
+  clearAll(): void;
+  keys(): Promise<string[]>;
+}
+
+/** The invocation state of the invocation whose context `ctx` is: see {@link InvocationState}. */
+export function invocationState(ctx: SessionContext | ViewContext): InvocationState {
+  const driver = driverOfContext(ctx, 'invocationState');
+  return {
+    get: (key) => driver.stateGet('invocation', key),
+    set: (key, value) => driver.stateSet('invocation', key, value),
+    clear: (key) => driver.stateClear('invocation', key),
+    clearAll: () => driver.stateClearAll('invocation'),
+    keys: () => driver.stateKeys('invocation'),
+  };
+}
+
+/**
+ * The `index`-th signal named `name` (from 0) the invocation of `ctx`
+ * received: its payload, `null` if it carries nothing, or a TerminalError if
+ * it carries a failure. It waits for it: an attempt shut down meanwhile
+ * suspends, and the signal's arrival wakes the invocation. The caller keeps
+ * the index. A signal is sent through Restate's admin API
+ * (`POST /invocations/<id>/signals/<name>`) or {@link sendSignal}.
+ */
+export function readSignal(ctx: SessionContext | ViewContext, name: string, index = 0): Promise<Uint8Array | null> {
+  return driverOfContext(ctx, 'readSignal').signalRead(name, index);
+}
+
+/** Send the signal `name` to invocation `invocationId`, with `value`, a failure, or nothing. */
+export function sendSignal(
+  ctx: SessionContext | ViewContext,
+  invocationId: string,
+  name: string,
+  value?: Uint8Array | restate.TerminalError,
+): void {
+  driverOfContext(ctx, 'sendSignal').signalSend(invocationId, name, value);
+}
+
+/** Resolves once every action the attempt of `ctx` made before it is applied by Restate. */
+export function flush(ctx: SessionContext | ViewContext): Promise<void> {
+  return driverOfContext(ctx, 'flush').flushActions();
+}
+
+/**
+ * Run `fn` inside a span `name`, shown in Restate's UI: the calls, sends and
+ * commits it makes are nested under it. It ends with `fn`, with its failure if
+ * it throws. On an attempt not served by Restate (a test's), just `fn`.
+ */
+export function span<T>(ctx: SessionContext | ViewContext, name: string, fn: () => Promise<T>): Promise<T> {
+  const driver = driverOf(scopeOfHandler(ctx as SessionContext, 'span').sdk);
+  return driver === undefined ? fn() : driver.inSpan(name, fn);
+}

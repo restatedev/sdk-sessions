@@ -48,8 +48,10 @@ A body may set _records_ with its transaction, whole values by name kept
 beside the SQL, in no table: `tx.setRecord(name, bytes)` puts one in the same
 tail entry, so it is stored exactly when the transaction is, even if it
 changes no row, and stays until a later transaction sets it again.
-`record(name)` returns it. The SDK keeps a transaction's sends in the record
-`outbox`, and makes them once it commits.
+`record(name)` returns it. On the attempt's VM a commit is one atomic group
+of the explicit recovery protocol: the tail entry, the head, and the sends
+the transaction made (`Database.commit`'s `withCommit`), applied together or
+not at all.
 
 A page cache shared by the process's databases is built in: 256 MiB of memory
 and 1 GiB of disk in a temporary file, unlinked once open so that it goes away
@@ -114,7 +116,7 @@ Three layers, each knowing only the one below it. A change stays private to
 the database until a call commits it, and the state's flush makes it durable.
 
 ```
-host       @restatedev/sessions (TypeScript): ctx.db, transaction(), the outbox
+host       @restatedev/sessions (TypeScript): ctx.db, transaction(), its sends
                │
                ▼
 database   Database: SQL on a private view of one file; each call that
@@ -143,8 +145,8 @@ flush's outcome is unknown, so the host settles outstanding requests and
 opens a new one, reading whatever head last landed.
 
 **Records.** `commit(records)` stores the records with the rows, in the same
-flush: what the host keeps beside the SQL, such as the sends committed with
-the rows (the outbox), opaque to the storage.
+flush: what the host keeps beside the SQL (the schemas applied, say),
+opaque to the storage.
 
 The storage and the SQL on it live in
 [sdk-shared-core](https://github.com/restatedev/sdk-shared-core), as its

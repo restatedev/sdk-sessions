@@ -1,44 +1,45 @@
-//! The VM of a session object's attempt: shared-core's [`CoreExplicitRecoveryVM`],
-//! which never replays a journal.
+//! The VM of a session object's attempt, on the explicit recovery protocol
+//! (version 1): shared-core's [`CoreExplicitRecoveryVM`], which has no journal.
 //!
 //! Every attempt runs the handler from the start, and recovers from the state
 //! the earlier attempts stored. An action returns a handle, and its result
 //! comes back as a notification of that handle ([`Vm::take_notification`]):
-//! `src/driver.ts` settles its promises with them. There is no `do_progress`,
-//! so a handler awaits what it likes, with its own combinators, and nothing
-//! has to fake a single await point (see the selector this replaces).
+//! `src/driver.ts` settles its promises with them, in its tick, which is the
+//! only place notifications are taken. Taking one is processing it: it counts
+//! in the `ShutdownMessage` the VM writes when the runtime shuts the attempt
+//! down, so nothing takes one to keep it for later.
 //!
-//! The database's store awaits its own handles here, in Rust
-//! ([`Vm::issue_and_wait`]): its reads, its acked writes and its listing of the
-//! keys never reach JavaScript. Every other notification is queued for it.
+//! The database's store awaits some handles from Rust (its reads, its
+//! commits, its flushes and its listing of the keys): it registers a waiter
+//! for the handle ([`Vm::issue_and_wait`]), and the tick hands it the
+//! notification as it takes it. Issuing the action and registering the
+//! waiter are one critical section, so that no tick takes the notification
+//! in between.
 //!
-//! Issuing a command and registering the waiter for its handle are one
-//! critical section. They have to be: a notification that is ready at once —
-//! an eager read, a write that asks for no ack — would otherwise be routed to
-//! JavaScript by a tick in between, and the waiter would hang forever.
-//! sdk-python needs no such care, because the GIL does not let its tick run
-//! between the two.
+//! The cancel signal comes on the reserved handle 1
+//! ([`CANCEL_NOTIFICATION_HANDLE`]), which no action has: after it,
+//! `is_cancelled()` is true.
 //!
 //! The VM is [`Send`] but not `Sync`, and it lives behind a [`Mutex`], since
 //! two threads reach it: JavaScript's, which ticks it, and the runtime's,
 //! where a database call that waits for the store goes on (see
 //! `node::answer`). A call from the runtime's thread then asks JavaScript to
 //! tick, through [`Vm::set_scheduler`], so that what it wrote is flushed and
-//! what it waits for can be answered.
+//! what it waits for is handed to it.
 use bytes::Bytes;
 use futures::channel::oneshot;
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
 use restate_sdk_shared_core::explicit_recovery::{
-    AttemptState, CoreExplicitRecoveryVM, ExplicitRecoveryVM, Notification, TraceId,
-    request_response_unsupported,
+    ActionOptions, AttemptState, CANCEL_NOTIFICATION_HANDLE, CoreExplicitRecoveryVM,
+    ExplicitRecoveryVM, Notification, Options, ProtocolVersion, RecordLevel, SpanId, StateScope,
 };
 use restate_sdk_shared_core::{
     AttachInvocationTarget, Error, Header, NonEmptyValue, NotificationHandle, Target,
     TerminalFailure, Value,
 };
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
@@ -120,6 +121,8 @@ pub struct VmInput {
     pub scope: Option<String>,
     pub limit_key: Option<String>,
     pub idempotency_key: Option<String>,
+    /// The number of this attempt: 1 for the first.
+    pub attempt: u32,
 }
 
 /// The handles of a call: its invocation id, and its result.
@@ -129,9 +132,49 @@ pub struct VmCallHandle {
     pub result: u32,
 }
 
+/// How an action appears in the runtime's record of the attempt: its display
+/// name, the span it is inside of, and how much is recorded (`"default"`,
+/// `"none"`, `"summary"` or `"full"`). None of it changes what it does.
+#[napi(object)]
+#[derive(Default)]
+pub struct VmActionOptions {
+    pub name: Option<String>,
+    pub parent_span: Option<u32>,
+    pub record: Option<String>,
+}
+
+/// The target of a call or a send.
+#[napi(object)]
+pub struct VmTarget {
+    pub service: String,
+    pub handler: String,
+    pub key: Option<String>,
+    pub idempotency_key: Option<String>,
+    pub headers: Option<Vec<VmHeader>>,
+}
+
+impl From<VmTarget> for Target {
+    fn from(target: VmTarget) -> Self {
+        Target {
+            service: target.service,
+            handler: target.handler,
+            key: target.key,
+            idempotency_key: target.idempotency_key,
+            scope: None,
+            limit_key: None,
+            headers: target
+                .headers
+                .unwrap_or_default()
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        }
+    }
+}
+
 /// A ready result, as JavaScript gets it. `kind` says which field holds it:
 /// `void` none, `success` `bytes`, `failure` `failure`, `stateKeys` `keys`,
-/// and `invocationId` `id`.
+/// and `invocationId` `id`. Handle 1 is the cancel signal (`void`).
 #[napi(object)]
 pub struct VmNotification {
     pub handle: u32,
@@ -178,17 +221,18 @@ pub(crate) type Scheduler = ThreadsafeFunction<(), (), (), Status, false, true>;
 
 /// Where Rust waits for the notification of a handle (the database's store).
 pub(crate) type RustWaiter = oneshot::Sender<std::result::Result<Value, Error>>;
+/// What such a waiter receives.
+pub(crate) type Waited = oneshot::Receiver<std::result::Result<Value, Error>>;
 
-/// The VM, the handles Rust waits for, and the notifications queued for JavaScript.
+/// The VM, the handles Rust waits for, and the handles that will never be notified.
 pub(crate) struct VmInner {
     pub(crate) vm: CoreExplicitRecoveryVM,
     rust_waiters: HashMap<NotificationHandle, RustWaiter>,
-    /// Handles whose notification nothing waits for: the database's writes
-    /// that asked for no ack, which the VM answers at once. Queueing them for
-    /// JavaScript would cost a call across the addon and an object for each,
-    /// only to drop them.
-    discarded: HashSet<NotificationHandle>,
-    for_js: VecDeque<Notification>,
+    /// Why the attempt ended, once the tick found out: every later waiter gets it at once.
+    ended: Option<Error>,
+    /// The handles of aborted atomic groups' actions, which will never be
+    /// notified: JavaScript fails what waits for them ([`Vm::take_aborted`]).
+    aborted: Vec<NotificationHandle>,
     scheduler: Option<Arc<Scheduler>>,
     /// Whether a tick is already asked for: one is enough until it runs, and
     /// a commit's writes would otherwise each wake JavaScript's thread.
@@ -196,53 +240,47 @@ pub(crate) struct VmInner {
 }
 
 impl VmInner {
-    /// Take every notification the VM has ready, handing Rust's to their
-    /// waiters and queueing the rest for JavaScript. Once the attempt is
-    /// closed with an error, every waiter fails: with the attempt's end if
-    /// Restate shut it down, with the error otherwise.
-    fn route(&mut self) -> std::result::Result<(), Error> {
-        loop {
-            match self.vm.take_next_notification() {
-                Ok(Some(notification)) => match self.rust_waiters.remove(&notification.handle) {
-                    Some(waiter) => {
-                        let _ = waiter.send(Ok(notification.value));
-                    }
-                    None => {
-                        if !self.discarded.remove(&notification.handle) {
-                            self.for_js.push_back(notification);
-                        }
-                    }
-                },
-                Ok(None) => return Ok(()),
-                Err(error) => {
-                    // What the driver's own awaits fail with: the attempt's
-                    // end if Restate shut it down, which `src/database.ts`
-                    // knows by this text, and otherwise why it failed. A
-                    // commit that a shutdown interrupts is then told apart
-                    // from an error of the handler's own, as a call is.
-                    let for_waiters = if error.is_suspended_error() {
-                        Error::new(
-                            restate_sdk_shared_core::error::codes::INTERNAL,
-                            ATTEMPT_OVER.to_owned(),
-                        )
-                    } else {
-                        error.clone()
-                    };
-                    for (_, waiter) in self.rust_waiters.drain() {
-                        let _ = waiter.send(Err(for_waiters.clone()));
-                    }
-                    return Err(error);
-                }
+    /// The notification of `handle`, for Rust: registered now, handed over by
+    /// the tick that takes it. Once the attempt is over, at once with why.
+    pub(crate) fn wait_in_rust(&mut self, handle: NotificationHandle) -> Waited {
+        let (sender, receiver) = oneshot::channel();
+        if let Some(error) = &self.ended {
+            let _ = sender.send(Err(error.clone()));
+        } else {
+            self.rust_waiters.insert(handle, sender);
+        }
+        receiver
+    }
+
+    /// Record handles that will never be notified (an aborted group's).
+    pub(crate) fn forget(&mut self, handles: Vec<NotificationHandle>) {
+        for handle in &handles {
+            if let Some(waiter) = self.rust_waiters.remove(handle) {
+                let _ = waiter.send(Err(Error::new(
+                    restate_sdk_shared_core::error::codes::INTERNAL,
+                    "the atomic group of this action was aborted",
+                )));
             }
         }
+        self.aborted.extend(handles);
+    }
+
+    /// The scheduler to call, if a tick is not already asked for.
+    pub(crate) fn wanted(&mut self) -> Option<Arc<Scheduler>> {
+        if self.asked_to_tick {
+            return None;
+        }
+        self.asked_to_tick = true;
+        self.scheduler.clone()
     }
 }
 
 /// Restate's signature on a request, as the SDK verifies it before dispatch.
 ///
-/// This package runs a session object's invocation ahead of that handler, so
-/// it verifies the signature itself: a deployment with identity keys, which
-/// every `connect` has, would otherwise go unchecked (`src/endpoint.ts`).
+/// This package serves a session object's invocations ahead of the SDK's
+/// handler, and its discovery, so it verifies the signature itself: a
+/// deployment with identity keys, which every `connect` has, would otherwise
+/// go unchecked (`src/endpoint.ts`).
 #[napi]
 pub struct Identity(restate_sdk_shared_core::IdentityVerifier);
 
@@ -272,18 +310,36 @@ impl Identity {
     }
 }
 
+/// The range of versions of the explicit recovery protocol the VM speaks, for
+/// discovery (`explicitRecoveryProtocol` in manifest v6): from the core.
+#[napi(object)]
+pub(crate) struct VmProtocolRange {
+    pub min_version: u32,
+    pub max_version: u32,
+}
+
+#[napi]
+pub(crate) fn explicit_recovery_protocol_range() -> VmProtocolRange {
+    VmProtocolRange {
+        min_version: ProtocolVersion::minimum_supported_version() as u32,
+        max_version: ProtocolVersion::maximum_supported_version() as u32,
+    }
+}
+
 /// The attempt's state machine, shared by JavaScript and the database's store.
 #[napi]
 pub struct Vm(pub(crate) Arc<Mutex<VmInner>>);
 
-/// What the database's store's pending reads and acks fail with when the
+/// What the database's store's pending reads and commits fail with when the
 /// attempt is over: Restate shut it down, or it failed. It crosses the addon
 /// as the text of an error, so `src/database.ts` matches it to give the
 /// handler the error of an attempt's end.
 pub(crate) const ATTEMPT_OVER: &str = "restate-sessions: the attempt is over";
 
-/// A VM error as JavaScript gets it. The attempt's shutdown carries the code
-/// `ATTEMPT_SHUT_DOWN`, which the driver tells apart from a failure.
+/// A VM error as JavaScript gets it. The attempt's shutdown carries the text
+/// `ATTEMPT_SHUT_DOWN`, which the driver tells apart from a failure; a VM the
+/// request is refused for carries `VM_REFUSED <code>:` (415 for a content
+/// type of another family or version), the status to answer with.
 fn vm_error(error: Error) -> Error_ {
     if error.is_suspended_error() {
         Error_::new(
@@ -298,25 +354,63 @@ fn vm_error(error: Error) -> Error_ {
 /// napi's error type, named so that shared-core's `Error` keeps its name here.
 type Error_ = napi::Error;
 
-fn target(
-    service: String,
-    handler: String,
-    key: Option<String>,
-    idempotency_key: Option<String>,
-    headers: Option<Vec<VmHeader>>,
-) -> Target {
-    Target {
-        service,
-        handler,
-        key,
-        idempotency_key,
-        scope: None,
-        limit_key: None,
-        headers: headers
-            .unwrap_or_default()
-            .into_iter()
-            .map(Into::into)
-            .collect(),
+fn scope_of(scope: &str) -> Result<StateScope> {
+    match scope {
+        "object" => Ok(StateScope::Object),
+        "invocation" => Ok(StateScope::Invocation),
+        other => Err(Error_::new(
+            Status::InvalidArg,
+            format!("a state scope is \"object\" or \"invocation\", not {other:?}"),
+        )),
+    }
+}
+
+fn record_of(record: Option<&str>) -> Result<RecordLevel> {
+    match record {
+        None | Some("default") => Ok(RecordLevel::Default),
+        Some("none") => Ok(RecordLevel::None),
+        Some("summary") => Ok(RecordLevel::Summary),
+        Some("full") => Ok(RecordLevel::Full),
+        Some(other) => Err(Error_::new(
+            Status::InvalidArg,
+            format!(
+                "a record level is \"default\", \"none\", \"summary\" or \"full\", not {other:?}"
+            ),
+        )),
+    }
+}
+
+pub(crate) fn span_of(span: u32) -> Result<SpanId> {
+    SpanId::try_from(span).map_err(|_| Error_::new(Status::InvalidArg, "a span id is never 0"))
+}
+
+/// The options of an action, from JavaScript's.
+pub(crate) fn options_of(options: Option<VmActionOptions>) -> Result<ActionOptions> {
+    let options = options.unwrap_or_default();
+    let mut made = ActionOptions::default().recorded(record_of(options.record.as_deref())?);
+    made.name = options.name;
+    if let Some(parent) = options.parent_span {
+        made = made.inside(span_of(parent)?);
+    }
+    Ok(made)
+}
+
+/// `invoke_at` from a delay in milliseconds: the time since the UNIX epoch at which to invoke.
+pub(crate) fn invoke_at(delay: Option<i64>) -> Option<Duration> {
+    delay.map(|millis| {
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("duration since the unix epoch cannot fail")
+            + Duration::from_millis(millis.max(0) as u64)
+    })
+}
+
+/// The value of a span's end or a signal: nothing, bytes, or a failure.
+fn non_empty(bytes: Option<Uint8Array>, failure: Option<VmFailure>) -> Option<NonEmptyValue> {
+    match (bytes, failure) {
+        (_, Some(failure)) => Some(NonEmptyValue::Failure(failure.into())),
+        (Some(bytes), None) => Some(NonEmptyValue::Success(Bytes::copy_from_slice(&bytes))),
+        (None, None) => None,
     }
 }
 
@@ -338,122 +432,60 @@ impl Vm {
     }
 
     /// Ask JavaScript to tick, so that what Rust just sent is written and what
-    /// it waits for can be answered. Called with the lock released, and only
-    /// when no tick is pending: a commit's writes would otherwise wake the
-    /// other thread once each, to do the one piece of work.
-    fn schedule(scheduler: Option<Arc<Scheduler>>) {
+    /// it waits for is handed to it. Called with the lock released.
+    pub(crate) fn schedule(scheduler: Option<Arc<Scheduler>>) {
         if let Some(scheduler) = scheduler {
             scheduler.call((), ThreadsafeFunctionCallMode::NonBlocking);
         }
     }
 
-    /// The scheduler to call, if a tick is not already asked for.
-    fn wanted(vm: &mut VmInner) -> Option<Arc<Scheduler>> {
-        if vm.asked_to_tick {
-            return None;
-        }
-        vm.asked_to_tick = true;
-        vm.scheduler.clone()
+    /// `act` on the VM, in one critical section, then ask JavaScript to tick.
+    pub(crate) fn act<T>(inner: &Arc<Mutex<VmInner>>, act: impl FnOnce(&mut VmInner) -> T) -> T {
+        let (result, scheduler) = {
+            let mut vm = lock(inner);
+            let result = act(&mut vm);
+            let scheduler = vm.wanted();
+            (result, scheduler)
+        };
+        Self::schedule(scheduler);
+        result
     }
 
-    /// Issue a command with `act` and register the waiter of its handle, in one
-    /// critical section, then ask JavaScript to tick.
-    ///
-    /// The two cannot be separate calls: a notification that is ready the
-    /// moment the command is issued — an eager state read, a write that asks
-    /// for no ack — would be routed to JavaScript by a tick in between, and
-    /// this waiter would wait for a notification that already went elsewhere.
+    /// Issue an action with `act` and register the waiter of its handle, in
+    /// one critical section, then ask JavaScript to tick: a result the VM has
+    /// at once (a state value it knows) reaches the waiter in that tick.
     pub(crate) fn issue_and_wait(
         inner: &Arc<Mutex<VmInner>>,
         act: impl FnOnce(&mut CoreExplicitRecoveryVM) -> std::result::Result<NotificationHandle, Error>,
-    ) -> std::result::Result<oneshot::Receiver<std::result::Result<Value, Error>>, Error> {
-        let (result, scheduler) = {
-            let mut vm = lock(inner);
-            let result = act(&mut vm.vm).map(|handle| {
-                let (sender, receiver) = oneshot::channel();
-                vm.rust_waiters.insert(handle, sender);
-                // Still under the lock: a result the VM already has — a
-                // state value the invocation knows, or that this attempt
-                // wrote — reaches the waiter here, instead of waiting for
-                // a tick to route it and so taking a turn of JavaScript's
-                // event loop to answer a read that needed nothing.
-                let _ = vm.route();
-                receiver
-            });
-            // Asked for once until it runs, as `issue_and_discard` does: a
-            // tick that is pending writes this command's output too, and the
-            // next command asks anew once it has begun.
-            let scheduler = Self::wanted(&mut vm);
-            (result, scheduler)
-        };
-        Self::schedule(scheduler);
-        result
-    }
-
-    /// Fail every read and ack the database's store is waiting for: the
-    /// attempt is over, and nothing will answer them.
-    ///
-    /// Only the attempt's end does this. A cancellation does not: a wait of
-    /// the store's is a state read or the ack of a commit's head write, which
-    /// Restate answers promptly, and failing the ack of a head that is already
-    /// out reports a commit as cancelled that landed. The driver delivers a
-    /// cancellation where the handler calls, before anything is issued
-    /// (`session.ts`).
-    fn fail_waiters(inner: &Arc<Mutex<VmInner>>) {
-        let mut vm = lock(inner);
-        for (_, waiter) in vm.rust_waiters.drain() {
-            let _ = waiter.send(Err(Error::new(
-                restate_sdk_shared_core::error::codes::INTERNAL,
-                ATTEMPT_OVER.to_owned(),
-            )));
-        }
-    }
-
-    /// Issue a command whose notification nothing waits for, and drop it when
-    /// it comes: the database's writes that ask for no ack, which the VM
-    /// answers at once. Queueing them for JavaScript would cost a call across
-    /// the addon and an object for each, only to drop them there.
-    pub(crate) fn issue_and_discard(
-        inner: &Arc<Mutex<VmInner>>,
-        act: impl FnOnce(&mut CoreExplicitRecoveryVM) -> std::result::Result<NotificationHandle, Error>,
-    ) -> std::result::Result<(), Error> {
-        let (result, scheduler) = {
-            let mut vm = lock(inner);
-            let result = act(&mut vm.vm).map(|handle| {
-                vm.discarded.insert(handle);
-                let _ = vm.route();
-            });
-            let scheduler = Self::wanted(&mut vm);
-            (result, scheduler)
-        };
-        Self::schedule(scheduler);
-        result
+    ) -> std::result::Result<Waited, Error> {
+        Self::act(inner, |vm| {
+            act(&mut vm.vm).map(|handle| vm.wait_in_rust(handle))
+        })
     }
 }
 
 #[napi]
 impl Vm {
-    /// Without a bidirectional stream (a request/response transport, e.g. AWS
-    /// Lambda), the VM fails the invocation at once, pausing it: no response
-    /// could reach the handler.
-    #[napi(
-        constructor,
-        ts_args_type = "headers: VmHeader[], bidirectional: boolean"
-    )]
-    pub fn new(headers: Vec<VmHeader>, bidirectional: bool) -> Result<Self> {
+    /// Refused for a content type of another family or version: the error's
+    /// message starts with `VM_REFUSED <code>:`, the status to answer with
+    /// (415), and nothing is written.
+    #[napi(constructor)]
+    pub fn new(headers: Vec<VmHeader>) -> Result<Self> {
         let headers: Vec<(String, String)> = headers
             .into_iter()
             .map(|header| (header.key, header.value))
             .collect();
-        let mut vm = CoreExplicitRecoveryVM::new(headers).map_err(vm_error)?;
-        if !bidirectional {
-            vm.notify_error(request_response_unsupported());
-        }
+        let vm = CoreExplicitRecoveryVM::new(headers, Options::default()).map_err(|error| {
+            Error_::new(
+                Status::GenericFailure,
+                format!("VM_REFUSED {}: {error}", error.code()),
+            )
+        })?;
         Ok(Vm(Arc::new(Mutex::new(VmInner {
             vm,
             rust_waiters: Default::default(),
-            discarded: Default::default(),
-            for_js: Default::default(),
+            ended: None,
+            aborted: Default::default(),
             scheduler: None,
             asked_to_tick: false,
         }))))
@@ -488,7 +520,8 @@ impl Vm {
         self.lock().vm.notify_input(Bytes::copy_from_slice(&buffer));
     }
 
-    /// The runtime closed the input stream. While the handler runs, this shuts the attempt down.
+    /// The runtime closed the input stream. While the handler runs, this
+    /// shuts the attempt down: the VM writes `ShutdownMessage` at once.
     #[napi]
     pub fn notify_input_closed(&self) {
         self.lock().vm.notify_input_closed();
@@ -503,9 +536,21 @@ impl Vm {
         vm.vm.take_output().to_vec().into()
     }
 
+    /// Whether to close the response now: the VM wrote its last message, and
+    /// the runtime closed its side. Write `take_output()` first.
+    #[napi]
+    pub fn should_close_output(&self) -> bool {
+        self.lock().vm.should_close_output()
+    }
+
     #[napi]
     pub fn is_ready_to_execute(&self) -> Result<bool> {
         self.lock().vm.is_ready_to_execute().map_err(vm_error)
+    }
+
+    #[napi]
+    pub fn is_feature_supported(&self, feature: u32) -> bool {
+        self.lock().vm.is_feature_supported(feature)
     }
 
     #[napi]
@@ -519,59 +564,163 @@ impl Vm {
             scope: input.scope,
             limit_key: input.limit_key,
             idempotency_key: input.idempotency_key,
+            attempt: input.attempt,
         })
     }
 
-    /// The next notification for JavaScript, or `null`. Throws once the
-    /// attempt is closed: `ATTEMPT_SHUT_DOWN` for a shutdown, else a failure.
+    /// The next notification for JavaScript, or `null`: only the driver's
+    /// tick calls it. A handle Rust waits for goes to its waiter, and the next
+    /// one is taken. Throws once the attempt is closed: `ATTEMPT_SHUT_DOWN`
+    /// for a shutdown (the VM wrote `ShutdownMessage`), else a failure (the
+    /// VM wrote `ErrorMessage`).
     #[napi]
     pub fn take_notification(&self) -> Result<Option<VmNotification>> {
         let mut vm = self.lock();
-        vm.route().map_err(vm_error)?;
-        Ok(vm
-            .for_js
-            .pop_front()
-            .map(|Notification { handle, value }| notification_to_js(handle.into(), value)))
+        loop {
+            match vm.vm.take_next_notification() {
+                Ok(Some(Notification { handle, value })) => match vm.rust_waiters.remove(&handle) {
+                    Some(waiter) => {
+                        let _ = waiter.send(Ok(value));
+                    }
+                    None => return Ok(Some(notification_to_js(handle.into(), value))),
+                },
+                Ok(None) => return Ok(None),
+                Err(error) => {
+                    // What the store's waits fail with: the attempt's end if
+                    // Restate shut it down, which `src/database.ts` knows by
+                    // this text, and otherwise why it failed.
+                    let for_waiters = if error.is_suspended_error() {
+                        Error::new(
+                            restate_sdk_shared_core::error::codes::INTERNAL,
+                            ATTEMPT_OVER.to_owned(),
+                        )
+                    } else {
+                        error.clone()
+                    };
+                    for (_, waiter) in vm.rust_waiters.drain() {
+                        let _ = waiter.send(Err(for_waiters.clone()));
+                    }
+                    vm.ended = Some(for_waiters);
+                    return Err(vm_error(error));
+                }
+            }
+        }
     }
 
-    // --- Request/response actions
+    /// The reserved handle of the cancel signal.
+    #[napi]
+    pub fn cancel_handle(&self) -> u32 {
+        CANCEL_NOTIFICATION_HANDLE.into()
+    }
+
+    /// The handles of aborted atomic groups' actions since the last call:
+    /// never notified.
+    #[napi]
+    pub fn take_aborted(&self) -> Vec<u32> {
+        self.lock().aborted.drain(..).map(u32::from).collect()
+    }
+
+    // --- State
 
     #[napi]
-    pub fn get_state(&self, key: String, name: Option<String>) -> Result<u32> {
+    pub fn get_state(
+        &self,
+        scope: String,
+        key: String,
+        options: Option<VmActionOptions>,
+    ) -> Result<u32> {
+        let (scope, options) = (scope_of(&scope)?, options_of(options)?);
         self.lock()
             .vm
-            .cmd_state_get(key, name)
+            .cmd_state_get(scope, key, options)
             .map(u32::from)
             .map_err(vm_error)
     }
 
     #[napi]
-    pub fn get_state_keys(&self, name: Option<String>) -> Result<u32> {
+    pub fn get_state_keys(&self, scope: String, options: Option<VmActionOptions>) -> Result<u32> {
+        let (scope, options) = (scope_of(&scope)?, options_of(options)?);
         self.lock()
             .vm
-            .cmd_state_get_keys(name)
+            .cmd_state_get_keys(scope, options)
             .map(u32::from)
             .map_err(vm_error)
     }
 
+    /// The handle of its result, or `null` without `wantResult`.
     #[napi]
-    #[allow(clippy::too_many_arguments)]
+    pub fn set_state(
+        &self,
+        scope: String,
+        key: String,
+        buffer: Uint8Array,
+        want_result: Option<bool>,
+        options: Option<VmActionOptions>,
+    ) -> Result<Option<u32>> {
+        let (scope, options) = (scope_of(&scope)?, options_of(options)?);
+        self.lock()
+            .vm
+            .cmd_state_set(
+                scope,
+                key,
+                Bytes::copy_from_slice(&buffer),
+                options,
+                want_result == Some(true),
+            )
+            .map(|handle| handle.map(u32::from))
+            .map_err(vm_error)
+    }
+
+    #[napi]
+    pub fn clear_state(
+        &self,
+        scope: String,
+        key: String,
+        want_result: Option<bool>,
+        options: Option<VmActionOptions>,
+    ) -> Result<Option<u32>> {
+        let (scope, options) = (scope_of(&scope)?, options_of(options)?);
+        self.lock()
+            .vm
+            .cmd_state_clear(scope, key, options, want_result == Some(true))
+            .map(|handle| handle.map(u32::from))
+            .map_err(vm_error)
+    }
+
+    #[napi]
+    pub fn clear_all_state(
+        &self,
+        scope: String,
+        want_result: Option<bool>,
+        options: Option<VmActionOptions>,
+    ) -> Result<Option<u32>> {
+        let (scope, options) = (scope_of(&scope)?, options_of(options)?);
+        self.lock()
+            .vm
+            .cmd_state_clear_all(scope, options, want_result == Some(true))
+            .map(|handle| handle.map(u32::from))
+            .map_err(vm_error)
+    }
+
+    // --- Invocations
+
+    /// `delay` is in milliseconds.
+    #[napi]
     pub fn call(
         &self,
-        service: String,
-        handler: String,
+        target: VmTarget,
         buffer: Uint8Array,
-        key: Option<String>,
-        idempotency_key: Option<String>,
-        headers: Option<Vec<VmHeader>>,
-        name: Option<String>,
+        delay: Option<i64>,
+        options: Option<VmActionOptions>,
     ) -> Result<VmCallHandle> {
+        let options = options_of(options)?;
         self.lock()
             .vm
             .cmd_call(
-                target(service, handler, key, idempotency_key, headers),
+                target.into(),
                 Bytes::copy_from_slice(&buffer),
-                name,
+                invoke_at(delay),
+                options,
             )
             .map(|handle| VmCallHandle {
                 invocation_id: handle.invocation_id_notification_handle.into(),
@@ -582,84 +731,36 @@ impl Vm {
 
     /// Returns the handle of the invocation id. `delay` is in milliseconds.
     #[napi]
-    #[allow(clippy::too_many_arguments)]
     pub fn send(
         &self,
-        service: String,
-        handler: String,
+        target: VmTarget,
         buffer: Uint8Array,
-        key: Option<String>,
         delay: Option<i64>,
-        idempotency_key: Option<String>,
-        headers: Option<Vec<VmHeader>>,
-        name: Option<String>,
+        options: Option<VmActionOptions>,
     ) -> Result<u32> {
-        let execute_at = delay.map(|millis| {
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .expect("duration since the unix epoch cannot fail")
-                + Duration::from_millis(millis.max(0) as u64)
-        });
+        let options = options_of(options)?;
         self.lock()
             .vm
             .cmd_send(
-                target(service, handler, key, idempotency_key, headers),
+                target.into(),
                 Bytes::copy_from_slice(&buffer),
-                execute_at,
-                name,
+                invoke_at(delay),
+                options,
             )
             .map(|handle| handle.invocation_id_notification_handle.into())
             .map_err(vm_error)
     }
 
     #[napi]
-    pub fn attach_invocation(&self, invocation_id: String, name: Option<String>) -> Result<u32> {
-        self.lock()
-            .vm
-            .cmd_attach_invocation(AttachInvocationTarget::InvocationId(invocation_id), name)
-            .map(u32::from)
-            .map_err(vm_error)
-    }
-
-    // --- Fire-and-forget actions
-    //
-    // With `ack`, Restate answers once the command is stored, and the handle
-    // is notified then; without, it is notified at once.
-
-    #[napi]
-    pub fn set_state(
+    pub fn attach_invocation(
         &self,
-        key: String,
-        buffer: Uint8Array,
-        name: Option<String>,
-        ack: Option<bool>,
+        invocation_id: String,
+        options: Option<VmActionOptions>,
     ) -> Result<u32> {
+        let options = options_of(options)?;
         self.lock()
             .vm
-            .cmd_state_set(
-                key,
-                Bytes::copy_from_slice(&buffer),
-                name,
-                ack.unwrap_or(false),
-            )
-            .map(u32::from)
-            .map_err(vm_error)
-    }
-
-    #[napi]
-    pub fn clear_state(&self, key: String, name: Option<String>, ack: Option<bool>) -> Result<u32> {
-        self.lock()
-            .vm
-            .cmd_state_clear(key, name, ack.unwrap_or(false))
-            .map(u32::from)
-            .map_err(vm_error)
-    }
-
-    #[napi]
-    pub fn clear_all_state(&self, name: Option<String>, ack: Option<bool>) -> Result<u32> {
-        self.lock()
-            .vm
-            .cmd_state_clear_all(name, ack.unwrap_or(false))
+            .cmd_attach_invocation(AttachInvocationTarget::InvocationId(invocation_id), options)
             .map(u32::from)
             .map_err(vm_error)
     }
@@ -668,47 +769,133 @@ impl Vm {
     pub fn cancel_invocation(
         &self,
         invocation_id: String,
-        name: Option<String>,
-        ack: Option<bool>,
+        want_result: Option<bool>,
+        options: Option<VmActionOptions>,
+    ) -> Result<Option<u32>> {
+        let options = options_of(options)?;
+        self.lock()
+            .vm
+            .cmd_cancel_invocation(invocation_id, options, want_result == Some(true))
+            .map(|handle| handle.map(u32::from))
+            .map_err(vm_error)
+    }
+
+    // --- Signals
+
+    /// The signal `index` (from 0) of the name `signalName` this invocation received: its handle.
+    #[napi]
+    pub fn signal_read(
+        &self,
+        signal_name: String,
+        index: u32,
+        options: Option<VmActionOptions>,
     ) -> Result<u32> {
+        let options = options_of(options)?;
         self.lock()
             .vm
-            .cmd_cancel_invocation(invocation_id, name, ack.unwrap_or(false))
+            .cmd_signal_read(signal_name, index, options)
             .map(u32::from)
             .map_err(vm_error)
     }
 
-    // --- Tracing
-    //
-    // A trace is shown in Restate's UI as a run, until it is ended; one the
-    // attempt leaves open is ended by `end`, or by the next attempt.
-
-    /// Inside the trace `parent` of this attempt, or else inside the attempt itself.
+    /// A signal to another invocation: carrying `bytes`, `failure`, or nothing.
     #[napi]
-    pub fn start_trace(&self, name: String, parent: Option<u32>) -> Result<u32> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn signal_send(
+        &self,
+        target_invocation_id: String,
+        signal_name: String,
+        bytes: Option<Uint8Array>,
+        failure: Option<VmFailure>,
+        want_result: Option<bool>,
+        options: Option<VmActionOptions>,
+    ) -> Result<Option<u32>> {
+        let options = options_of(options)?;
         self.lock()
             .vm
-            .trace_start(name, parent.map(TraceId::from))
-            .map(u32::from)
-            .map_err(vm_error)
-    }
-
-    #[napi]
-    pub fn end_trace_success(&self, trace: u32, buffer: Uint8Array) -> Result<()> {
-        self.lock()
-            .vm
-            .trace_end(
-                TraceId::from(trace),
-                NonEmptyValue::Success(Bytes::copy_from_slice(&buffer)),
+            .cmd_signal_send(
+                target_invocation_id,
+                signal_name,
+                non_empty(bytes, failure),
+                options,
+                want_result == Some(true),
             )
+            .map(|handle| handle.map(u32::from))
             .map_err(vm_error)
     }
 
+    // --- Durability
+
+    /// Notified (`void`) once every action made before it is applied.
     #[napi]
-    pub fn end_trace_failure(&self, trace: u32, failure: VmFailure) -> Result<()> {
+    pub fn flush(&self, options: Option<VmActionOptions>) -> Result<u32> {
+        let options = options_of(options)?;
         self.lock()
             .vm
-            .trace_end(TraceId::from(trace), NonEmptyValue::Failure(failure.into()))
+            .cmd_flush(options)
+            .map(u32::from)
+            .map_err(vm_error)
+    }
+
+    /// Opens an atomic group: the actions until `atomicGroupEnd` leave as one.
+    /// Never across an await.
+    #[napi]
+    pub fn atomic_group_start(&self) -> Result<()> {
+        self.lock().vm.atomic_group_start().map_err(vm_error)
+    }
+
+    #[napi]
+    pub fn atomic_group_end(
+        &self,
+        want_result: Option<bool>,
+        options: Option<VmActionOptions>,
+    ) -> Result<Option<u32>> {
+        let options = options_of(options)?;
+        self.lock()
+            .vm
+            .atomic_group_end(options, want_result == Some(true))
+            .map(|handle| handle.map(u32::from))
+            .map_err(vm_error)
+    }
+
+    /// Drops the open group: the handles its actions returned, never notified.
+    #[napi]
+    pub fn atomic_group_abort(&self) -> Result<Vec<u32>> {
+        self.lock()
+            .vm
+            .atomic_group_abort()
+            .map(|handles| handles.into_iter().map(u32::from).collect())
+            .map_err(vm_error)
+    }
+
+    // --- Spans
+    //
+    // Shown in Restate's UI, nested: an action whose options name a span as
+    // its parent is inside it. A span the attempt leaves open ends with it.
+
+    /// Inside the span `parent` of this attempt, or else inside the attempt itself.
+    #[napi]
+    pub fn span_start(&self, name: String, parent: Option<u32>) -> Result<u32> {
+        let parent = parent.map(span_of).transpose()?;
+        self.lock()
+            .vm
+            .span_start(name, parent)
+            .map(u32::from)
+            .map_err(vm_error)
+    }
+
+    /// End `span`: with `bytes`, with `failure`, or with nothing.
+    #[napi]
+    pub fn span_end(
+        &self,
+        span: u32,
+        bytes: Option<Uint8Array>,
+        failure: Option<VmFailure>,
+    ) -> Result<()> {
+        let span = span_of(span)?;
+        self.lock()
+            .vm
+            .span_end(span, non_empty(bytes, failure))
             .map_err(vm_error)
     }
 
@@ -720,17 +907,33 @@ impl Vm {
         self.lock().vm.heartbeat().map_err(vm_error)
     }
 
-    /// Whether the invocation was cancelled, in this attempt or an earlier one.
+    /// Whether the invocation was cancelled, as far as the handler was told:
+    /// before this attempt, or by the cancel signal a tick took.
     #[napi]
     pub fn is_cancelled(&self) -> bool {
         self.lock().vm.is_cancelled()
+    }
+
+    /// The SDK ends the attempt on its own (the process is going away): an
+    /// unasked `ShutdownMessage`, after which Restate starts a new attempt.
+    #[napi]
+    pub fn shutdown(&self) {
+        self.lock().vm.shutdown();
     }
 
     /// Fail what the database's store waits for: the attempt is over, and
     /// nothing more will answer.
     #[napi]
     pub fn end_state_waits(&self) {
-        Self::fail_waiters(&self.0);
+        let mut vm = self.lock();
+        let over = Error::new(
+            restate_sdk_shared_core::error::codes::INTERNAL,
+            ATTEMPT_OVER.to_owned(),
+        );
+        for (_, waiter) in vm.rust_waiters.drain() {
+            let _ = waiter.send(Err(over.clone()));
+        }
+        vm.ended.get_or_insert(over);
     }
 
     /// Let go of the scheduler, which holds JavaScript's tick, and so the

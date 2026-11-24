@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import * as restate from '@restatedev/sessions';
 import { type AttemptContext, cancelCalls, contextOf, invoke, reset, Schema } from '@restatedev/sessions/internal';
-import { expectTypeOf, test, vi } from 'vitest';
+import { expectTypeOf, test } from 'vitest';
 import { fakeContext, type Made, memoryDatabase } from './support.ts';
 
 const balanceOf = async (db: restate.DatabaseReader) =>
@@ -61,10 +61,8 @@ test('a handler commits, and its transaction sends once it committed', async () 
       method: 'deposit',
       key: 'bob',
       parameter: { id: 't1', amount: 4 },
-      idempotencyKey: sends[0]?.idempotencyKey,
     },
   ]);
-  assert.match(sends[0]!.idempotencyKey!, /^transaction\/[\w-]+\/0$/);
 
   // A new attempt of the same transfer finds it committed: it moves nothing.
   assert.equal(await invoke(account, 'transfer', ctx('t1'), { to: 'bob', amount: 4 }), 6);
@@ -243,50 +241,9 @@ test('types: contexts are inferred, clients typed by the definition', () => {
   });
 });
 
-// A crash between a commit and its sends: the attempt's sends fail as Restate fences them.
-const timer = restate.sessionObject({
-  name: 'timer',
-  schema: ['CREATE TABLE armed (at INTEGER)'],
-  handlers: {
-    arm: async (ctx) =>
-      ctx.db.transaction(async (tx) => {
-        await tx.execute('INSERT INTO armed VALUES (1)');
-        tx.send(timer, ctx.key, { delay: 60_000 }).ring();
-      }),
-    /** Uses no database. */
-    nothing: async () => 'done',
-    ring: async () => 'ring',
-  },
-});
-
-test('sends a crash left unmade go out as the next attempt starts, though it uses no database', async () => {
-  vi.useFakeTimers({ toFake: ['Date'] });
-  try {
-    vi.setSystemTime(1_000_000);
-    const map = new Map<string, Uint8Array>();
-    const crashing = fakeContext({ map, service: 'timer', key: 't' });
-    crashing.genericSend = () => {
-      throw new Error('the attempt was fenced');
-    };
-    await assert.rejects(invoke(timer, 'arm', crashing), /fenced/);
-
-    // 20 s later, an attempt of a handler that never uses ctx.db makes the send, with the rest of its delay.
-    vi.setSystemTime(1_020_000);
-    const sends: Made[] = [];
-    assert.equal(await invoke(timer, 'nothing', fakeContext({ map, service: 'timer', key: 't', sends })), 'done');
-    assert.equal(sends.length, 1);
-    assert.equal(sends[0]!.method, 'ring');
-    assert.equal(sends[0]!.delay, 40_000);
-    assert.match(sends[0]!.idempotencyKey!, /^transaction\/[\w-]+\/0$/);
-
-    // Made, and stored: the attempt after makes it no more.
-    const later: Made[] = [];
-    await invoke(timer, 'nothing', fakeContext({ map, service: 'timer', key: 't', sends: later }));
-    assert.deepEqual(later, []);
-  } finally {
-    vi.useRealTimers();
-  }
-});
+// A crash between a commit and its sends cannot happen on Restate: the sends
+// are in the commit's atomic group (`protocol.test.ts`). The outbox that made
+// them again after a crash is gone with the prototype protocol.
 
 const LIBRARY = new Schema('library', ['CREATE TABLE restate_library (v TEXT)']);
 

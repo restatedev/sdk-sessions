@@ -201,7 +201,11 @@ tests in `test/`.
 
 ## Requirements
 
-- Restate server 1.8 or later.
+- A Restate server with the explicit recovery protocol (version 1) and its
+  experimental flag on (`RESTATE_EXPERIMENTAL_ENABLE_EXPLICIT_RECOVERY_PROTOCOL=true`):
+  session objects run on it, over HTTP/2, and are declared in discovery
+  manifest v6. No released server has it yet; the released 1.8 serves only
+  the journaled services and objects beside them.
 - The published TypeScript SDK, version 1.18.2. `@restatedev/sessions` pins it,
   because it relies on some of the SDK's internals
   ([why](packages/sessions/README.md#concurrent-awaits)).

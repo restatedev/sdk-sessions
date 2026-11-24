@@ -8,6 +8,9 @@ interface Addon {
   open(namespace: string, store: unknown, reader: boolean): Promise<unknown>;
   Vm: unknown;
   Identity: unknown;
+  explicitRecoveryProtocolRange: unknown;
+  /** The core's fake runtime, in an addon built for the tests (`pnpm build`); absent in a shipped one. */
+  FakeRuntime?: unknown;
 }
 
 /** The addon of this machine's platform, from its package (see platform.ts). */

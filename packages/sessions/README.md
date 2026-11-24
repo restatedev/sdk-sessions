@@ -17,11 +17,17 @@ It runs on a released Restate server and the published SDK, version 1.18.2,
 which it pins ([why](#concurrent-awaits)). See
 [the requirements](../../README.md#requirements).
 
-A session object needs a Restate that speaks **service protocol v7 or later**
-— 1.5 and up. Its VM accepts no less, and an invocation that negotiates an
-older protocol is refused with a 415 that says so. Journaled services and
-virtual objects are unaffected: they are the SDK's, at any version it
-supports.
+A session object runs on Restate's **explicit recovery protocol**, version 1
+(content type `application/vnd.restate.invocation.explicitrecovery.v1`), over
+HTTP/2 only: a Restate built with it, and the experimental flag on
+(`RESTATE_EXPERIMENTAL_ENABLE_EXPLICIT_RECOVERY_PROTOCOL=true`). This package
+serves discovery itself, as manifest v6: every session object's handler is
+declared with `protocolFamily: EXPLICIT_RECOVERY`, beside the protocol's range
+(`explicitRecoveryProtocol`); a Restate that takes no manifest v6 is told it
+is too old. An invocation of a session object on another protocol is
+answered 415. Journaled services and virtual objects are unaffected: they
+are the SDK's, at any version it supports, and keep the durable execution
+range in the manifest.
 
 ```ts
 import * as restate from '@restatedev/sessions';
@@ -344,10 +350,8 @@ try {
 A transaction whose body awaits something else (a `ctx.rpc`) that a
 cancellation reaches fails with it and rolls back, unless the body catches
 it. A retry of a cancelled invocation, after a crash, gets the cancellation
-at its first await; the open that makes what the crash left in the outbox is
-the session's own, and is not failed. No attempt follows a cancelled one, so as an attempt ends, a
-session that a failure ended is opened again, which makes what the outbox
-holds and empties it. Once Restate has shut an attempt down, a cancellation
+at its first await; the open is the session's own, and is not failed. Once
+Restate has shut an attempt down, a cancellation
 carried to its next await is not delivered: what the handler does then
 fails with the attempt's end, and the next attempt gets the cancellation.
 
@@ -364,30 +368,16 @@ ctx.db.transaction(async (tx) => {
 });
 ```
 
-The sends are stored in the transaction's commit, in a record called
-`outbox` next to the tables. The attempt makes them right after the
-commit's writes, before it waits for them to be stored (Restate stores an
-attempt's commands in order, so they are stored only if the commit is), each
-with the idempotency key `transaction/<id>/<index>` (or the send's own key),
-where `<id>` is a random id of the transaction. Then, before `transaction()`
-resolves, a second commit empties the outbox. Restate stores an attempt's
-commands in order, so the sends are stored by the time that commit is. An
-attempt that Restate shuts down later, while it waits days for an approval
-for example, leaves the next attempt nothing to send again, long after the
-keys expired.
+The sends are part of the transaction's commit: the commit is one atomic
+group of the protocol, with the pages and the head first and the sends after
+them, and Restate applies all of it or none of it. So a send goes out
+exactly when its rows are stored, once, with no idempotency key of the
+SDK's making and nothing to remember across a crash. A transaction that
+writes nothing (its body only sends) makes its sends in a group of their
+own, and `transaction()` resolves once Restate applied it. A delay counts
+from the commit.
 
-If an attempt ends between the two commits, the sends stay in the outbox.
-The next exclusive attempt opens the database when it starts, and sends them
-again with the same keys and whatever remains of their delays, which count
-from the commit. Restate drops a send whose key it has already seen. So
-every send of a committed transaction is made once, even if no later attempt
-uses the database, and the sends of a transaction that rolled back or was
-lost are never made.
-
-A transaction without sends costs nothing extra; one with sends costs one
-more commit. If the sends fail after the commit because the attempt was
-replaced, `transaction()` rejects even though it committed: that attempt is
-over, and the next one makes them.
+A transaction with sends costs nothing extra: they ride its commit.
 
 A send doesn't return an invocation id. When you need a call's result, make
 the call before the transaction, with an idempotency key of its own, and
@@ -398,27 +388,26 @@ record its outcome in the transaction. The shop's `Orders` does this, and its
 
 **Where the data lives.** The database is stored in the object's state,
 under the keys `v22/head`, `v22/tail/…`, `v22/manifest/…` and `v22/pack/…`.
-The addon reads and writes them as the attempt's own state commands, and a
-write that must be stored before the database goes on asks Restate to ack
-it. Handlers and views can't reach any other state key, since a session has
-no key/value state of its own.
+The addon reads and writes them as the attempt's own state actions,
+recorded as nothing (`RECORD_NONE`): Restate's UI shows none of the pages.
+Handlers and views can't reach any other state key, since a session has no
+key/value state of its own.
 
 **Reads and writes.** A read is a state read. It goes to the runtime unless
 this attempt wrote the key or the invocation started with it. An invocation
 starts with only the database's head (`state: { preload: ['v22/head'] }`):
 its open's first read needs no round trip, and it doesn't start by loading
-every page. On service protocol v8, a read that goes to the runtime is an
-ephemeral get, which the journal doesn't record; on v7, which Restate 1.8
-negotiates, it is a lazy get, recorded in the journal with its value. A
+every page. The protocol has no journal: nothing records a read. A
 write or a clear is a state write, and returns at once. Restate keeps an
 attempt's writes and sends in the order they were made, so a crash can lose
 the last ones, but never a write without those before it.
 
 **Commits.** A transaction writes the pages it changed, and its records, as
 one tail entry under a key of its own. Then it writes the head, which points
-to that entry; this is the commit point. The head's write asks Restate for
-an ack, which Restate gives only once the writes before it are stored, and
-the commit waits for that ack, so a commit is one round trip. Whatever a
+to that entry; this is the commit point. The tail entry, the head and the
+transaction's sends are one atomic group, whose result the commit waits
+for, so a commit is one round trip. A commit larger than 8 MiB writes what
+exceeds that first, as plain writes nothing names until the head does. Whatever a
 crash keeps, the stored head only points to tail entries and checkpoints
 that are stored too. Now and then, a commit first folds the tail into a
 checkpoint (see the
@@ -467,10 +456,11 @@ is not a size fails every open with its message.
 **No journal replay.** On a retry or a resume, the SDK normally replays the
 journal: each operation returns its recorded result, and must match it.
 That can't work here, because a later attempt makes different reads,
-depending on what the page cache holds. With explicit recovery
-(`restate.internal.explicitRecovery()`, which every session handler and view
-has), the attempt skips the recorded journal, and the handler runs again
-from the start against the state as it is. Recovery is then up to the storage:
+depending on what the page cache holds. The explicit recovery protocol has
+no journal: every attempt runs the handler again from the start against the
+state as it is, and Restate records what each attempt did for its UI
+(attempts, calls, commits and spans; a `db.transaction` is a span with its
+commit inside). Recovery is then up to the storage:
 opening the database reads the head, so a commit the crashed attempt didn't
 finish is as if it never started.
 
@@ -570,14 +560,6 @@ storage in the session's database.
 
 ## Caveats
 
-- **On protocol v7, every read is journaled with its value.** A state read
-  that goes to the runtime adds the value to the invocation's journal, so
-  reading pages costs log writes, and the page cache matters more than
-  usual. Restate 1.8 negotiates v7; on v8 such a read is ephemeral. A
-  completed invocation's journal, reads included, is kept for Restate's
-  default retention.
-- **The journal grows across attempts.** Entries an attempt skips stay, and
-  each attempt adds its own.
 - **A shutdown is a restart.** Restate shuts an attempt down once its
   inactivity timeout passes with nothing heard from it, and the next attempt
   runs from the start: when a call it waits for answers, or at once if it
@@ -586,14 +568,14 @@ storage in the session's database.
   database's own calls keep an attempt alive, with a heartbeat every 20
   seconds (`RESTATE_SESSIONS_HEARTBEAT`, in milliseconds). A deployment that
   shortens Restate's inactivity timeout must shorten this with it.
-- **One acked write per commit.** Every commit waits for Restate to ack its
-  head's write, a round trip to the runtime. Statements that commit one by
+- **One round trip per commit.** Every commit waits for Restate to apply its
+  atomic group, a round trip to the runtime. Statements that commit one by
   one pay it each time, so group them in a transaction.
 - **10 GiB per database.** A statement that would grow a key's database past
   that fails with SQLite's "database or disk is full", as an SQL error (a
   `TerminalError`), and `ctx.db` keeps working.
-- **Assumptions still to confirm with the runtime.** A state write's ack
-  comes only after the commands before it are stored (the sync). An
+- **Assumptions still to confirm with the runtime.** An atomic group's
+  result comes only once it and everything before it are applied. An
   abandoned attempt's commands are never applied after a new attempt starts
   (fencing). State that a lazy read returns is durable. The crash tests kill
   processes, so they check recovery, not durability across a machine crash.

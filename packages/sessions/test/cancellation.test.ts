@@ -3,8 +3,8 @@
 // cancels the session's request that is pending when a test says, as it does
 // at Restate's cancel signal. The session adds nothing to Restate's
 // cancellation: the call awaiting that request fails with the CancelledError,
-// as any await does. What it keeps is a transaction's sends, made once if it
-// committed, however the attempt ends.
+// as any await does. A transaction that committed has its sends, made once
+// with the commit, however the attempt ends.
 import * as restate from '@restatedev/sessions';
 import { open } from '@restatedev/sessions/internal';
 import { describe, expect, it } from 'vitest';
@@ -97,10 +97,9 @@ const debit = (a: { db: restate.Database }, during?: () => void) =>
     tx.send(store, 'a').reserve('book');
   });
 
-/** The send of `debit`, made once, with a key of its transaction. */
+/** The send of `debit`, made once, with the commit. */
 const madeOnce = (a: Attempt) => {
   expect(a.sent.map(decode)).toEqual(['book']);
-  expect(a.sent[0]!.idempotencyKey).toMatch(/^transaction\/[\w-]+\/0$/);
 };
 
 describe('a cancellation that reaches a transaction', () => {
@@ -108,7 +107,6 @@ describe('a cancellation that reaches a transaction', () => {
     // Its SQL awaits nothing of Restate's: the signal reaches the commit's sync.
     ['while its body runs', (a: Attempt) => debit(a, a.cancelNextRequest)],
     ['while its commit syncs', (a: Attempt) => (a.cancelOnSync(1), debit(a))],
-    ['while the commit that empties its outbox syncs', (a: Attempt) => (a.cancelOnSync(2), debit(a))],
   ])('%s fails it with the CancelledError; what it committed has its sends, made once', async (_when, run) => {
     const o = object();
     const a = o.attempt();
@@ -118,7 +116,7 @@ describe('a cancellation that reaches a transaction', () => {
     expect(await o.rows()).toEqual([[5]]);
   });
 
-  it('leaves the outbox empty when the handler catches it and returns', async () => {
+  it('has its sends made once when the handler catches it and returns', async () => {
     const o = object();
     const a = o.attempt();
     const result = await a.end(async () => {
@@ -212,22 +210,21 @@ describe('a cancellation that reaches another call of ctx.db', () => {
 });
 
 describe('a retry of a cancelled invocation', () => {
-  it('fails its first call, and makes the sends a crash left unmade as it ends', async () => {
+  it('fails its first call, and finds what the attempt before it committed', async () => {
     const o = object();
-    const crashed = o.attempt({ crash: true });
-    await expect(debit(crashed)).rejects.toThrow('crashed'); // committed; the sends are lost
-    crashed.abort();
-    const lost = await o.outbox();
-    expect(lost).toHaveLength(1);
+    const first = o.attempt();
+    await debit(first);
+    first.abort();
     // Restate retries it, and its signal comes at the retry's first await:
-    // a read of the open, which so makes nothing. No attempt follows this one.
+    // a read of the open, which so makes nothing. The send went out with the
+    // commit, once, and the retry makes none.
     const retry = o.attempt();
     retry.cancelNextRequest();
     await expect(retry.end(() => retry.db.values('SELECT v FROM balance'))).rejects.toBeInstanceOf(
       restate.CancelledError,
     );
-    expect(retry.sent.map((s) => s.idempotencyKey)).toEqual(lost);
-    expect(await o.outbox()).toEqual([]);
+    madeOnce(first);
+    expect(retry.sent).toEqual([]);
     expect(await o.rows()).toEqual([[5]]);
   });
 });

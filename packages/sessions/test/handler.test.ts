@@ -1,18 +1,16 @@
-// A session object's handler served on the explicit recovery VM
-// (`src/handler.ts`), with Restate's side played by wire bytes: no SDK
-// endpoint, and a real `ctx.db` over the object's state.
+// A session object's handler served on the explicit recovery protocol
+// (`src/handler.ts`), with Restate's side played by the core's fake runtime
+// (`side.ts`): no SDK endpoint, and a real `ctx.db` over the object's state.
 //
 // The assertions name what only this path does — the state read and written
-// in the addon, a commit whose head write carries its own sync, and no run in
-// the journal.
+// in the addon, recorded as nothing, and a commit that is one atomic group.
 import { describe, expect, it } from 'vitest';
 import * as restate from '@restatedev/sessions';
 import { database, HEAD_KEY, start } from '@restatedev/sessions/internal';
 import { CancelledError } from '@restatedev/restate-sdk';
-import { serveSession, servedHere } from '../src/handler.ts';
-import { commits, pause, restateSide, said, seeded as seededBy, text, TYPE } from './side.ts';
-import { decode } from './wire.ts';
-import { REQUESTED_ACK, V8 } from './vm-support.ts';
+import { serveSession, type Stream } from '../src/handler.ts';
+import { commits, output, pause, restateSide, said, seeded as seededBy, TYPE } from './side.ts';
+import { ACTION, members, num, RECORD, str } from './wire.ts';
 
 /**
  * The state an earlier invocation of `key` left: its schema is applied. On a
@@ -207,12 +205,27 @@ async function shutDown(key: string, cancelFirst: boolean): Promise<string | und
   return afterShutDown.pop();
 }
 
-describe('a session object served on the explicit recovery VM', () => {
-  it('serves only the protocol versions the VM accepts', () => {
-    expect(servedHere({ 'content-type': V8 })).toBe(true);
-    expect(servedHere({ 'content-type': 'application/vnd.restate.invocation.v7' })).toBe(true);
-    expect(servedHere({ 'content-type': 'application/vnd.restate.invocation.v6' })).toBe(false);
-    expect(servedHere({})).toBe(false);
+describe('a session object served on the explicit recovery protocol', () => {
+  it('answers a request of another protocol with 415, and runs nothing', async () => {
+    for (const type of [
+      'application/vnd.restate.invocation.v6',
+      'application/vnd.restate.invocation.explicitrecovery.v2',
+    ]) {
+      let head: number | undefined;
+      let closed = false;
+      const stream: Stream = {
+        headers: { 'content-type': type },
+        body: (async function* () {})(),
+        writeHead: (status) => void (head = status),
+        write: () => {
+          throw new Error('nothing is written');
+        },
+        close: () => void (closed = true),
+      };
+      await serveSession(notes, 'add', stream);
+      expect(head).toBe(415);
+      expect(closed).toBe(true);
+    }
   }, 30_000);
 
   it('runs a handler, commits its database, and answers', async () => {
@@ -223,22 +236,28 @@ describe('a session object served on the explicit recovery VM', () => {
     await serving;
 
     expect(r.head?.status).toBe(200);
+    expect(r.head?.headers['content-type']).toBe('application/vnd.restate.invocation.explicitrecovery.v1');
     expect(r.ended).toBe(true);
     const sent = r.sent();
-    const output = sent.find((m) => m.type === TYPE.output);
-    expect(output).toBeDefined();
-    const answered = decode(output!.fields.get(14)![0] as Uint8Array);
-    expect(text(answered.get(1)![0] as Uint8Array)).toBe('1');
+    expect(output(sent)).toBe('1');
     expect(sent.at(-1)?.type).toBe(TYPE.end);
+    expect(r.outcomes().map((o) => o.kind)).toEqual(['completed']);
 
     // What only this path does: the state never crosses into JavaScript. The
-    // addon reads and writes it as the VM's own commands, and a commit is the
-    // tail, then the head written *with* its sync — one acked write, and no
-    // `v22/sync` clear, which is how a store in JavaScript asks for the same.
-    const acked = sent.filter((m) => m.type === TYPE.setState && (m.flags & REQUESTED_ACK) !== 0);
-    expect(acked.map((m) => text(m.fields.get(1)![0] as Uint8Array))).toEqual(['v22/head', 'v22/head']);
-    expect(sent.some((m) => m.type === TYPE.clearState)).toBe(false);
-    expect(sent.some((m) => m.type === TYPE.run)).toBe(false);
+    // addon reads and writes it as the VM's own actions, recorded as nothing,
+    // and a commit is one atomic group named `commit`, its result wanted: the
+    // tail and the head inside it (the schema's commit, then the handler's).
+    const groups = sent.filter((m) => m.type === TYPE.atomicGroup);
+    expect(groups.map((g) => str(g, ACTION.name))).toEqual(['commit', 'commit']);
+    for (const group of groups) {
+      expect(num(group, ACTION.resultId)).toBeGreaterThan(0);
+      const written = members(group);
+      expect(written.at(-1)?.type).toBe(TYPE.setState);
+      expect(str(written.at(-1)!, 2)).toBe(HEAD_KEY);
+      expect(written.every((m) => num(m, ACTION.record) === RECORD.none && num(m, ACTION.resultId) === 0)).toBe(true);
+    }
+    const reads = sent.filter((m) => m.type === TYPE.getState);
+    expect(reads.every((m) => num(m, ACTION.record) === RECORD.none)).toBe(true);
 
     // The database landed in the object's state.
     expect([...r.state.keys()].some((k) => k.startsWith('v22/'))).toBe(true);
@@ -256,9 +275,7 @@ describe('a session object served on the explicit recovery VM', () => {
     r.start('k5', null);
     await r.settle();
     await serving;
-    const output = r.sent().find((m) => m.type === TYPE.output);
-    const answered = decode(output!.fields.get(14)![0] as Uint8Array);
-    expect(text(answered.get(1)![0] as Uint8Array)).toBe('"committed"');
+    expect(output(r.sent())).toBe('"committed"');
     expect(state.has(HEAD_KEY)).toBe(true);
     // The premise: the attempt made one commit, the handler's, so that is
     // the one the signal landed on.
@@ -269,8 +286,7 @@ describe('a session object served on the explicit recovery VM', () => {
     after.start('k5', 'third');
     await after.settle();
     await reading;
-    const count = after.sent().find((m) => m.type === TYPE.output);
-    expect(text(decode(count!.fields.get(14)![0] as Uint8Array).get(1)![0] as Uint8Array)).toBe('3');
+    expect(output(after.sent())).toBe('3');
   }, 30_000);
 
   it('a cancellation that lands on a commit in flight is delivered once, to the await after it', async () => {
@@ -283,9 +299,7 @@ describe('a session object served on the explicit recovery VM', () => {
     r.start('k6', null);
     await r.settle();
     await serving;
-    const output = r.sent().find((m) => m.type === TYPE.output);
-    const answered = decode(output!.fields.get(14)![0] as Uint8Array);
-    expect(text(answered.get(1)![0] as Uint8Array)).toBe('"ok,CancelledError"');
+    expect(output(r.sent())).toBe('"ok,CancelledError"');
     // The premise: the attempt made one commit, the handler's, so that is
     // the one the signal landed on.
     expect(commits(r.sent())).toBe(1);
@@ -317,12 +331,13 @@ describe('a session object served on the explicit recovery VM', () => {
     r.start('k8', null);
     await r.settle();
     await serving;
-    const output = r.sent().find((m) => m.type === TYPE.output);
-    const answered = decode(output!.fields.get(14)![0] as Uint8Array);
-    expect(text(answered.get(1)![0] as Uint8Array)).toBe('1');
+    expect(output(r.sent())).toBe('1');
     // `VmStore` refuses a reader's writes and syncs it at once, so the view
-    // sends no state command and leaves the object's state as it found it.
-    expect(r.sent().some((m) => m.type === TYPE.setState || m.type === TYPE.clearState)).toBe(false);
+    // sends no state action and no commit, and leaves the object's state as
+    // it found it.
+    expect(
+      r.sent().some((m) => m.type === TYPE.setState || m.type === TYPE.clearState || m.type === TYPE.atomicGroup),
+    ).toBe(false);
     expect([...state.keys()].toSorted()).toEqual([...stored.keys()].toSorted());
   }, 30_000);
 
@@ -337,9 +352,7 @@ describe('a session object served on the explicit recovery VM', () => {
     r.start('k7', null);
     await r.settle();
     await serving;
-    const output = r.sent().find((m) => m.type === TYPE.output);
-    const answered = decode(output!.fields.get(14)![0] as Uint8Array);
-    expect(text(answered.get(1)![0] as Uint8Array)).toBe('"CancelledError,ok"');
+    expect(output(r.sent())).toBe('"CancelledError,ok"');
   }, 30_000);
 
   it('a read that asks Restate nothing sees a carried cancellation too, once', async () => {
@@ -358,11 +371,9 @@ describe('a session object served on the explicit recovery VM', () => {
     clearTimeout(landing);
     await serving;
     const sent = r.sent();
-    const output = sent.find((m) => m.type === TYPE.output);
-    const answered = decode(output!.fields.get(14)![0] as Uint8Array);
-    expect(text(answered.get(1)![0] as Uint8Array)).toBe('"ok,CancelledError,ok"');
+    expect(output(sent)).toBe('"ok,CancelledError,ok"');
     // The premise: the reads after the signal asked Restate for nothing.
-    expect(sent.slice(sentAtCancel).map((m) => m.type)).toEqual([TYPE.output, TYPE.end]);
+    expect(sent.slice(sentAtCancel).map((m) => m.type)).toEqual([TYPE.end]);
   }, 30_000);
 
   it('a carried cancellation fails the next call of the database before it writes or sends anything', async () => {
@@ -383,32 +394,20 @@ describe('a session object served on the explicit recovery VM', () => {
     await r.settle();
     clearTimeout(landing);
     await serving;
-    const output = r.sent().find((m) => m.type === TYPE.output);
-    const answered = decode(output!.fields.get(14)![0] as Uint8Array);
-    expect(text(answered.get(1)![0] as Uint8Array)).toBe('"ok,CancelledError"');
+    expect(output(r.sent())).toBe('"ok,CancelledError"');
     // The cancelled transaction put nothing on the wire: no page, no head,
     // no send. Counting commits would count the schema's too, so this asserts
-    // what came after the signal went in: the handler's output, and before it
-    // no command at all.
+    // what came after the signal went in: no action at all, then the end.
     const sent = r.sent();
-    const written = sent
-      .filter((m) => m.type === TYPE.setState)
-      .map((m) => ({ key: text(m.fields.get(1)![0] as Uint8Array)!, acked: (m.flags & REQUESTED_ACK) !== 0 }));
     expect(sentAtCancel, 'the signal went in before the handler ended').toBeLessThan(sent.length);
     const after = sent.slice(sentAtCancel).filter((m) => m.type >= 0x0400 && m.type < 0x8000);
     expect(
       after.map((m) => m.type),
-      'the cancelled transaction issued commands',
-    ).toEqual([TYPE.output]);
-    // Its sends are made in the hook between a commit's head write and the
-    // wait for that write's ack, so they are the first thing to escape a
-    // commit that is failed late.
-    expect(
-      sent.some((m) => m.type === TYPE.oneWayCall),
-      "the cancelled transaction's sends went out",
-    ).toBe(false);
-    // Every head write asks for its own ack: that ack is the commit's sync.
-    expect(written.filter((w) => w.key === HEAD_KEY).every((w) => w.acked)).toBe(true);
+      'the cancelled transaction issued actions',
+    ).toEqual([]);
+    expect(sent.at(-1)?.type).toBe(TYPE.end);
+    // Its sends would be in its commit's atomic group: none went out.
+    expect(r.sends, "the cancelled transaction's sends went out").toEqual([]);
   }, 30_000);
 
   it("a retry's carried cancellation fails the call's result, not the id it makes first", async () => {
@@ -420,9 +419,7 @@ describe('a session object served on the explicit recovery VM', () => {
     r.start('k8', null);
     await r.settle();
     await serving;
-    const output = r.sent().find((m) => m.type === TYPE.output);
-    const answered = decode(output!.fields.get(14)![0] as Uint8Array);
-    expect(text(answered.get(1)![0] as Uint8Array)).toBe('"CancelledError,A"');
+    expect(output(r.sent())).toBe('"CancelledError,A"');
   }, 30_000);
 
   it('a send does not swallow the cancellation the call after it is owed', async () => {
@@ -431,9 +428,7 @@ describe('a session object served on the explicit recovery VM', () => {
     r.start('k9', null);
     await r.settle();
     await serving;
-    const output = r.sent().find((m) => m.type === TYPE.output);
-    const answered = decode(output!.fields.get(14)![0] as Uint8Array);
-    expect(text(answered.get(1)![0] as Uint8Array)).toBe('"CancelledError"');
+    expect(output(r.sent())).toBe('"CancelledError"');
   }, 30_000);
 
   it('a database beside the object keeps its keys apart, as the addon names them', async () => {
@@ -442,9 +437,7 @@ describe('a session object served on the explicit recovery VM', () => {
     r.start('k6', null);
     await r.settle();
     await serving;
-    const output = r.sent().find((m) => m.type === TYPE.output);
-    const answered = decode(output!.fields.get(14)![0] as Uint8Array);
-    expect(text(answered.get(1)![0] as Uint8Array)).toBe('1');
+    expect(output(r.sent())).toBe('1');
     // `VmStore::key` reimplements `beside` in Rust; these are the keys the
     // JavaScript store would have written, so the two cannot drift apart.
     // `beside('notes2')` puts the name after the format's prefix, so
@@ -466,9 +459,7 @@ describe('a session object served on the explicit recovery VM', () => {
     r.start('k3', null);
     await r.settle();
     await serving;
-    const output = r.sent().find((m) => m.type === TYPE.output);
-    const answered = decode(output!.fields.get(14)![0] as Uint8Array);
-    expect(text(answered.get(1)![0] as Uint8Array)).toBe('"inv_started"');
+    expect(output(r.sent())).toMatch(/^"inv_/);
     await new Promise((resolve) => setTimeout(resolve, 10));
   }, 30_000);
 
@@ -478,13 +469,12 @@ describe('a session object served on the explicit recovery VM', () => {
     r.start('k4', null);
     await r.settle();
     await serving;
-    const sent = r.sent().find((m) => m.type === TYPE.oneWayCall);
+    // A send is a call that wants no result.
+    const sent = r.sent().find((m) => m.type === TYPE.call && num(m, ACTION.resultId) === 0);
     expect(sent).toBeDefined();
     // `invoke_time` is absolute: 30 seconds from now, not 0 and not NaN.
-    const at = Number(sent!.fields.get(4)![0]);
-    expect(at).toBeGreaterThan(Date.now() + 20_000);
-    const output = r.sent().find((m) => m.type === TYPE.output);
-    expect(output?.fields.get(14)).toBeDefined();
+    expect(num(sent!, 9)).toBeGreaterThan(Date.now() + 20_000);
+    expect(output(r.sent())).toBe('"sent"');
   }, 30_000);
 
   it('awaits two calls of Restate at once, which the selector existed to allow', async () => {
@@ -493,9 +483,7 @@ describe('a session object served on the explicit recovery VM', () => {
     r.start('k2', null);
     await r.settle();
     await serving;
-    const output = r.sent().find((m) => m.type === TYPE.output);
-    const answered = decode(output!.fields.get(14)![0] as Uint8Array);
     // Both answered, in the order the handler put them.
-    expect(text(answered.get(1)![0] as Uint8Array)).toBe('"AB"');
+    expect(output(r.sent())).toBe('"AB"');
   }, 30_000);
 });

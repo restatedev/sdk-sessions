@@ -20,8 +20,9 @@ import * as crypto from 'node:crypto';
 import * as http2 from 'node:http2';
 import type { AddressInfo } from 'node:net';
 import * as restate from '@restatedev/sessions';
-import { bytes, decode, frame, uint } from '@restatedev/sessions/test/wire';
-import { messages, TYPE, V8, value } from '@restatedev/sessions/test/vm-support';
+import { FakeRuntime } from '@restatedev/sessions/test/fake';
+import { output } from '@restatedev/sessions/test/side';
+import { messages } from '@restatedev/sessions/test/wire';
 
 /** base58, as a `publickeyv1_` key is encoded: a leading zero byte is a `1`. */
 function base58(input: Uint8Array): string {
@@ -89,47 +90,45 @@ await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
 const client = http2.connect(`http://127.0.0.1:${(server.address() as AddressInfo).port}`);
 
 /**
- * Whether the attempt has said it is over, reading only the frame headers of
- * `output` — a type and a length each — and stopping at the first frame the
- * stream has not finished delivering.
- */
-function over(output: Buffer): boolean {
-  const view = new DataView(output.buffer, output.byteOffset, output.byteLength);
-  for (let at = 0; at + 8 <= output.length;) {
-    const type = view.getUint16(at);
-    if (type === TYPE.end || type === TYPE.error) return true;
-    at += 8 + view.getUint32(at + 4);
-  }
-  return false;
-}
-
-/**
  * One invocation of `path`, with `headers` on top of the request's own: the
- * start and input Restate sends, with the request kept open until the attempt
- * says it is over, as `endpoint.test.ts` drives one.
+ * core's fake runtime plays Restate on the explicit recovery protocol, with
+ * the request kept open until the runtime closes its side, as
+ * `endpoint.test.ts` drives one.
  */
 async function invoke(path: string, headers: Record<string, string>, input: unknown) {
-  const request = client.request({ ':method': 'POST', ':path': path, 'content-type': V8, ...headers });
-  request.write(
-    Buffer.from(frame(TYPE.start, [...bytes(1, [1, 2, 3, 4]), ...bytes(2, 'inv_id'), ...uint(3, 1), ...bytes(6, 'k')])),
-  );
-  request.write(Buffer.from(frame(TYPE.input, bytes(14, value(JSON.stringify(input))))));
+  const rt = new FakeRuntime({ key: 'k', input: new TextEncoder().encode(JSON.stringify(input)) });
+  const request = client.request({
+    ':method': 'POST',
+    ':path': path,
+    ...Object.fromEntries(FakeRuntime.requestHeaders().map(({ key, value }) => [key, value])),
+    ...headers,
+  });
+  request.write(rt.startAttempt());
 
   const chunks: Buffer[] = [];
   const status = Promise.withResolvers<number>();
+  let served = false;
   request.on('response', (head) => {
     const code = Number(head[':status']);
-    // A refusal sends plain text and no end frame, so nothing below would
-    // ever close the request: its head is the whole answer.
+    served = code === 200;
+    // A refusal sends plain text, and nothing below would ever close the
+    // request: its head is the whole answer.
     if (code !== 200) request.end();
     status.resolve(code);
   });
+  let ended = false;
   await new Promise<void>((resolve) => {
     request.on('data', (chunk: Buffer) => {
       chunks.push(chunk);
-      // Only the headers of the whole frames so far: a chunk can cut a frame
-      // in two, and decoding half of one is reading rubbish.
-      if (over(Buffer.concat(chunks))) request.end();
+      // A refusal's body is plain text, for no runtime to read.
+      if (ended || !served) return;
+      rt.receive(chunk);
+      const answer = rt.takeOutput();
+      if (answer.length > 0) request.write(answer);
+      if (rt.isClosed()) {
+        ended = true;
+        request.end();
+      }
     });
     request.on('end', () => resolve());
     request.on('close', () => resolve());
@@ -139,13 +138,10 @@ async function invoke(path: string, headers: Record<string, string>, input: unkn
   return { status: code, sent: code === 200 ? messages(Buffer.concat(chunks)) : [] };
 }
 
-/** What the handler answered, as its output message carries it. */
+/** What the handler answered, as its end message carries it. */
 function answered(sent: Awaited<ReturnType<typeof invoke>>['sent']): unknown {
-  const output = sent.find((m) => m.type === TYPE.output);
-  if (output === undefined) return undefined;
-  const carried = decode(output.fields.get(14)![0] as Uint8Array);
-  const content = carried.get(1)?.[0] as Uint8Array | undefined;
-  return content === undefined ? undefined : JSON.parse(Buffer.from(content).toString());
+  const value = output(sent);
+  return value === undefined ? undefined : JSON.parse(value);
 }
 
 const failures: string[] = [];
@@ -194,6 +190,24 @@ for (const [what, path, headers] of [
     refused.status === 401,
     `status ${refused.status}`,
   );
+}
+
+// Discovery is served by this package too, ahead of the SDK (manifest v6):
+// signed, it answers; unsigned, it is refused.
+for (const [what, headers, expected] of [
+  ['signed', signature('/discover'), 200],
+  ['unsigned', {}, 401],
+] as const) {
+  const request = client.request({
+    ':method': 'GET',
+    ':path': '/discover',
+    accept: 'application/vnd.restate.endpointmanifest.v6+json',
+    ...headers,
+  });
+  const code = await new Promise<number>((resolve) => request.on('response', (h) => resolve(Number(h[':status']))));
+  request.resume();
+  request.end();
+  check(`a ${what} discovery is answered ${expected}`, code === expected, `status ${code}`);
 }
 
 client.close();

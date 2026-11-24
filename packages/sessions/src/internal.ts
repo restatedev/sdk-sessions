@@ -23,10 +23,10 @@ export { ScopeKey } from './scope.ts';
 export { open, type Connection, type Store, type ConnectionTransaction, type Working } from './database.ts';
 // The attempt on the explicit recovery VM, for the tests that drive one.
 export { AttemptDriver, AttemptFailed, AttemptShutDown } from './driver.ts';
-export { Vm, isShutDown } from './vm.ts';
-export { serveSession, servedHere, type Stream } from './handler.ts';
+export { Vm, isShutDown, refusedStatus, explicitRecoveryProtocolRange } from './vm.ts';
+export { serveSession, goAway, CONTENT_TYPE, type Stream } from './handler.ts';
 export { needing, served } from './serve.ts';
-export { invokeRoute, patchEndpoint } from './endpoint.ts';
+export { invokeRoute, patchEndpoint, manifestV6 } from './endpoint.ts';
 export {
   attach,
   cancelCalls,
@@ -39,4 +39,11 @@ export {
   start,
   withStoreWrapper,
   type AttemptContext,
+  // The explicit recovery protocol's additions, provisional.
+  invocationState,
+  readSignal,
+  sendSignal,
+  flush,
+  span,
+  type InvocationState,
 } from './object.ts';

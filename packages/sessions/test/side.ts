@@ -1,23 +1,18 @@
-// Restate's side of a session object's attempt, played with wire bytes: it
-// holds the object's state, answers the attempt's reads, stores its writes,
-// acks what asks to be acked, answers its calls, and can cancel the
-// invocation or shut the attempt down at a moment a test chooses. Shared by
-// the tests that serve a handler with `serveSession` (`handler.test.ts`,
-// `saga.test.ts`, `transaction-cancel.test.ts`).
-import { HEAD_KEY } from '@restatedev/sessions/internal';
+// Restate's side of a session object's invocation, played by the core's fake
+// runtime of the explicit recovery protocol (`fake.ts`): it holds the
+// object's state, applies the attempt's actions, answers its reads, commits
+// and calls, and can cancel the invocation or shut the attempt down at a
+// moment a test chooses. It also checks everything the attempt sends against
+// the protocol: `settle` fails on any violation it found. Shared by the tests
+// that serve a handler with `serveSession` (`handler.test.ts`,
+// `saga.test.ts`, `transaction-cancel.test.ts`, `protocol.test.ts`).
 import { CancelledError } from '@restatedev/restate-sdk';
 import { serveSession, type Stream } from '../src/handler.ts';
-import { bytes, decode, field, frame, uint } from './wire.ts';
-import { messages, REQUESTED_ACK, TYPE as BASE, V8, value, type Message } from './vm-support.ts';
+import { HEAD_KEY } from '../src/object.ts';
+import { FakeRuntime, type FakeOutcome } from './fake.ts';
+import { ACTION, decode as decodeFields, members, messages, num, str, TYPE, type Message } from './wire.ts';
 
-export const TYPE = {
-  ...BASE,
-  getStateKeys: 0x0406,
-  getStateKeysCompletion: 0x8006,
-  run: 0x0411,
-  oneWayCall: 0x040e,
-  sendSignal: 0x0410,
-} as const;
+export { TYPE } from './wire.ts';
 
 export const text = (b: Uint8Array | undefined) => (b === undefined ? undefined : Buffer.from(b).toString());
 
@@ -29,20 +24,31 @@ export interface Made {
   idempotencyKey: string | undefined;
   /** The input, as the text of its bytes. */
   input: string;
-  /** The invocation id Restate gave a call; a send's is never answered here. */
+  /** Inside the commit's atomic group (a transaction's send). */
+  inGroup: boolean;
+  /** The invocation id Restate gave it. */
   id?: string;
 }
 
-/** What the attempt asked Restate for, which Restate answers: a state read (of its key), an ack, or a call's result. */
-export type Ask = `read ${string}` | 'ack' | `call ${string}`;
+/**
+ * What the attempt asked Restate for, which Restate answers: a state read
+ * (of its key), a commit (an atomic group whose result it wants), a flush, or
+ * a call's result.
+ */
+export type Ask = `read ${string}` | 'commit' | 'flush' | 'keys' | `call ${string}` | `signal ${string}`;
 
 export interface SideOptions {
   /**
-   * Restate cancels the invocation once, instead of nothing, as it acks the
-   * attempt's first commit (`true`) or its N-th (a number, from 1).
+   * Restate cancels the invocation once, instead of nothing, as it receives
+   * the attempt's first commit (`true`) or its N-th (a number, from 1), and
+   * applies the commit only once the attempt has taken the signal in.
    */
   cancelOnCommit?: boolean | number;
-  /** A retry of a cancelled invocation: the signal is among the earlier attempts' entries. */
+  /**
+   * A retry of a cancelled invocation: an attempt was lost, then the
+   * invocation was cancelled, and this attempt starts knowing it
+   * (`StartMessage.cancelled`).
+   */
   cancelAtStart?: boolean;
   /**
    * Restate cancels the invocation just before it answers the N-th thing the
@@ -50,7 +56,10 @@ export interface SideOptions {
    * attempt has taken the signal in.
    */
   cancelBeforeAnswer?: number;
-  /** The N-th thing the attempt asks for (from 1) is never answered: a test shuts the attempt down meanwhile. */
+  /**
+   * From the N-th thing the attempt asks for (from 1), Restate applies and
+   * answers nothing more: a test shuts the attempt down meanwhile.
+   */
   withholdAnswer?: number;
   /**
    * Start the invocation with only the database's head preloaded, as
@@ -61,62 +70,93 @@ export interface SideOptions {
   hold?: string[];
   /** Calls to these targets (`Service/handler`) fail with this terminal failure. */
   fail?: Record<string, { code: number; message: string }>;
-  /** Give each call an invocation id of its own (`inv_<n>`), rather than `inv_started` for all. */
+  /** The fake runtime gives every call an invocation id of its own: kept for the tests that ask for it. */
   idPerCall?: boolean;
+  /** The violations of the protocol the test expects: `settle` fails on any other. */
+  allowViolations?: boolean;
+  /**
+   * The invocation's runtime, for a later attempt of it: `start` then starts
+   * that runtime's next attempt (its key and input are the invocation's).
+   */
+  runtime?: FakeRuntime;
 }
-
-const signal = () => frame(TYPE.signal, [...uint(2, 1), ...bytes(4, [])]);
 
 /** Let the event loop run for `ms`, so the attempt takes in what it was sent. */
 export const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** A call or a send of `message`, as {@link Made} has it. */
-function made(message: Message, keyField: number, idempotencyField: number): Made {
-  const string = (n: number) => text(message.fields.get(n)?.[0] as Uint8Array | undefined);
+/** Whether an action message wants its result: it has a result id. */
+const wantsResult = (message: Message) => num(message, ACTION.resultId) !== 0;
+
+/** A call or send of `message`, as {@link Made} has it. */
+function made(message: Message, inGroup: boolean): Made {
+  const parameter = message.fields.get(4)?.[0] as Uint8Array | undefined;
+  const content = parameter === undefined ? undefined : decodeValue(parameter);
   return {
-    service: string(1)!,
-    handler: string(2)!,
-    key: string(keyField) ?? '',
-    idempotencyKey: string(idempotencyField),
-    input: string(3) ?? '',
+    service: str(message, 1)!,
+    handler: str(message, 2)!,
+    key: str(message, 3) ?? '',
+    idempotencyKey: str(message, 6),
+    input: text(content) ?? '',
+    inGroup,
   };
 }
 
+/** The content of a `Value` message (field 1). */
+function decodeValue(value: Uint8Array): Uint8Array {
+  return (decodeFields(value).get(1)?.[0] as Uint8Array | undefined) ?? new Uint8Array();
+}
+
+/** What `message` asks Restate for, if anything. */
+function askOf(message: Message): Ask | undefined {
+  switch (message.type) {
+    case TYPE.getState:
+      return `read ${str(message, 2)}`;
+    case TYPE.getStateKeys:
+      return 'keys';
+    case TYPE.atomicGroup:
+      return wantsResult(message) ? 'commit' : undefined;
+    case TYPE.flush:
+      return 'flush';
+    case TYPE.call:
+      return wantsResult(message) ? `call ${str(message, 1)}/${str(message, 2)}` : undefined;
+    case TYPE.readSignal:
+      return `signal ${str(message, 1)}`;
+    default:
+      return undefined;
+  }
+}
+
 /**
- * Restate's side: it holds the object's state, answers the reads, applies the
- * writes, and acks the commands that asked to be acked.
+ * Restate's side: it holds the object's state, applies the attempt's actions
+ * and answers them, as the fake runtime does.
  */
 export function restateSide(state = new Map<string, Uint8Array>(), options: SideOptions = {}) {
   const { cancelOnCommit = false, cancelAtStart = false, cancelBeforeAnswer, lazy = false } = options;
   const holding = new Set(options.hold ?? []);
-  const chunks: Uint8Array[] = [];
-  let resolveChunk: (() => void) | undefined;
-  let closed = false;
-  /**
-   * The journal index of the last command seen. Restate numbers *every*
-   * command, so an ack must count the calls too, not only the writes.
-   */
-  let index = 0; // the input is the journal's first command, at index 0
+  let rt: FakeRuntime | undefined = options.runtime;
 
+  // The request body, as the attempt reads it.
   const inbound: Uint8Array[] = [];
+  let resolveChunk: (() => void) | undefined;
+  let bodyClosed = false;
   const toSdk = {
     push(chunk: Uint8Array) {
+      if (chunk.length === 0 || bodyClosed) return;
       inbound.push(chunk);
       resolveChunk?.();
       resolveChunk = undefined;
     },
     close() {
-      closed = true;
+      bodyClosed = true;
       resolveChunk?.();
       resolveChunk = undefined;
     },
   };
-
   const body: AsyncIterable<Uint8Array> = {
     async *[Symbol.asyncIterator]() {
       for (;;) {
         while (inbound.length > 0) yield inbound.shift()!;
-        if (closed) return;
+        if (bodyClosed) return;
         await new Promise<void>((resolve) => (resolveChunk = resolve));
       }
     },
@@ -124,55 +164,193 @@ export function restateSide(state = new Map<string, Uint8Array>(), options: Side
 
   let head: { status: number; headers: Record<string, string> } | undefined;
   let ended = false;
-  /** How many of the attempt's messages have been answered. */
-  let answered = 0;
-  /** Whether the one cancel signal has been sent (`cancelOnCommit`, `cancelBeforeAnswer`, `cancel()`). */
+  /** What the attempt wrote and the fake has not received yet. */
+  let unread: Buffer = Buffer.alloc(0);
+  /** Everything the attempt wrote, as messages. */
+  const sentMessages: Message[] = [];
+  /** Whether the one cancel signal has been sent. */
   let signalled = false;
-  /** How many commits have been acked, for `cancelOnCommit`. */
-  let acked = 0;
-  /** What the attempt asked for, in order. */
+  let commitsSeen = 0;
   const asks: Ask[] = [];
-  /** The calls and sends the attempt made, and the invocations it cancelled. */
   const calls: Made[] = [];
   const sends: Made[] = [];
-  const cancels: string[] = [];
-  /** The answers withheld, by target, oldest first. */
-  const held = new Map<string, { result: number; input: string }[]>();
+  /** The answers withheld, by target, oldest first: the invocation ids. */
+  const held = new Map<string, string[]>();
+  /** The calls already answered or held, by invocation id: an earlier attempt's are its side's. */
+  const handled = new Set<string>(rt?.calls().map((c) => c.invocationId) ?? []);
   /** How many of the attempt's messages were out when the signal went in. */
   let signalledAt: number | undefined;
+  /** Serializes {@link exchange}. */
+  let exchanging: Promise<void> = Promise.resolve();
 
-  const stream: Stream = {
-    headers: { 'content-type': V8 },
-    body,
-    writeHead: (status, headers) => void (head = { status, headers }),
-    write: (chunk) => void chunks.push(chunk),
-    close: () => void (ended = true),
+  const runtime = () => {
+    if (rt === undefined) throw new Error('start the invocation first');
+    return rt;
   };
-  const sent = () => messages(Buffer.concat(chunks));
+  /** This side's attempt of the invocation, once started. */
+  let mine: number | undefined;
+  /**
+   * Whether this side's attempt is the runtime's latest: an earlier side of
+   * the same invocation must not take a later attempt's output, nor close it.
+   */
+  const current = () => rt !== undefined && mine !== undefined && rt.attemptNumber() === mine;
+
+  /** Hand the attempt what the runtime wrote, and close its body once the runtime closed its side. */
+  const deliver = () => {
+    if (!current()) return;
+    const out = runtime().takeOutput();
+    toSdk.push(out);
+    if (runtime().isClosed()) toSdk.close();
+  };
+
+  /** Mirror the fake's object state into `state`. */
+  const mirror = () => {
+    if (rt === undefined) return;
+    state.clear();
+    for (const { key, value } of rt.objectState()) state.set(key, new Uint8Array(value));
+  };
+
   const cancelNow = () => {
     signalled = true;
-    signalledAt = sent().length;
-    toSdk.push(signal());
+    signalledAt = sentMessages.length;
+    runtime().cancel();
+    deliver();
   };
-  const answer = (result: number, input: string) =>
-    toSdk.push(frame(TYPE.callCompletion, [...uint(1, result), ...field(5, 2, value(input))]));
 
-  /**
-   * Before answering what the attempt asked for, the signal if this ask is
-   * the one; whether to answer it.
-   */
-  const asked = async (ask: Ask) => {
-    asks.push(ask);
-    if (options.withholdAnswer === asks.length) return false;
-    if (cancelBeforeAnswer === asks.length && !signalled) {
-      cancelNow();
-      // The one bounded wait: the signal and the answer would otherwise reach
-      // the attempt in one turn, and it must take the signal in with the
-      // answer still outstanding.
-      await pause(20);
+  /** Give the calls and sends made the invocation ids Restate gave them. */
+  const fillIds = () => {
+    const records = runtime().calls();
+    const taken = new Set([...calls, ...sends].flatMap((m) => (m.id === undefined ? [] : [m.id])));
+    for (const m of [...calls, ...sends]) {
+      if (m.id !== undefined) continue;
+      const same = (c: (typeof records)[number]) =>
+        c.service === m.service && c.handler === m.handler && c.key === m.key;
+      const record =
+        records.find((c) => same(c) && !taken.has(c.invocationId) && text(c.parameter) === m.input) ??
+        // A call made again with its idempotency key reaches the same invocation.
+        (m.idempotencyKey === undefined
+          ? undefined
+          : records.find((c) => same(c) && c.idempotencyKey === m.idempotencyKey));
+      if (record === undefined) continue;
+      m.id = record.invocationId;
+      taken.add(record.invocationId);
     }
-    return true;
   };
+
+  /** Answer the calls made and not answered: echo their input, or fail, unless held. */
+  const answerCalls = () => {
+    fillIds();
+    for (const call of runtime().calls()) {
+      if (handled.has(call.invocationId) || call.output !== undefined) continue;
+      handled.add(call.invocationId);
+      const target = `${call.service}/${call.handler}`;
+      // A call to key `k` is never answered: that is what a `start()`ed
+      // call, whose result nobody holds, looks like to the handler.
+      if (call.key === 'k') continue;
+      if (holding.has(target)) {
+        held.set(target, [...(held.get(target) ?? []), call.invocationId]);
+        continue;
+      }
+      const failure = options.fail?.[target];
+      runtime().completeCall(
+        call.invocationId,
+        failure === undefined
+          ? { bytes: call.parameter }
+          : { failure: { code: failure.code, message: failure.message, metadata: [] } },
+      );
+    }
+  };
+
+  /** Hand the fake one message of the attempt's, as the options say. */
+  const receive = async (message: Message, bytes: Uint8Array) => {
+    sentMessages.push(message);
+    if (message.type === TYPE.call) (wantsResult(message) ? calls : sends).push(made(message, false));
+    if (message.type === TYPE.atomicGroup) {
+      for (const member of members(message)) if (member.type === TYPE.call) sends.push(made(member, true));
+    }
+    const ask = askOf(message);
+    if (ask === undefined) {
+      runtime().receive(bytes);
+      return;
+    }
+    asks.push(ask);
+    if (ask === 'commit') commitsSeen++;
+    const cancelHere =
+      !signalled &&
+      ((cancelBeforeAnswer !== undefined && cancelBeforeAnswer === asks.length) ||
+        (ask === 'commit' &&
+          (cancelOnCommit === true ? 1 : cancelOnCommit === false ? 0 : cancelOnCommit) === commitsSeen));
+    if (options.withholdAnswer === asks.length) {
+      runtime().setAutoApply(false);
+      runtime().receive(bytes);
+      return;
+    }
+    if (!cancelHere) {
+      runtime().receive(bytes);
+      return;
+    }
+    // The signal reaches the attempt with this still outstanding: the one
+    // bounded wait, so that it takes the signal in first.
+    runtime().setAutoApply(false);
+    runtime().receive(bytes);
+    cancelNow();
+    await pause(20);
+    runtime().applyPending(1_000_000);
+    runtime().setAutoApply(true);
+  };
+
+  /** One round: what the attempt wrote reaches the fake, and what the fake answers reaches the attempt. */
+  const round = async () => {
+    if (rt === undefined || !current()) return;
+    for (;;) {
+      // Whole messages only: the header says how long each is.
+      if (unread.length < 8) break;
+      const length = unread.readUInt32BE(4);
+      if (unread.length < 8 + length) break;
+      const bytes = unread.subarray(0, 8 + length);
+      unread = unread.subarray(8 + length);
+      const [message] = messages(bytes);
+      try {
+        await receive(message!, bytes);
+      } catch (error) {
+        // A violation: the fake failed the attempt, and keeps it.
+        if (!(error as Error).message.startsWith('FAKE_VIOLATION')) throw error;
+      }
+      answerCalls();
+      deliver();
+    }
+    answerCalls();
+    deliver();
+    mirror();
+  };
+  /** {@link round}, one at a time. */
+  const exchange = () => {
+    exchanging = exchanging.then(round);
+    return exchanging;
+  };
+
+  const stream: Stream = {
+    headers: Object.fromEntries(FakeRuntime.requestHeaders().map(({ key, value }) => [key, value])),
+    body,
+    writeHead: (status, headers) => void (head = { status, headers }),
+    write: (chunk) => {
+      unread = Buffer.concat([unread, chunk]);
+      void exchange();
+    },
+    close: () => {
+      ended = true;
+      void exchange().then(() => {
+        try {
+          if (current()) rt?.sdkClosed();
+        } catch {
+          // The runtime had nothing to close: an attempt that never started.
+        }
+        return mirror();
+      });
+    },
+  };
+
+  const outcomes = (): FakeOutcome[] => rt?.outcomes() ?? [];
 
   return {
     stream,
@@ -182,63 +360,77 @@ export function restateSide(state = new Map<string, Uint8Array>(), options: Side
     get ended() {
       return ended;
     },
+    /** The fake runtime, once {@link start}ed. */
+    get rt() {
+      return runtime();
+    },
     /** Everything the attempt wrote, as messages. */
-    sent,
+    sent: () => [...sentMessages],
     /** What the attempt asked Restate for, in order: see {@link Ask}. */
     asks,
-    /** The calls the attempt made, in order. */
+    /** The calls the attempt made (a result wanted), in order. */
     calls,
-    /** The sends the attempt made, in order. */
+    /** The sends the attempt made, in order, a transaction's in its commit's group included. */
     sends,
     /** The invocation ids the attempt sent a cancellation to, in order. */
-    cancels,
+    get cancels() {
+      return rt?.cancelsSent() ?? [];
+    },
     /** How many of the attempt's messages were out when the signal went in. */
     get signalledAt() {
       return signalledAt;
     },
-    /** Start the invocation for `key` with `input`. */
-    start(key: string, input: unknown) {
-      // Lazy, only the head is known: the attempt reads the rest from Restate.
-      const known = lazy ? [...state].filter(([k]) => k === HEAD_KEY) : [...state];
-      toSdk.push(
-        frame(TYPE.start, [
-          ...bytes(1, [1, 2, 3, 4]),
-          ...bytes(2, 'inv_test'),
-          // Known entries: the input, and for a retry of a cancelled
-          // invocation the signal the earlier attempt got. Restate sends
-          // every attempt the entries of the ones before it, and the VM is
-          // not ready to execute until it has them.
-          ...uint(3, cancelAtStart ? 2 : 1),
-          ...known.flatMap(([k, v]) => field(4, 2, [...bytes(1, k), ...bytes(2, [...v])])),
-          ...(lazy ? uint(5, 1) : []),
-          ...bytes(6, key),
-        ]),
-      );
-      toSdk.push(frame(TYPE.input, bytes(14, value(JSON.stringify(input)))));
-      // A retry of a cancelled invocation: the signal is among the entries of
-      // the earlier attempts, so the VM knows before the handler starts.
-      if (cancelAtStart) toSdk.push(signal());
+    /** How each attempt ended, as the runtime saw it. */
+    outcomes,
+    /** Start the invocation for `key` with `input`, and its first attempt (its second for `cancelAtStart`). */
+    start(key: string, input: unknown, { handler, service }: { handler?: string; service?: string } = {}) {
+      if (options.runtime !== undefined) {
+        toSdk.push(options.runtime.startAttempt());
+        mine = options.runtime.attemptNumber();
+        return;
+      }
+      rt = new FakeRuntime({
+        invocationId: 'inv_test',
+        key,
+        ...(handler !== undefined ? { handler } : {}),
+        ...(service !== undefined ? { service } : {}),
+        input: new TextEncoder().encode(JSON.stringify(input)),
+        objectPreload: lazy ? [HEAD_KEY] : 'all',
+      });
+      for (const [k, v] of state) rt.setObjectState(k, v);
+      if (cancelAtStart) {
+        // An attempt the runtime lost, then the cancellation: the next one
+        // starts knowing it.
+        rt.startAttempt();
+        rt.loseAttempt();
+        rt.cancel();
+        signalled = true;
+        signalledAt = 0;
+      }
+      toSdk.push(rt.startAttempt());
+      mine = rt.attemptNumber();
     },
-    /**
-     * Restate cancels the invocation now. Called while the handler works
-     * outside Restate, nothing of the attempt is waiting and the
-     * cancellation is carried to its next wait.
-     */
+    /** Restate cancels the invocation now. */
     cancel() {
       cancelNow();
     },
     /**
-     * Restate closes the request body while the handler runs, as its
-     * inactivity timeout does: the attempt is shut down.
+     * Restate shuts the attempt down: it closes its side, for a reason of its
+     * own (`own`, the default) or for the attempt's silence (`inactivity`).
      */
-    shutDown() {
-      toSdk.close();
+    shutDown(reason: 'own' | 'inactivity' = 'own') {
+      runtime().shutDown(reason);
+      deliver();
     },
     /** Answer the oldest withheld call to `target` (`Service/handler`), echoing its input. */
     release(target: string) {
       const next = held.get(target)?.shift();
       if (next === undefined) throw new Error(`no call to ${target} is withheld`);
-      answer(next.result, next.input);
+      const call = runtime()
+        .calls()
+        .find((c) => c.invocationId === next)!;
+      runtime().completeCall(next, { bytes: call.parameter });
+      deliver();
     },
     /** Wait until `condition` holds, polling, or fail after `ms`. */
     async until(condition: () => boolean, what: string, ms = 10_000) {
@@ -249,115 +441,21 @@ export function restateSide(state = new Map<string, Uint8Array>(), options: Side
       }
     },
     /**
-     * Answer what the attempt asks for until it ends, then close the request
-     * body. Closing it earlier is what Restate's inactivity timeout does, and
-     * would shut the attempt down.
+     * Run until the attempt's response ends: the fake answers as it goes, and
+     * after the attempt's last message it closes its side, then the attempt
+     * closes. Fails on any violation of the protocol the fake found.
      */
     async settle({ ms = 20_000 } = {}) {
       const deadline = Date.now() + ms;
-      for (;;) {
-        if (ended || closed || Date.now() >= deadline) break;
-        await pause(1);
-        const out = sent();
-        for (const message of out.slice(answered)) {
-          answered++;
-          // Commands are journaled and numbered; ephemeral commands (0x02xx)
-          // and notifications (0x8xxx) are not.
-          if (message.type >= 0x0400 && message.type < 0x8000) {
-            index++;
-            // Restate acks a command only if it asked to be acked, and the
-            // ack of one covers every command before it. Acking the rest
-            // would answer a commit that is still waiting.
-            if ((message.flags & REQUESTED_ACK) !== 0) {
-              acked++;
-              // A withheld ack still stores the command, below.
-              if (await asked('ack')) {
-                // Cancelling instead of acking is a cancellation that lands
-                // with the database waiting on Restate. Restate signals a
-                // cancellation once, not on every commit: what follows it is
-                // acked as usual.
-                const on = cancelOnCommit === true ? 1 : cancelOnCommit === false ? 0 : cancelOnCommit;
-                if (acked === on && !signalled) cancelNow();
-                toSdk.push(frame(TYPE.commandAck, uint(1, index)));
-              }
-            }
-          }
-          if (message.type === TYPE.getStateEphemeral) {
-            const key = text(message.fields.get(2)?.[0] as Uint8Array)!;
-            const id = message.fields.get(1)![0] as number;
-            if (!(await asked(`read ${key}`))) continue;
-            const stored = state.get(key);
-            toSdk.push(
-              frame(TYPE.getStateEphemeralNotification, [
-                ...uint(1, id),
-                ...(stored === undefined ? field(4, 2, []) : field(5, 2, value(stored))),
-              ]),
-            );
-          } else if (message.type === TYPE.setState) {
-            const key = text(message.fields.get(1)?.[0] as Uint8Array)!;
-            const wrapped = decode(message.fields.get(3)![0] as Uint8Array);
-            state.set(key, wrapped.get(1)![0] as Uint8Array);
-          } else if (message.type === TYPE.clearState) {
-            state.delete(text(message.fields.get(1)?.[0] as Uint8Array)!);
-          } else if (message.type === TYPE.oneWayCall) {
-            sends.push(made(message, 6, 7));
-          } else if (message.type === TYPE.sendSignal) {
-            cancels.push(text(message.fields.get(1)![0] as Uint8Array)!);
-          } else if (message.type === TYPE.call) {
-            const call = made(message, 5, 6);
-            const target = `${call.service}/${call.handler}`;
-            const id = options.idPerCall ? `inv_${calls.length + 1}` : 'inv_started';
-            calls.push({ ...call, id });
-            toSdk.push(
-              frame(TYPE.callInvocationIdCompletion, [
-                ...uint(1, message.fields.get(10)![0] as number),
-                ...bytes(16, id),
-              ]),
-            );
-            const result = message.fields.get(11)![0] as number;
-            const failure = options.fail?.[target];
-            // A call to key `k` is never answered: that is what a `start()`ed
-            // call, whose result nobody holds, looks like to the handler.
-            if (call.key === 'k') continue;
-            if (holding.has(target)) {
-              held.set(target, [...(held.get(target) ?? []), { result, input: call.input }]);
-              continue;
-            }
-            if (!(await asked(`call ${target}`))) continue;
-            if (failure === undefined) answer(result, call.input);
-            else
-              toSdk.push(
-                frame(TYPE.callCompletion, [
-                  ...uint(1, result),
-                  ...field(6, 2, [...uint(1, failure.code), ...bytes(2, failure.message)]),
-                ]),
-              );
-          } else if (message.type === TYPE.getStateKeys) {
-            const id = message.fields.get(11)![0] as number;
-            toSdk.push(
-              frame(TYPE.getStateKeysCompletion, [
-                ...uint(1, id),
-                ...field(
-                  5,
-                  2,
-                  [...state.keys()].flatMap((k) => bytes(1, k)),
-                ),
-              ]),
-            );
-          }
-        }
-        // The attempt is over once it has said so; nothing more will come.
-        if (out.some((m) => m.type === TYPE.end || m.type === TYPE.error)) break;
+      const over = () => ended;
+      while (!over() && Date.now() < deadline) await pause(1);
+      await exchange();
+      await pause(0);
+      await exchange();
+      if (!ended) throw new Error(`the attempt did not end within ${ms}ms`);
+      if (!options.allowViolations && rt !== undefined && rt.violations().length > 0) {
+        throw new Error(`the fake runtime found violations: ${rt.violations().join('; ')}`);
       }
-      // Shut down by the test: the attempt ends without a word.
-      if (closed) return;
-      if (!ended && !sent().some((m) => m.type === TYPE.end || m.type === TYPE.error)) {
-        // Closing the body here is what Restate's inactivity timeout does, and
-        // the attempt would report a shutdown — which reads as a puzzling
-        // assertion failure rather than as the hang it is.
-        throw new Error(`the attempt did not end within ${ms}ms`);
-      }
-      toSdk.close();
     },
     state,
   };
@@ -390,24 +488,32 @@ export async function seeded(
   const state = new Map<string, Uint8Array>();
   const r = restateSide(state);
   const serving = serveSession(definition, handler, r.stream);
-  r.start(key, input);
+  r.start(key, input, { handler, service: definition.name });
   await r.settle();
   await serving;
   return state;
 }
 
-/** How many of the attempt's commands asked for an ack: a commit each. */
-export const commits = (sent: Message[]) =>
-  sent.filter((m) => m.type >= 0x0400 && m.type < 0x8000 && (m.flags & REQUESTED_ACK) !== 0).length;
+/** How many commits the attempt made: atomic groups whose result it wanted. */
+export const commits = (sent: Message[]) => sent.filter((m) => m.type === TYPE.atomicGroup && wantsResult(m)).length;
 
 /** How the invocation ended: its output's value as text, or its failure. */
 export function outcome(sent: Message[]): { value: string } | { code: number; message: string } | undefined {
-  const output = sent.find((m) => m.type === TYPE.output);
-  if (output === undefined) return undefined;
-  const ok = output.fields.get(14)?.[0] as Uint8Array | undefined;
-  if (ok !== undefined) return { value: text(decode(ok).get(1)![0] as Uint8Array)! };
-  const failure = decode(output.fields.get(15)![0] as Uint8Array);
-  return { code: failure.get(1)![0] as number, message: text(failure.get(2)?.[0] as Uint8Array) ?? '' };
+  const end = sent.find((m) => m.type === TYPE.end);
+  if (end === undefined) return undefined;
+  const ok = end.fields.get(1)?.[0] as Uint8Array | undefined;
+  if (ok !== undefined) return { value: text(decodeValue(ok))! };
+  const failure = decodeFields(end.fields.get(2)![0] as Uint8Array);
+  return {
+    code: (failure.get(1)?.[0] as number | undefined) ?? 0,
+    message: text(failure.get(2)?.[0] as Uint8Array) ?? '',
+  };
+}
+
+/** The value the invocation ended with, as text (fails if it ended with a failure). */
+export function output(sent: Message[]): string | undefined {
+  const ended = outcome(sent);
+  return ended !== undefined && 'value' in ended ? ended.value : undefined;
 }
 
 /** Run `handler` of `definition` once on `state` for `key`, answering everything: its outcome. */
@@ -420,7 +526,7 @@ export async function run(
 ) {
   const r = restateSide(state);
   const serving = serveSession(definition, handler, r.stream);
-  r.start(key, input);
+  r.start(key, input, { handler, service: definition.name });
   await r.settle();
   await serving;
   return outcome(r.sent());

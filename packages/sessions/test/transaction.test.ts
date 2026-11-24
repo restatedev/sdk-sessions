@@ -9,10 +9,7 @@ import { memoryStore, sqlAttempt } from './support.ts';
 
 type Send = restate.GenericSend<Uint8Array>;
 
-/**
- * The database's head: the commit point of the flush whose record holds the
- * outbox, and the key a session object preloads.
- */
+/** The database's head: the commit point of a flush, and the key a session object preloads. */
 const HEAD = HEAD_KEY;
 let namespaces = 0;
 
@@ -42,7 +39,7 @@ function object() {
       };
       return { ...sqlAttempt({ map, fence, send }), sent, fence };
     },
-    /** The keys of the sends in the stored outbox. */
+    /** The keys of the sends in an outbox record, which this version no longer keeps: always none. */
     async outbox() {
       const db = await open(`outbox-${namespaces++}`, memoryStore(map));
       const record = await db.record('outbox');
@@ -67,16 +64,6 @@ const transfer = (a: ReturnType<ReturnType<typeof object>['attempt']>) =>
     // Nothing is sent before the commit.
     expect(a.sent).toHaveLength(before);
   });
-
-const balance = async (o: ReturnType<typeof object>) => {
-  const a = o.attempt();
-  const [[count]] = (await a.end(() => a.db.values("SELECT count(*) FROM sqlite_master WHERE name = 'balance'"))) as [
-    [number],
-  ];
-  if (!count) return 0;
-  const b = o.attempt();
-  return (await b.end(() => b.db.values('SELECT count(*) FROM balance')))[0]![0];
-};
 
 /**
  * An attempt whose transaction's commit Restate cancels as it waits for its
@@ -107,28 +94,28 @@ function cancelledCommit(map: Map<string, Uint8Array>, sent: Send[], onCancelled
   });
 }
 
-/** The send was made by the cancelled attempt's end, once: the key's next invocation finds the commit and nothing to send. */
+/** The send was made with the commit, once: the key's next invocation finds the commit and nothing to send. */
 async function expectMadeOnce(map: Map<string, Uint8Array>, sent: Send[]) {
   expect(sent.map(decode)).toEqual(['book']);
-  expect(sent[0]!.idempotencyKey).toMatch(/^transaction\/[\w-]+\/0$/);
   const next = sqlAttempt({ map, send: (s: Send) => void sent.push(s), id: 'next' });
   expect(await next.end(() => next.db.values('SELECT v FROM balance'))).toEqual([[5]]);
   expect(sent).toHaveLength(1);
 }
 
+// Without the VM (a test's store in memory) a transaction's sends are made
+// right after its commit's writes, before its sync. On Restate they are in
+// the commit's atomic group, stored with its rows or not at all
+// (`protocol.test.ts`, `transaction-cancel.test.ts`, `commit-group.test.ts`):
+// there is no outbox to remember them across a crash, here or there.
 describe('the sends of a transaction', () => {
-  it('sends once the transaction commits, each with a key of the transaction', async () => {
+  it('sends once the transaction commits, with no key of its own making, and keeps no table or record of them', async () => {
     const o = object();
     const a = o.attempt();
     await a.end(() => transfer(a));
-    expect(a.sent.map((s) => [s.service, s.key, s.method, decode(s)])).toEqual([
-      ['Store', 'a', 'reserve', 'book'],
-      ['Store', 'b', 'deposit', 5],
+    expect(a.sent.map((s) => [s.service, s.key, s.method, decode(s), s.idempotencyKey])).toEqual([
+      ['Store', 'a', 'reserve', 'book', undefined],
+      ['Store', 'b', 'deposit', 5, undefined],
     ]);
-    const [first, second] = a.sent.map((s) => s.idempotencyKey);
-    expect(first).toMatch(/^transaction\/[0-9a-f-]{36}\/0$/);
-    expect(second).toBe(first!.replace(/0$/, '1'));
-    // Made and stored, they leave the outbox; the database has no table of them.
     expect(await o.outbox()).toEqual([]);
     const b = o.attempt();
     expect(await b.end(() => b.db.values("SELECT name FROM sqlite_master WHERE name LIKE '_restate%'"))).toEqual([]);
@@ -148,7 +135,6 @@ describe('the sends of a transaction', () => {
       .catch((e: unknown) => e);
     expect((failed as Error).message).toBe('no');
     expect(a.sent).toEqual([]);
-    expect(await o.outbox()).toEqual([]);
   });
 
   it('sends nothing for a COMMIT that is refused', async () => {
@@ -168,24 +154,6 @@ describe('the sends of a transaction', () => {
       expect(refused).toBeInstanceOf(restate.TerminalError);
     });
     expect(a.sent).toEqual([]);
-    expect(await o.outbox()).toEqual([]);
-  });
-
-  it('sends again, with the same keys, what a crash after the commit lost', async () => {
-    const o = object();
-    const crashed = o.attempt({ crash: true });
-    await expect(transfer(crashed)).rejects.toThrow('crashed'); // committed; the sends are lost
-    crashed.abort();
-    const lost = await o.outbox();
-    expect(lost).toHaveLength(2);
-    // The next attempt's first use of the database makes them: the target
-    // drops a send whose key it has seen.
-    const next = o.attempt();
-    await next.end(() => next.db.values('SELECT 1'));
-    expect(next.sent.map((s) => s.idempotencyKey)).toEqual(lost);
-    expect(next.sent.map(decode)).toEqual(['book', 5]);
-    expect(await o.outbox()).toEqual([]);
-    expect(await balance(o)).toBe(1);
   });
 
   it('makes the sends of a commit that a cancellation interrupted, as the handler ends with the CancelledError', async () => {
@@ -202,76 +170,11 @@ describe('the sends of a transaction', () => {
     await expectMadeOnce(map, sent);
   });
 
-  it('empties the outbox it sent again as it opens, before the handler ends', async () => {
-    const o = object();
-    const crashed = o.attempt({ crash: true });
-    await expect(transfer(crashed)).rejects.toThrow('crashed');
-    crashed.abort();
-    // An attempt that only reads, then suspends: its end stores nothing.
-    const next = o.attempt();
-    await next.db.values('SELECT 1');
-    next.abort();
-    expect(next.sent).toHaveLength(2);
-    expect(await o.outbox()).toEqual([]);
-    // The attempt that resumes the wait makes them no more.
-    const resumed = o.attempt();
-    await resumed.end(() => resumed.db.values('SELECT 1'));
-    expect(resumed.sent).toEqual([]);
-  });
-
-  it('sends again what a crash lost of a transaction that changed nothing', async () => {
-    const o = object();
-    const setup = o.attempt();
-    await setup.end(() => setup.db.execute('CREATE TABLE t (v INTEGER); INSERT INTO t VALUES (1)'));
-    const crashed = o.attempt({ crash: true });
-    // It only reads, and its update matches no rows: still, it committed.
-    const decide = crashed.db.transaction(async (tx) => {
-      const [[v]] = (await tx.values('SELECT v FROM t')) as [[number]];
-      await tx.execute('UPDATE t SET v = 2 WHERE v = 99');
-      if (v === 1) tx.send(store, 'a').reserve('book');
-    });
-    await expect(decide).rejects.toThrow('crashed');
-    crashed.abort();
-    const lost = await o.outbox();
-    expect(lost).toHaveLength(1);
-    const next = o.attempt();
-    await next.end(() => next.db.values('SELECT 1'));
-    expect(next.sent.map((s) => s.idempotencyKey)).toEqual(lost);
-    expect(await o.outbox()).toEqual([]);
-  });
-
-  it('drops the sends of a commit that a crash lost', async () => {
-    // The head that commits the sends is not stored, nor anything after.
-    const o = object();
-    const crashed = o.attempt();
-    const set = o.map.set.bind(o.map);
-    o.map.set = (key, value) => {
-      if (key === HEAD) crashed.fence.closed = true;
-      else set(key, value);
-      return o.map;
-    };
-    await crashed.db
-      .transaction(async (tx) => {
-        await tx.execute('CREATE TABLE t (v INTEGER)');
-        tx.send(store, 'a').reserve('book');
-      })
-      .catch(() => {});
-    crashed.abort();
-    o.map.set = set;
-    expect(await o.outbox()).toEqual([]);
-    const next = o.attempt();
-    expect(await next.end(() => next.db.values("SELECT count(*) FROM sqlite_master WHERE name = 't'"))).toEqual([[0]]);
-    expect(next.sent).toEqual([]);
-    expect(await o.outbox()).toEqual([]);
-  });
-
   it('keeps the sends of concurrent transactions apart', async () => {
     const o = object();
     const a = o.attempt();
     await a.end(() => Promise.all([transfer(a), transfer(a), transfer(a)]));
     expect(a.sent.map(decode)).toEqual(['book', 5, 'book', 5, 'book', 5]);
-    expect(new Set(a.sent.map((s) => s.idempotencyKey)).size).toBe(6);
-    expect(await o.outbox()).toEqual([]);
   });
 
   it('writes one head for a transaction without sends, after its tail entry', async () => {
@@ -285,22 +188,19 @@ describe('the sends of a transaction', () => {
     expect(sets.at(-1)).toBe(HEAD);
   });
 
-  it('empties the outbox as soon as the sends are made, before the handler ends', async () => {
+  it('makes them once: an attempt that resumes after them makes them no more', async () => {
     const o = object();
     const a = o.attempt();
-    // A suspension after the transaction: the attempt ends there, and its end stores nothing.
+    // A suspension after the transaction: the attempt ends there.
     await transfer(a);
     a.abort();
-    // Made, then emptied by a commit after them: an attempt that resumes the
-    // long wait makes them no more.
     expect(a.sent).toHaveLength(2);
-    expect(await o.outbox()).toEqual([]);
     const next = o.attempt();
     await next.end(() => next.db.values('SELECT 1'));
     expect(next.sent).toEqual([]);
   });
 
-  it('keeps the sends of transactions that commit while another empties the outbox', async () => {
+  it('keeps the sends of transactions that commit one after another', async () => {
     const o = object();
     const a = o.attempt();
     const sending = (item: string) =>
@@ -317,27 +217,6 @@ describe('the sends of a transaction', () => {
       'ink',
       'pen',
     ]);
-    expect(await o.outbox()).toEqual([]);
-  });
-
-  it('counts a delay from the commit', async () => {
-    const o = object();
-    const a = o.attempt({ crash: true });
-    let committed = 0;
-    await expect(
-      a.end(async () => {
-        await a.db.transaction(async (tx) => {
-          tx.send(store, 'a', { delay: { seconds: 10 } }).reserve('book');
-          // The body runs on after the send: its delay is not counted yet.
-          await new Promise((resolve) => setTimeout(resolve, 50));
-          committed = Date.now();
-        });
-      }),
-    ).rejects.toThrow('crashed');
-    const next = o.attempt();
-    await next.end(() => next.db.values('SELECT 1'));
-    const [delay] = next.sent.map((s) => s.delay as number);
-    expect(delay).toBeGreaterThan(10_000 - (Date.now() - committed) - 5);
   });
 
   it("keeps a send's delay and its own idempotency key", async () => {

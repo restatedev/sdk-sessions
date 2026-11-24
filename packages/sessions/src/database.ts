@@ -5,7 +5,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { Buffer } from 'node:buffer';
 import { addon as loaded } from './addon.ts';
-import { STATE_WAIT_OVER, type Vm } from './vm.ts';
+import { STATE_WAIT_OVER, type Vm, type VmCommit } from './vm.ts';
 import { AttemptShutDown } from './driver.ts';
 
 /** An SQL value. Integers come back as numbers, or as bigints beyond 2^53. */
@@ -176,7 +176,7 @@ export interface Store {
 /** The addon (`native/src/node.rs`). */
 interface Addon {
   open(namespace: string, store: Store, reader: boolean): Promise<NativeSession>;
-  openOnVm(namespace: string, store: Store, vm: Vm, name: string | undefined, reader: boolean): Promise<NativeSession>;
+  openOnVm(namespace: string, vm: Vm, name: string | undefined, reader: boolean): Promise<NativeSession>;
 }
 
 /**
@@ -190,8 +190,11 @@ interface NativeSession {
   /** `queryColumns`, after `before`'s statements in the same call; absent in an addon without it. */
   queryColumnsAfter?(before: string[], sql: string, params?: SqlParam[]): Answer<SqlQueryResult>;
   begin(): Answer<void>;
-  /** `withCommit`: whether the transaction has work to run at the commit's sync (see `Boundary.sync`). */
-  commit(records: Record<string, Buffer>, withCommit?: boolean): Answer<void>;
+  /**
+   * On the VM, `withCommit` is what commits with the transaction: its sends,
+   * inside the commit's atomic group (see {@link ConnectionTransaction.commitWith}).
+   */
+  commit(records: Record<string, Buffer>, withCommit?: VmCommit): Answer<void>;
   rollback(): Answer<void>;
   record(name: string): Answer<Buffer>;
   isUsable(): boolean;
@@ -227,21 +230,19 @@ export async function open(namespace: string, store: Store, { reader = false } =
 
 /**
  * Open the database of `namespace` over the attempt's VM: the state is read
- * and written as the VM's own commands, in the addon, so none of it crosses
- * into JavaScript. `store` is called at one point only — its `sync`, which the
- * boundary uses to run what the committing transaction gave
- * {@link ConnectionTransaction.withCommit} — so its `get`, `set` and `clear`
- * are never reached. `name` names a database beside the object's own.
+ * and written as the VM's own actions, in the addon, so none of it crosses
+ * into JavaScript, and a commit is one atomic group, with what the
+ * transaction gave {@link ConnectionTransaction.commitWith}. `name` names a
+ * database beside the object's own.
  */
 export async function openOnVm(
   namespace: string,
-  store: Store,
   vm: Vm,
   { name, reader = false, working }: { name?: string; reader?: boolean; working?: Working } = {},
 ): Promise<Connection> {
-  const boundary = new Boundary(store, working);
+  const boundary = new Boundary(noStore, working);
   try {
-    return new Connection(await boundary.alive(() => addon.openOnVm(namespace, boundary, vm, name, reader)), boundary);
+    return new Connection(await boundary.alive(() => addon.openOnVm(namespace, vm, name, reader)), boundary);
   } catch (error) {
     // The open reads the database's head. On this path that read waits in the
     // addon, so its failure arrives as text and `boundary.failed` is never
@@ -249,6 +250,14 @@ export async function openOnVm(
     throw stateWaitFailure(error) ?? boundary.failed?.error ?? error;
   }
 }
+
+/** The store of a database on the VM, which the addon never calls: it reads and writes the state itself. */
+const noStore: Store = {
+  get: () => Promise.reject(new Error('@restatedev/sessions: the VM serves the state')),
+  set: () => {},
+  clear: () => {},
+  sync: async () => {},
+};
 
 /**
  * The store as the addon calls it. An error of the store's crosses the addon
@@ -499,14 +508,16 @@ export class Connection extends Sql {
     }
     const records = await tx.end();
     // Its commit's sync runs what the body gave `withCommit`; one that
-    // wrote nothing synced nothing, and it runs after.
+    // wrote nothing synced nothing, and it runs after. On the VM, what it
+    // gave `commitWith` goes in the commit's atomic group.
     const runs = tx.commitRuns();
     this.boundary.withSync = runs;
     let unsynced: (() => void) | undefined;
     try {
-      // Told whether there is work, the addon on the VM skips the call back
-      // that would only run it.
-      await this.boundary.alive(() => this.native.commit(records, runs !== undefined));
+      const withCommit = tx.vmCommit();
+      await this.boundary.alive(() =>
+        withCommit === undefined ? this.native.commit(records) : this.native.commit(records, withCommit),
+      );
     } catch (error) {
       // A COMMIT that fails (a deferred constraint) leaves the transaction
       // open: without the rollback, the calls after it would run inside it.
@@ -589,11 +600,17 @@ export interface ConnectionTransaction extends DatabaseWriter {
   /**
    * Run `run` with the commit, right after its writes and before it waits
    * for them to be stored: the store's host gets what `run` makes after the
-   * writes, and before anything that fails the commit's wait (Restate's
-   * sends, which it stores in order with the writes). Never if the
-   * transaction rolls back.
+   * writes. Never if the transaction rolls back. For a store in JavaScript;
+   * on the VM, {@link commitWith}.
    */
   withCommit(run: () => void): void;
+  /**
+   * On the VM: commit `commit`'s sends with the transaction, inside its
+   * commit's atomic group, which is inside `commit.parentSpan`. A
+   * transaction that writes nothing makes them in a group of their own. A
+   * later call replaces it.
+   */
+  commitWith(commit: VmCommit): void;
   /**
    * Have `sql` (one statement, no parameters) run just before the next call
    * of this transaction, in the same call to the addon: the statements are
@@ -644,6 +661,8 @@ class OpenTransaction extends Sql implements ConnectionTransaction {
   private readonly records = new Map<string, Buffer>();
   /** What runs with its commit (`withCommit`). */
   private readonly withCommits: (() => void)[] = [];
+  /** What commits with it on the VM (`commitWith`). */
+  private committing: VmCommit | undefined;
   /** Settles once the last call queued so far has: the next call runs after it. */
   private queue: Promise<unknown> = Promise.resolve();
   private inflight = 0;
@@ -734,6 +753,15 @@ class OpenTransaction extends Sql implements ConnectionTransaction {
   withCommit(run: () => void): void {
     this.refuseEnded();
     this.withCommits.push(run);
+  }
+
+  commitWith(commit: VmCommit): void {
+    this.committing = commit;
+  }
+
+  /** What commits with it on the VM, once it ended: see {@link commitWith}. */
+  vmCommit(): VmCommit | undefined {
+    return this.committing;
   }
 
   /** What runs with its commit, once it ended: see {@link withCommit}. */

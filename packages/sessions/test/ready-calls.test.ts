@@ -16,7 +16,7 @@ type Mode = 'ready' | 'pending' | 'throw';
 /** A session of the addon whose calls answer as scripted: the next of `script`, else ready. */
 class Fake {
   script: Mode[] = [];
-  /** What the addon was called with, in order: `values:SQL`, `begin`, `commit:withCommit`, `rollback`. */
+  /** What the addon was called with, in order: `values:SQL`, `begin`, `commit:<what commits with it on the VM>`, `rollback`. */
   log: string[] = [];
   private readonly waiting: (() => void)[] = [];
 
@@ -135,14 +135,14 @@ describe('a connection', () => {
     });
     assertPromise(committed, 'transaction');
     assert.equal(await committed, 'one');
-    assert.deepEqual(f.log, ['begin', 'sql:t1', 'sql:t2', 'commit:false']);
+    assert.deepEqual(f.log, ['begin', 'sql:t1', 'sql:t2', 'commit:undefined']);
 
     f.log.length = 0;
     await db.transaction(async (tx) => {
       await tx.execute('t3');
       tx.withCommit(() => ran.push('with'));
     });
-    assert.deepEqual(f.log, ['begin', 'sql:t3', 'commit:true']);
+    assert.deepEqual(f.log, ['begin', 'sql:t3', 'commit:undefined']);
     assert.deepEqual(ran, ['with']);
 
     f.log.length = 0;
@@ -187,7 +187,7 @@ describe('a connection', () => {
       }
       await held;
       assert.deepEqual(await behind, [['behind']]);
-      assert.deepEqual(f.log, ['begin', 'sql:inside', 'commit:false', 'sql:behind'], script.join());
+      assert.deepEqual(f.log, ['begin', 'sql:inside', 'commit:undefined', 'sql:behind'], script.join());
     }
   });
 });
@@ -229,7 +229,7 @@ describe("an attempt's ctx.db", () => {
       assertPromise(behind, 'the query');
       await held;
       assert.deepEqual(await behind, [['behind']]);
-      assert.deepEqual(f.log, ['begin', 'sql:inside', 'commit:false', 'sql:behind']);
+      assert.deepEqual(f.log, ['begin', 'sql:inside', 'commit:undefined', 'sql:behind']);
     });
   });
 

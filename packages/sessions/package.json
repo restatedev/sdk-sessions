@@ -32,11 +32,11 @@
     }
   },
   "scripts": {
-    "build": "cargo build --release --manifest-path native/Cargo.toml && node native/copy-addon.ts release",
-    "build:debug": "cargo build --manifest-path native/Cargo.toml && node native/copy-addon.ts debug",
+    "build": "cargo build --release --features fake_runtime --manifest-path native/Cargo.toml && node native/copy-addon.ts release",
+    "build:debug": "cargo build --features fake_runtime --manifest-path native/Cargo.toml && node native/copy-addon.ts debug",
     "test": "vitest run",
     "test:rust": "cd native && cargo test --locked --release",
-    "lint:rust": "cd native && cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings",
+    "lint:rust": "cd native && cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo clippy --locked --all-targets --features fake_runtime -- -D warnings",
     "format:rust": "cd native && cargo fmt",
     "build:dist": "cargo build --locked --profile dist --manifest-path native/Cargo.toml && node native/copy-addon.ts dist",
     "build:ts": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json",

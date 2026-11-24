@@ -122,7 +122,7 @@ const behind = (applied: Applied, schemas: readonly Schema[]) =>
 /**
  * Empty the database in the transaction `tx`: drop every table, view, index
  * and trigger, and forget every schema, then apply `schemas` again. Its
- * other records (the outbox) stay. It commits with `tx`: what `tx` writes
+ * other records stay. It commits with `tx`: what `tx` writes
  * after it are the new database's first rows.
  */
 export async function dropAll(tx: ConnectionTransaction, schemas: readonly Schema[]) {

@@ -1,13 +1,15 @@
-// A transaction under a cancellation, on the wire (`side.ts`): wherever the
-// signal lands, `transaction()` either resolves, and then its rows are
-// committed and each of its sends went out once, or rejects with
-// `CancelledError`, and then it committed nothing and sent nothing. And the
-// handler sees one `CancelledError` for the one signal.
+// A transaction under a cancellation, on the explicit recovery protocol with
+// the core's fake runtime as Restate (`side.ts`): wherever the signal lands,
+// `transaction()` either resolves, and then its rows are committed and each of
+// its sends went out once, or rejects with `CancelledError`, and then it
+// committed nothing and sent nothing. And the handler sees one
+// `CancelledError` for the one signal. A transaction's sends are inside its
+// commit's atomic group: stored with its rows, or not at all.
 import { describe, expect, it } from 'vitest';
 import * as restate from '@restatedev/sessions';
 import { serveSession } from '../src/handler.ts';
 import { commits, outcome, pause, restateSide, run, said, seeded, TYPE, type Side, type SideOptions } from './side.ts';
-import { REQUESTED_ACK } from './vm-support.ts';
+import { members } from './wire.ts';
 
 /** What a handler's transactions saw, when its attempt cannot answer (a shutdown). */
 const seen: string[] = [];
@@ -128,15 +130,16 @@ async function attempt(
 /** The sends of `body` the attempt made, by idempotency key. */
 const sendsOf = (r: Side, body: string) => r.sends.filter((s) => s.input === JSON.stringify(body));
 
-/** The types of the commands the attempt sent before its first send. */
+/** The index of the first commit with a send inside: a transaction's. */
+const sendingCommit = (r: Side) =>
+  r.sent().findIndex((m) => m.type === TYPE.atomicGroup && members(m).some((a) => a.type === TYPE.call));
+
+/** The types of the actions the attempt sent before its first commit with a send. */
 function writesBeforeSend(r: Side): number[] {
-  const sent = r.sent();
-  return sent
-    .slice(
-      0,
-      sent.findIndex((m) => m.type === TYPE.oneWayCall),
-    )
-    .filter((m) => m.type >= 0x0400 && m.type < 0x8000 && m.type !== TYPE.input)
+  return r
+    .sent()
+    .slice(0, sendingCommit(r))
+    .filter((m) => m.type >= 0x0400 && m.type < 0x8000)
     .map((m) => m.type);
 }
 
@@ -147,18 +150,14 @@ function returned(r: Side): string {
   return JSON.parse(ended.value) as string;
 }
 
-/** What the sweep's run asks for, in order, by what the acks are of. */
-const ACKS = [
-  "the transaction's commit (head out, ack outstanding)",
-  "the outbox's flush, after the transaction's commit",
-  "the statement's commit, after the transaction",
-];
+/** What the sweep's run asks for, in order, by which commit it is. */
+const COMMITS = ["the transaction's commit (its send inside)", "the statement's commit, after the transaction"];
 
 /** What was outstanding when the signal went in at the `n`-th ask of `r`. */
 function phase(r: Side, n: number): string {
   const ask = r.asks[n - 1]!;
-  if (ask !== 'ack') return ask;
-  return ACKS[r.asks.slice(0, n).filter((a) => a === 'ack').length - 1] ?? 'ack';
+  if (ask !== 'commit') return ask;
+  return COMMITS[r.asks.slice(0, n).filter((a) => a === 'commit').length - 1] ?? 'commit';
 }
 
 /** One N of the sweep: what was outstanding when the signal went in, and what the handler saw. */
@@ -170,19 +169,19 @@ interface Swept {
   sends: number;
 }
 
-/** Run `noted` on a seeded key until its commit asks for its ack, then shut the attempt down. */
+/** Run `noted` on a seeded key until its commit asks for its result, then shut the attempt down. */
 async function shutAtAck(key: string) {
   const state = await seeded(store, 'seed', key);
   seen.length = 0;
   terminal.length = 0;
-  // Started with every key, the attempt asks for nothing before the ack of
-  // its transaction's commit: the first thing it asks for.
+  // Started with every key, the attempt asks for nothing before the result
+  // of its transaction's commit: the first thing it asks for.
   const r = restateSide(state, { idPerCall: true, withholdAnswer: 1 });
   const serving = serveSession(store, 'noted', r.stream);
   r.start(key, null);
   const settling = r.settle();
-  await r.until(() => r.asks.length >= 1, 'the commit asking for its ack');
-  expect(r.asks[0]).toBe('ack');
+  await r.until(() => r.asks.length >= 1, 'the commit asking for its result');
+  expect(r.asks[0]).toBe('commit');
   r.shutDown();
   await Promise.all([serving, settling]);
   return { r, state };
@@ -202,13 +201,9 @@ describe('a transaction under a cancellation either committed or did nothing, an
       // Past the last thing a run asks for, the signal never goes in.
       if (r.signalledAt === undefined) break;
       reads += r.asks.filter((a) => a.startsWith('read')).length;
-      // The labels' premise: the transaction's send is made between its
-      // commit's head write and that write's ack, so it lies between the
-      // first and the second command that asks for an ack.
-      const acked = r.sent().flatMap((m, i) => ((m.flags & REQUESTED_ACK) !== 0 ? [i] : []));
-      const send = r.sent().findIndex((m) => m.type === TYPE.oneWayCall);
-      expect(send).toBeGreaterThan(acked[0]!);
-      expect(send).toBeLessThan(acked[1]!);
+      // The labels' premise: the transaction's send is inside its commit's
+      // atomic group, the first commit the run makes.
+      for (const send of sendsOf(r, 'tx')) expect(send.inGroup).toBe(true);
       const outcomes = returned(r);
       const [tx, statement, call] = outcomes.split(',');
       const stored = await rows(state, key);
@@ -243,7 +238,7 @@ describe('a transaction under a cancellation either committed or did nothing, an
     // The premise: the sweep covered reads that reached Restate, acks and
     // the call's answer.
     expect(reads, 'no read reached Restate: the page cache answered them all').toBeGreaterThan(0);
-    expect(table.map((t) => t.outstanding)).toEqual(expect.arrayContaining([...ACKS, 'call Callee/echo']));
+    expect(table.map((t) => t.outstanding)).toEqual(expect.arrayContaining([...COMMITS, 'call Callee/echo']));
   }, 120_000);
 
   it('2: the body awaits a call when the signal comes: the call is cancelled, and the transaction rolls back', async () => {
@@ -295,17 +290,11 @@ describe('a transaction under a cancellation either committed or did nothing, an
     const control = await attempt('two', await seeded(store, 'seed', 'carried-control'), 'carried-control');
     expect(returned(control)).toBe('ok,ok,ok');
     expect(writesBeforeSend(r)).toEqual(writesBeforeSend(control));
-    expect(
-      commits(
-        r.sent().slice(
-          0,
-          r.sent().findIndex((m) => m.type === TYPE.oneWayCall),
-        ),
-      ),
-    ).toBe(1);
+    // The commit with the send is the attempt's first.
+    expect(commits(r.sent().slice(0, sendingCommit(r) + 1))).toBe(1);
   }, 30_000);
 
-  it("4: shut down while the commit's ack is outstanding: not CancelledError, and the next attempt finds rows and send agreeing", async () => {
+  it("4: shut down while the commit's result is outstanding: not CancelledError, and rows and send agree", async () => {
     const key = 'shut';
     const { r, state } = await shutAtAck(key);
     // The attempt's end, which is neither a cancellation nor terminal.
@@ -315,14 +304,11 @@ describe('a transaction under a cancellation either committed or did nothing, an
     expect(terminal).toEqual([false]);
     expect(outcome(r.sent())).toBeUndefined();
 
-    // A plain retry: its open makes what the outbox holds.
-    const again = await attempt('seed', state, key);
-    expect(returned(again)).toBe('seeded');
+    // The commit's atomic group was applied whole or not at all: a stored
+    // row has its send, made once; no row, no send at all.
     const stored = await rows(state, key);
-    const sends = [...sendsOf(r, 'tx'), ...sendsOf(again, 'tx')];
-    // A stored row has its send, made by one attempt or both, always with
-    // the one key, so Restate makes it once; no row, no send at all.
-    expect(new Set(sends.map((s) => s.idempotencyKey)).size).toBe(stored.includes('tx') ? 1 : 0);
+    const made = r.rt.calls().filter((c) => c.service === 'Mail' && c.handler === 'notify');
+    expect(made).toHaveLength(stored.includes('tx') ? 1 : 0);
   }, 30_000);
 
   // The commit's wait is the store's, in the addon: it fails with the

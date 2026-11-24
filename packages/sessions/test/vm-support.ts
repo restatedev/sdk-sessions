@@ -1,81 +1,81 @@
-// Restate's side of an attempt on the explicit recovery VM, for tests: the
-// wire messages it sends, and the ones it reads back. Shared by the tests of
-// the binding (`vm.test.ts`) and of the driver (`driver.test.ts`).
-import { bytes, decode, field, frame, TYPE as WIRE, uint } from './wire.ts';
+// Restate's side of one attempt on the explicit recovery protocol, played by
+// the core's fake runtime (`fake.ts`), for the tests of the binding
+// (`vm.test.ts`, `vm-tick.test.ts`) and of the driver (`driver.test.ts`): the
+// VM is fed the bytes the runtime writes, and the runtime the bytes the VM
+// writes, a step at a time, as the test says.
 import { Vm, type VmNotification } from '../src/vm.ts';
+import { FakeRuntime, type FakeInvocation } from './fake.ts';
+import { messages, type Message } from './wire.ts';
 
-/** The message types these tests send, beside the ones wire.ts names. */
-export const TYPE = {
-  ...WIRE,
-  commandAck: 0x0004,
-  // On V8 a state value the attempt does not know is read with an ephemeral
-  // get, which is not journaled; V7 records one in the journal instead.
-  getStateEphemeral: 0x0200,
-  getStateEphemeralNotification: 0x0300,
-  setState: 0x0403,
-  clearState: 0x0404,
-  call: 0x040d,
-  callCompletion: 0x800d,
-  callInvocationIdCompletion: 0x800e,
-} as const;
+export { TYPE } from './wire.ts';
 
+/** The content type of the protocol's invocations, version 1. */
+export const CONTENT_TYPE = 'application/vnd.restate.invocation.explicitrecovery.v1';
+
+/** The content type of the durable execution protocol's V8, which this VM refuses. */
 export const V8 = 'application/vnd.restate.invocation.v8';
 
-/** A `Value` message: its content is field 1. */
-export const value = (content: string | Uint8Array) => bytes(1, content);
-
-/** A VM, started for `thekey` with `input`, and ready to execute. */
-export function startedVm(
+/** A fake runtime of one invocation for `thekey`, with `input` (as JSON), and `state` in the object. */
+export function runtime(
   input: unknown,
-  { partial = false, state = {} }: { partial?: boolean; state?: Record<string, string> } = {},
-): Vm {
-  const vm = new Vm([{ key: 'content-type', value: V8 }], true);
-  const entries = Object.entries(state).flatMap(([key, v]) => field(4, 2, [...bytes(1, key), ...bytes(2, v)]));
-  vm.notifyInput(
-    frame(TYPE.start, [
-      ...bytes(1, [1, 2, 3, 4]),
-      ...bytes(2, 'inv_test'),
-      ...uint(3, 1), // known_entries: the input
-      ...entries,
-      ...(partial ? uint(5, 1) : []),
-      ...bytes(6, 'thekey'),
-    ]),
-  );
-  vm.notifyInput(frame(TYPE.input, bytes(14, value(JSON.stringify(input)))));
-  return vm;
+  { lazy = false, state = {}, ...invocation }: { lazy?: boolean; state?: Record<string, string> } & FakeInvocation = {},
+): FakeRuntime {
+  const rt = new FakeRuntime({
+    invocationId: 'inv_test',
+    key: 'thekey',
+    input: new TextEncoder().encode(JSON.stringify(input)),
+    objectPreload: lazy ? 'lazy' : 'all',
+    ...invocation,
+  });
+  for (const [key, value] of Object.entries(state)) rt.setObjectState(key, new TextEncoder().encode(value));
+  return rt;
 }
 
-/** Every notification the VM has ready now. */
+/** A VM, as Restate opens an attempt: its request's headers. */
+export const newVm = () => new Vm(FakeRuntime.requestHeaders());
+
+/**
+ * A VM started by a fake runtime for `thekey` with `input`, and ready to
+ * execute; `lazy`, the object's state is not preloaded.
+ */
+export function startedVm(
+  input: unknown,
+  options: { lazy?: boolean; state?: Record<string, string> } & FakeInvocation = {},
+): { vm: Vm; rt: FakeRuntime } {
+  const rt = runtime(input, options);
+  const vm = newVm();
+  vm.notifyInput(rt.startAttempt());
+  return { vm, rt };
+}
+
+/** Every notification the VM has ready now: what the driver's tick takes. */
 export function drain(vm: Vm): VmNotification[] {
   const out: VmNotification[] = [];
   for (let n = vm.takeNotification(); n !== null; n = vm.takeNotification()) out.push(n);
   return out;
 }
 
-/** The header bit a command sets to ask Restate to ack it once stored. */
-export const REQUESTED_ACK = 0x8000;
+/** The VMs whose input the runtime closed already. */
+const closedInput = new WeakSet<Vm>();
 
-/** One message of an output buffer: its type, header flags and decoded fields. */
-export interface Message {
-  type: number;
-  /** The header's 16 bits of flags; {@link REQUESTED_ACK} is one of them. */
-  flags: number;
-  fields: ReturnType<typeof decode>;
+/** What the runtime wrote, to the VM; and its close, once it closed its side. */
+export function answer(vm: Vm, rt: FakeRuntime): void {
+  const output = rt.takeOutput();
+  if (output.length > 0) vm.notifyInput(output);
+  if (rt.isClosed() && !closedInput.has(vm)) {
+    closedInput.add(vm);
+    vm.notifyInputClosed();
+  }
 }
 
-/** The messages in `output`, in order. */
-export function messages(output: Uint8Array): Message[] {
-  const view = new DataView(output.buffer, output.byteOffset, output.byteLength);
-  const out: Message[] = [];
-  for (let at = 0; at < output.length;) {
-    const type = view.getUint16(at);
-    const flags = view.getUint16(at + 2);
-    const length = view.getUint32(at + 4);
-    out.push({ type, flags, fields: decode(output.subarray(at + 8, at + 8 + length)) });
-    at += 8 + length;
-  }
-  return out;
+/** What the VM wrote, to the runtime, which applies it: the messages. */
+export function take(vm: Vm, rt: FakeRuntime): Message[] {
+  const output = vm.takeOutput();
+  rt.receive(output);
+  return messages(output);
 }
 
 /** The types of the messages in `output`, in order. */
 export const types = (output: Uint8Array): number[] => messages(output).map((m) => m.type);
+
+export { messages, type Message };

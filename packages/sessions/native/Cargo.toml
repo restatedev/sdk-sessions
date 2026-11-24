@@ -22,7 +22,10 @@ napi-derive = "3"
 # call (sdk-shared-core#120).
 # 8.7.3: a SQL call polled outside a task runs in place; compiled statements
 # are shared between the sessions of one schema (sdk-shared-core#123).
-restate-sdk-shared-core = { version = "8.7.3", features = [
+# The explicit recovery protocol (version 1): the local core, 8.7.3 with the
+# new VM (`explicit_recovery`), until it is released. The prototype VM this
+# addon bound before is gone from it.
+restate-sdk-shared-core = { path = "../../../../sdk-shared-core", version = "8.7.3", features = [
   "sql",
   "object_store_aws",
   "object_store_gcp",
@@ -35,6 +38,13 @@ restate-sdk-shared-core = { version = "8.7.3", features = [
 ] }
 futures = "0.3"
 bytes = "1.10"
+
+[features]
+# The core's fake Restate runtime of the explicit recovery protocol, bound as
+# `FakeRuntime`: the tests drive attempts with it (`test/side.ts`). `pnpm build`
+# and `pnpm build:debug` turn it on; the shipped addon (`pnpm build:dist`) has
+# none.
+fake_runtime = ["restate-sdk-shared-core/__fake_runtime"]
 
 [lints.rust]
 # Public is what the crate root exports; anything else says how far it reaches.

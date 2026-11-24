@@ -1,9 +1,7 @@
 // An attempt's database: the session's database, kept in the object's state
 // (database.ts), opened as an exclusive attempt starts (a view's on its first
 // read) and saved when the handler ends; and its transactions, with the sends
-// each commits with (`tx.send`).
-import { Buffer } from 'node:buffer';
-import { randomUUID } from 'node:crypto';
+// each commits with (`tx.send`): on the VM, inside the commit's atomic group.
 import type * as restate from '@restatedev/restate-sdk';
 import { CancelledError, serde, TerminalError } from '@restatedev/restate-sdk';
 import { millisOrDurationToMillis, type Serde } from '@restatedev/restate-sdk-core';
@@ -22,7 +20,7 @@ import {
   type ConnectionTransaction,
   type Working,
 } from './database.ts';
-import type { Vm } from './vm.ts';
+import type { Vm, VmGroupSend } from './vm.ts';
 import { Link } from './link.ts';
 import { apply, dropAll, ensureOf, ensuring, type Schema } from './schema.ts';
 import { type Send, sendOf } from './calls.ts';
@@ -48,10 +46,9 @@ export interface Database extends DatabaseWriter {
 /** One transaction of a {@link Database}: its SQL, and the sends it commits with. */
 export interface Transaction extends DatabaseWriter {
   /**
-   * Sends made right after the transaction commits, and never if it rolls
-   * back. Each has the idempotency key it is given, or else one of the
-   * transaction (`transaction/<id>/<index>`), so a send an attempt makes
-   * again is dropped.
+   * Sends that commit with the transaction, and never if it rolls back: on
+   * Restate, in the commit's atomic group, so the rows and the sends are
+   * stored together or not at all.
    */
   readonly send: Send;
   /**
@@ -97,6 +94,13 @@ export interface SqlHost {
    * attempt has it (`driver.ts`), the SDK's context does not.
    */
   readonly working?: Working;
+  /**
+   * Run `fn` inside a span `name`, shown in Restate's UI, with the actions it
+   * makes nested under it: the VM's attempt has it (`driver.ts`).
+   */
+  readonly span?: <T>(name: string, fn: () => Promise<T>) => Promise<T>;
+  /** The span the code running now is inside of, if any: the VM's attempt has it. */
+  readonly currentSpan?: () => number | undefined;
   genericSend(send: restate.GenericSend<Uint8Array>): unknown;
 }
 
@@ -181,34 +185,16 @@ const unbeside = (name: string) => (key: string) => {
 };
 
 /**
- * The object's state as an ordered store: `get` is a state get, `set` and
- * `clear` are state writes, which return at once and which the runtime
- * stores in order; `sync` is an empty `ctx.run`, acknowledged after the
- * commands before it. A `get` or `sync` the attempt's end leaves waiting
- * rejects, so the session that made it ends instead of holding its lock for
- * the life of the process. One the SDK cancels fails as any await does: the
- * session it ends fails its calls with the CancelledError (see `open`).
+ * The object's state as an ordered store, over a context without the VM (a
+ * test's): `get` is a state get, `set` and `clear` are state writes, which
+ * return at once and which the context stores in order; `sync` is its `run`,
+ * acknowledged after the writes before it. A `get` or `sync` the attempt's
+ * end leaves waiting rejects, so the session that made it ends instead of
+ * holding its lock for the life of the process. One cancelled fails as any
+ * await does: the session it ends fails its calls with the CancelledError
+ * (see `open`). On the VM the addon reads and writes the state itself
+ * (`openOnVm`), and none of this is used.
  */
-/**
- * The store of a database the addon keeps on the VM: it reads and writes the
- * state itself, and calls this only at a commit, through `sync`, where the
- * boundary runs what the committing transaction gave `withCommit`. Reaching
- * anything else is a bug in the addon, and says so rather than going quiet.
- */
-function commitOnly(): Store {
-  return {
-    get: servedByVm('get'),
-    set: servedByVm('set'),
-    clear: servedByVm('clear'),
-    sync: async () => {},
-  };
-}
-
-/** What a store the addon never calls does if it is called after all. */
-const servedByVm = (op: string) => () => {
-  throw new Error(`@restatedev/sessions: the VM serves the state; the store's ${op} is not called`);
-};
-
 function objectStore(ctx: SqlHost, end: AttemptEnd, dbName: string | undefined): Store {
   const keyOf = dbName === undefined ? (key: string) => key : beside(dbName);
   const request = <T>(promise: PromiseLike<T>) => end.race(promise);
@@ -308,9 +294,9 @@ const RESET = new Link<() => Promise<void>>('reset');
 /**
  * Empty the key's database in `tx`, a transaction of an exclusive handler's
  * `ctx.db`: every table, view, index and trigger is dropped, the schemas are
- * applied again (the object's, and the libraries' the attempt applied), and
- * the outbox stays. It commits with `tx`: what `tx` writes after it are the
- * new database's first rows, in the same commit.
+ * applied again (the object's, and the libraries' the attempt applied). It
+ * commits with `tx`: what `tx` writes after it are the new database's first
+ * rows, in the same commit, and its sends commit with it.
  */
 export function reset(tx: Transaction): Promise<void> {
   const of = RESET.of(tx);
@@ -341,57 +327,58 @@ export function lazyDatabase(opener: () => Promise<Database>): Database {
   });
 }
 
-/** The sends of a transaction that has no outbox: a shared handler's, or another database's. */
+/** The sends of a transaction that cannot send: a shared handler's, or another database's. */
 const refusedSend: Send = () => {
   throw new TerminalError("a send of a transaction is an exclusive handler's, in the object's own database");
 };
 
-// A transaction's sends commit with it, in the database's record `outbox`
-// (beside its tables, in none of them), which holds each committed
-// transaction's sends until they are stored. They are made with its commit
-// (see `Attempt.transaction`); a later open makes again those still in the outbox,
-// with the same idempotency keys (`transaction/<id>/<index>`, with a random
-// id of the transaction), so making them again is dropped. Restate keeps an attempt's commands in the
-// order they were made, so a send made before a commit is stored whenever the
-// commit is: the next commit leaves the sends this attempt made out of the
-// outbox, and so does the end of the attempt.
+// A transaction's sends commit with it. On the VM they go in the commit's
+// atomic group, after its writes (`commitWith`): Restate applies the rows and
+// the sends together, or neither, so nothing has to remember them across a
+// crash. A transaction that wrote nothing sends in a group of its own, and
+// resolves once that is applied. Without the VM (a test's context), they are
+// made right after the commit's writes, before its sync (`withCommit`).
 
-/** A send, but its parameter, as it is stored. */
-type StoredSend = Omit<restate.GenericSend<unknown>, 'parameter' | 'inputSerde' | 'delay'> & {
-  /** Its delay, in milliseconds. */
+/** A send of a transaction, its parameter serialized. */
+interface PendingSend {
+  service: string;
+  handler: string;
+  key?: string;
+  parameter: Uint8Array;
+  /** In milliseconds. */
   delay?: number;
-  /** When a delayed send is due (epoch ms): one made again waits only what remains. */
-  due?: number;
-};
-
-/** The sends of a committed transaction, in the outbox. */
-interface Outgoing {
-  /** The transaction's random id. */
-  id: string;
-  /** Each send, its parameter in base64. */
-  sends: (StoredSend & { parameter: string })[];
+  idempotencyKey?: string;
+  headers?: Record<string, string>;
 }
 
-/** The database's record of the outbox. */
-const OUTBOX = 'outbox';
-
-/** The outbox as its record: none is empty, as a record never set reads. */
-function encodeOutbox(outbox: Outgoing[]): Uint8Array {
-  return outbox.length === 0 ? new Uint8Array() : new TextEncoder().encode(JSON.stringify(outbox));
-}
-
-function decodeOutbox(record: Uint8Array): Outgoing[] {
-  return record.length === 0 ? [] : (JSON.parse(new TextDecoder().decode(record)) as Outgoing[]);
-}
-
-function storedSend(send: restate.GenericSend<unknown>): Outgoing['sends'][number] {
-  const { parameter, inputSerde, delay, ...rest } = send;
+function pendingSend(send: restate.GenericSend<unknown>): PendingSend {
+  const { service, method, key, parameter, inputSerde, delay, idempotencyKey, headers } = send;
   return {
-    ...rest,
+    service,
+    handler: method,
+    ...(key !== undefined ? { key } : {}),
+    parameter: (inputSerde ?? serde.binary).serialize(parameter),
     ...(delay !== undefined ? { delay: millisOrDurationToMillis(delay) } : {}),
-    parameter: Buffer.from((inputSerde ?? serde.binary).serialize(parameter)).toString('base64'),
+    ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
+    ...(headers !== undefined ? { headers } : {}),
   };
 }
+
+/** `send` as the commit's atomic group makes it. */
+const groupSend = (send: PendingSend): VmGroupSend => ({
+  target: {
+    service: send.service,
+    handler: send.handler,
+    ...(send.key !== undefined ? { key: send.key } : {}),
+    ...(send.idempotencyKey !== undefined ? { idempotencyKey: send.idempotencyKey } : {}),
+    ...(send.headers !== undefined
+      ? { headers: Object.entries(send.headers).map(([key, value]) => ({ key, value })) }
+      : {}),
+  },
+  input: send.parameter,
+  ...(send.delay !== undefined ? { delay: send.delay } : {}),
+  name: `${send.service}/${send.handler}`,
+});
 
 /** How a handler ended. */
 type Outcome<T> = { value: T } | { error: unknown };
@@ -468,20 +455,17 @@ export function database(db: Database, name: string): Database {
 
 /** The sends of one transaction, as its body makes them (`tx.send`), until it ends. */
 class Sends {
-  private readonly sends: Outgoing['sends'] = [];
+  private readonly sends: PendingSend[] = [];
   private open = true;
   readonly send: Send = sendOf((send) => {
     if (!this.open) throw new TerminalError('the transaction has ended: send from inside its body');
-    this.sends.push(storedSend(send));
+    this.sends.push(pendingSend(send));
   });
 
-  /** The body ended: the transaction's sends, if it made any, their delays counted from now. */
-  close(): Outgoing | undefined {
+  /** The body ended: the transaction's sends. */
+  close(): PendingSend[] {
     this.open = false;
-    if (this.sends.length === 0) return undefined;
-    const now = Date.now();
-    for (const send of this.sends) if (send.delay !== undefined) send.due = now + send.delay;
-    return { id: randomUUID(), sends: this.sends };
+    return this.sends;
   }
 }
 
@@ -545,7 +529,7 @@ class Session {
  * attempt starts ({@link openNow}), shared by everything the handler does,
  * and saved when the handler ends ({@link end}). With `name`, of the key's
  * database `name` ({@link database}), which has neither the object's schema
- * nor an outbox.
+ * nor sends.
  */
 export class Attempt {
   /** `ctx.db`. */
@@ -554,16 +538,14 @@ export class Attempt {
   /** Its object's: the key's other databases share its store's wrapper, and have none of its schema. */
   private readonly config: ObjectConfig;
   private readonly name: string | undefined;
-  /** Whether it is the object's own database of an exclusive handler: the one with an outbox. */
-  private readonly hasOutbox: boolean;
+  /** Whether it is the object's own database of an exclusive handler: the one whose transactions send. */
+  private readonly sends: boolean;
   /** The key's other databases this attempt opened, by name. */
   private readonly databases = new Map<string, Attempt>();
   /** The session, from its first use on. */
   private session: Session | undefined;
   /** The calls made on the session that have not reached its connection yet: see {@link call}. */
   private unhanded = 0;
-  /** The ids of the outbox's transactions this attempt made the sends of. */
-  private readonly made = new Set<string>();
   /** The writes that ride the next commit, by slot ({@link rideCommit}). */
   private readonly riders = new Map<string, Pending>();
   /** The transactions asked for and not finished: one that is under way writes the riders. */
@@ -578,7 +560,7 @@ export class Attempt {
     this.ctx = ctx;
     this.config = config;
     this.name = name;
-    this.hasOutbox = !ctx.shared && name === undefined;
+    this.sends = !ctx.shared && name === undefined;
     const base = sqlOver(
       (sql, params) => this.askedNow(() => this.callNow((db) => db.queryColumnsNow(sql, params))),
       handlerError,
@@ -590,7 +572,11 @@ export class Attempt {
         this.riders.size > 0
           ? this.asked(() => this.transaction((tx) => tx.execute(statement, params)))
           : base.execute(statement, params),
-      transaction: (body) => this.asked(() => this.transaction(body)),
+      // A transaction of the handler's is a span in Restate's UI, with its commit inside.
+      transaction: (body) =>
+        this.asked(() =>
+          ctx.span === undefined ? this.transaction(body) : ctx.span('transaction', () => this.transaction(body)),
+        ),
     };
     ensuring(this.db, (schemas) => this.asked(() => this.call((db) => this.ensureSchemas(db, schemas))));
     ATTEMPT.on(this.db, this);
@@ -655,10 +641,8 @@ export class Attempt {
    *
    * This is where the database delivers a cancellation, and the only place.
    * What the handler asks for passes through here; what the session does for
-   * itself does not — the open, the object's schema, the sends a crashed
-   * attempt left unmade, emptying the outbox after a commit — and a
-   * cancellation that failed one of those would be delivered to nobody, or
-   * would report a transaction as cancelled after it committed. And it is
+   * itself does not — the open, the object's schema — and a cancellation
+   * that failed one of those would be delivered to nobody. And it is
    * before the call issues anything, so a call that fails with
    * `CancelledError` wrote nothing and sent nothing: a call already under way
    * when the cancellation arrives runs to its end, and the cancellation goes
@@ -677,11 +661,11 @@ export class Attempt {
 
   /**
    * Open the session now, as the attempt starts, rather than on its first
-   * call: the open makes the sends a crashed attempt committed and left
-   * unmade, which must not wait for a handler that uses the database.
+   * call: its head is read, and the object's schema applied, while the
+   * handler gets going.
    */
   openNow() {
-    if (this.hasOutbox && this.session === undefined) this.current().ready.catch(() => {});
+    if (this.sends && this.session === undefined) this.current().ready.catch(() => {});
   }
 
   /**
@@ -699,14 +683,10 @@ export class Attempt {
 
   /**
    * `body` as one transaction. In the object's own database of an exclusive
-   * handler, its sends commit with it, in the outbox, and are made with its
-   * commit, right after its writes and before it waits for anything
-   * (`withCommit`): Restate stores an attempt's commands in order, so they
-   * are stored only if the commit is, and whatever fails the commit's wait
-   * (the attempt's end, say) comes after them. A second commit empties the outbox
-   * before `transaction` resolves: left until the handler's end, they would
-   * be made again by an attempt that resumes a long wait (an approval), past
-   * the idempotency retention that drops a repeat.
+   * handler, its sends commit with it: on the VM, inside the commit's atomic
+   * group, after its writes (`commitWith`), so Restate stores them only if it
+   * stores the commit; without it, right after the commit's writes and
+   * before its sync (`withCommit`).
    */
   private async transaction<T>(body: (tx: Transaction) => Promise<T>, rearm = true): Promise<T> {
     this.active++;
@@ -720,49 +700,49 @@ export class Attempt {
   }
 
   private async transacted<T>(body: (tx: Transaction) => Promise<T>): Promise<T> {
-    let outgoing: Outgoing | undefined;
     // The riders this transaction wrote: pending until it has committed.
     let rode: [string, Pending][] = [];
     const value = await this.call((db) =>
       db.transaction(async (handle) => {
-        const sends = this.hasOutbox ? new Sends() : undefined;
+        const sends = this.sends ? new Sends() : undefined;
         const tx: Transaction = { ...forBody(handle), send: sends?.send ?? refusedSend };
         // A view's writes stay in its session: it has nothing to reset.
         DEFERRED.on(tx, handle);
         if (!this.ctx.shared) RESET.on(tx, () => this.reset(handle));
+        let made: PendingSend[] = [];
         let result: T;
         try {
           result = await body(tx);
         } finally {
-          outgoing = sends?.close();
+          made = sends?.close() ?? [];
         }
         // After the body, which may have registered one (a transaction held open for more work), and before the commit.
         if (this.riders.size > 0) {
           rode = [...this.riders];
           for (const [, { write }] of rode) await write(tx);
         }
-        if (this.hasOutbox) await this.commitOutbox(handle, outgoing);
+        this.commitSends(handle, made);
         return result;
       }),
     );
     // One registered since is for the next commit.
     for (const [slot, pending] of rode) if (this.riders.get(slot) === pending) this.riders.delete(slot);
-    if (outgoing !== undefined) await this.call((db) => this.flush(db));
     return value;
   }
 
-  /**
-   * Commit with `handle` the outbox as committed, but the sends stored since,
-   * and with `outgoing`, which the commit makes. Unchanged, it is not
-   * written again.
-   */
-  private async commitOutbox(handle: ConnectionTransaction, outgoing: Outgoing | undefined) {
-    const outbox = await this.unstored(handle);
-    if (outgoing !== undefined) {
-      outbox.push(outgoing);
-      handle.withCommit(() => this.make(outgoing));
+  /** Have `handle`'s commit make `sends` (see {@link transaction}). */
+  private commitSends(handle: ConnectionTransaction, sends: PendingSend[]) {
+    if (this.ctx.vm !== undefined) {
+      const parentSpan = this.ctx.currentSpan?.();
+      handle.commitWith({ sends: sends.map(groupSend), ...(parentSpan !== undefined ? { parentSpan } : {}) });
+      return;
     }
-    handle.setRecord(OUTBOX, encodeOutbox(outbox));
+    if (sends.length === 0) return;
+    handle.withCommit(() => {
+      for (const { handler, parameter, ...send } of sends) {
+        this.ctx.genericSend({ ...send, method: handler, parameter, inputSerde: serde.binary });
+      }
+    });
   }
 
   /**
@@ -854,22 +834,14 @@ export class Attempt {
         'withStoreWrapper wraps the store of an attempt served by the SDK; an attempt on the VM has none to wrap',
       );
     }
-    const onVm = ctx.vm !== undefined;
-    const object = onVm ? commitOnly() : objectStore(ctx, end, this.name);
-    const db = onVm
-      ? await openOnVm(namespace, object, ctx.vm, { name: this.name, reader: ctx.shared, working: ctx.working })
-      : await open(namespace, wrap ? wrap(object) : object, { reader: ctx.shared });
+    const store = () => objectStore(ctx, end, this.name);
+    const db =
+      ctx.vm !== undefined
+        ? await openOnVm(namespace, ctx.vm, { name: this.name, reader: ctx.shared, working: ctx.working })
+        : await open(namespace, wrap ? wrap(store()) : store(), { reader: ctx.shared });
     try {
       // A view writes nothing: a write fails, rather than vanish with the attempt.
       if (ctx.shared) await db.execute('PRAGMA query_only = 1');
-      if (this.hasOutbox) {
-        // What a crash left unmade; an open again in this attempt finds what
-        // this attempt made, stored before it, as made.
-        const left = decodeOutbox(await db.record(OUTBOX));
-        for (const outgoing of left) if (!this.made.has(outgoing.id)) this.make(outgoing, true);
-        // Emptied at once, as a transaction's own sends are (see `transaction`).
-        if (left.length > 0) await this.flush(db);
-      }
       // A view's too, whose writes are never stored: a key never written reads as empty tables.
       const own = this.ownSchema();
       if (own) await this.ensureSchemas(db, [own]);
@@ -883,9 +855,9 @@ export class Attempt {
   /**
    * End the session, then settle as the handler did: an SQL error that
    * escaped it becomes terminal. The handler's error stands: what it
-   * committed is stored, and an outbox left full is made by the next open.
-   * A failure to end the session fails a handler that succeeded, which a
-   * retry then ends (a transaction it left open, say).
+   * committed is stored, with its sends. A failure to end the session fails
+   * a handler that succeeded, which a retry then ends (a transaction it left
+   * open, say).
    */
   private async endSession<T>(outcome: Outcome<T>): Promise<T> {
     this.ended = true;
@@ -903,12 +875,8 @@ export class Attempt {
   /**
    * Close the session as the attempt ends. A view's closes: it read the
    * snapshot it opened on, and one that outlived 16 commits failed its read
-   * ("is gone"), which is retried. Another is saved, its outbox emptied. One
-   * that a failure ended closes, and the object's own database is opened
-   * again and saved: it may hold sends unmade (a crash left them, and this
-   * attempt's open failed) or made and not emptied (the commit's wait
-   * failed), and no attempt may follow this one (a cancelled invocation's),
-   * nor the key's next invocation come within the idempotency retention.
+   * ("is gone"), which is retried. Another is saved; one that a failure ended
+   * closes, and what it committed is stored as it was.
    */
   private async close(): Promise<void> {
     if (this.session === undefined) return;
@@ -916,19 +884,11 @@ export class Attempt {
     if (this.ctx.shared) return db?.close();
     if (db?.isUsable()) return this.save(db);
     await db?.close().catch(() => {});
-    if (!this.hasOutbox) return;
-    const again = this.open();
-    try {
-      await this.save(await again.ready);
-    } finally {
-      void again.end();
-    }
   }
 
-  /** Empty the outbox and save the session, which closes if that fails. */
+  /** Save the session, which closes if that fails. */
   private async save(db: Connection) {
     try {
-      if (this.hasOutbox) await this.flush(db);
       await db.save();
     } catch (error) {
       await db.close().catch(() => {});
@@ -954,37 +914,6 @@ export class Attempt {
     if (lacking.length === 0) return;
     await apply(db, lacking, { reader: this.ctx.shared });
     for (const s of lacking) this.ensured.set(s.name, s);
-  }
-
-  /** Make the sends of a committed transaction: each with an idempotency key of the transaction (or its own), so that making them again is dropped. */
-  private make({ id, sends }: Outgoing, again = false) {
-    sends.forEach(({ parameter, due, delay, ...send }, index) => {
-      this.ctx.genericSend({
-        ...send,
-        // Made again, a delayed send waits only what remains of its delay.
-        ...(delay !== undefined ? { delay: again && due !== undefined ? Math.max(0, due - Date.now()) : delay } : {}),
-        parameter: new Uint8Array(Buffer.from(parameter, 'base64')),
-        inputSerde: serde.binary,
-        idempotencyKey: send.idempotencyKey ?? `transaction/${id}/${index}`,
-      });
-    });
-    this.made.add(id);
-  }
-
-  /** The outbox as committed, but the transactions this attempt made the sends of: a commit made after them stores them first. */
-  private async unstored(db: Connection | ConnectionTransaction): Promise<Outgoing[]> {
-    return decodeOutbox(await db.record(OUTBOX)).filter(({ id }) => !this.made.has(id));
-  }
-
-  /**
-   * Empty the outbox, so that a later open does not make its sends again: a
-   * commit after them, which stores them first.
-   */
-  private async flush(db: Connection) {
-    if ((await db.record(OUTBOX)).length === 0) return;
-    // Read in the transaction that writes it: one that committed sends since
-    // the read above keeps them.
-    await db.transaction(async (tx) => tx.setRecord(OUTBOX, encodeOutbox(await this.unstored(tx))));
   }
 }
 

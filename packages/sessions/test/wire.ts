@@ -44,20 +44,49 @@ export function decode(buffer: Uint8Array): Fields {
   }
   return fields;
 }
-// --- Messages
+// --- Messages of the explicit recovery protocol (`explicit_recovery.proto`)
 
 export const TYPE = {
   start: 0x0000,
-  suspension: 0x0001,
+  shutdown: 0x0001,
   error: 0x0002,
   end: 0x0003,
-  proposeRunCompletion: 0x0005,
-  awaitingOn: 0x0006,
-  proposeRunCompletionAck: 0x0007,
-  input: 0x0400,
-  output: 0x0401,
-  signal: 0xfbff,
+  heartbeat: 0x0004,
+  getState: 0x0410,
+  getStateKeys: 0x0411,
+  setState: 0x0412,
+  clearState: 0x0413,
+  clearAllState: 0x0414,
+  call: 0x0420,
+  attach: 0x0421,
+  cancelInvocation: 0x0422,
+  readSignal: 0x0430,
+  sendSignal: 0x0431,
+  flush: 0x0440,
+  atomicGroup: 0x0441,
+  spanStart: 0x0450,
+  spanEnd: 0x0451,
+  result: 0x8000,
+  signal: 0x8001,
 } as const;
+
+/** The fields every action has: its result id (11), name (12), parent span (13) and record level (14). */
+export const ACTION = { resultId: 11, name: 12, parentSpan: 13, record: 14 } as const;
+
+/** `RecordLevel`: what Restate keeps of an action. */
+export const RECORD = { default: 0, none: 1, summary: 2, full: 3 } as const;
+
+/** The member kinds of an atomic group, by their field in `AtomicGroupActionMessage.Action`. */
+export const MEMBER: Record<number, number> = {
+  1: TYPE.setState,
+  2: TYPE.clearState,
+  3: TYPE.clearAllState,
+  4: TYPE.call,
+  5: TYPE.cancelInvocation,
+  6: TYPE.sendSignal,
+  7: TYPE.spanStart,
+  8: TYPE.spanEnd,
+};
 
 export const frame = (type: number, body: number[]) => {
   const out = new Uint8Array(8 + body.length);
@@ -66,4 +95,43 @@ export const frame = (type: number, body: number[]) => {
   view.setUint32(4, body.length);
   out.set(body, 8);
   return out;
+};
+
+/** One message: its type and decoded fields. */
+export interface Message {
+  type: number;
+  fields: Fields;
+}
+
+/** The messages in `output`, in order. */
+export function messages(output: Uint8Array): Message[] {
+  const view = new DataView(output.buffer, output.byteOffset, output.byteLength);
+  const out: Message[] = [];
+  for (let at = 0; at < output.length;) {
+    const type = view.getUint16(at);
+    const length = view.getUint32(at + 4);
+    out.push({ type, fields: decode(output.subarray(at + 8, at + 8 + length)) });
+    at += 8 + length;
+  }
+  return out;
+}
+
+/** The members of an atomic group, as messages of their own type. */
+export function members(group: Message): Message[] {
+  return (group.fields.get(1) ?? []).map((action) => {
+    const [[number, [body]]] = [...decode(action as Uint8Array)] as [[number, [Uint8Array]]];
+    return { type: MEMBER[number]!, fields: decode(body) };
+  });
+}
+
+/** The text of field `number` of `message`. */
+export const str = (message: Message, number: number): string | undefined => {
+  const value = message.fields.get(number)?.[0];
+  return value instanceof Uint8Array ? Buffer.from(value).toString() : undefined;
+};
+
+/** The number of field `number` of `message`, 0 when absent (proto3). */
+export const num = (message: Message, number: number): number => {
+  const value = message.fields.get(number)?.[0];
+  return typeof value === 'number' ? value : 0;
 };

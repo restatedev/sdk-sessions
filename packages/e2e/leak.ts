@@ -9,7 +9,7 @@
 //   pnpm --filter e2e leak
 import { AttemptDriver, Vm } from '@restatedev/sessions/internal';
 
-const V8 = 'application/vnd.restate.invocation.v8';
+const CONTENT_TYPE = 'application/vnd.restate.invocation.explicitrecovery.v1';
 const ATTEMPTS = 300;
 
 if (typeof global.gc !== 'function') {
@@ -19,7 +19,7 @@ if (typeof global.gc !== 'function') {
 
 const refs: WeakRef<Vm>[] = [];
 for (let i = 0; i < ATTEMPTS; i++) {
-  const vm = new Vm([{ key: 'content-type', value: V8 }], true);
+  const vm = new Vm([{ key: 'content-type', value: CONTENT_TYPE }]);
   const driver = new AttemptDriver(vm, () => {}, { service: 'S', handler: 'h' });
   vm.setScheduler(() => driver.scheduleTick());
   // Restate shuts the attempt down: the end of the request body.

@@ -1,19 +1,25 @@
-// Serving one invocation of a session object's handler on the explicit
-// recovery VM (`driver.ts`), rather than through the SDK's journaled context,
-// which replays and would hold such a handler to one await at a time.
+// Serving one attempt of a session object's handler on the explicit recovery
+// protocol (`driver.ts`), rather than through the SDK's journaled context.
 //
 // The core takes a stream — the request's headers and body, and where to write
-// the response — so that a test can drive it with wire bytes and `serve.ts`
+// the response — so that a test can drive it with wire bytes and `endpoint.ts`
 // can hand it an HTTP/2 one. It is reached only for a session object's
 // handler; everything else a deployment serves stays the SDK's.
 import * as restate from '@restatedev/restate-sdk';
 import { millisOrDurationToMillis, type Serde } from '@restatedev/restate-sdk-core';
 import { AttemptDriver, AttemptFailed, AttemptShutDown } from './driver.ts';
 import { handlerEntry, invoke, type AttemptContext } from './object.ts';
-import { Vm, type VmHeader } from './vm.ts';
+import { refusedStatus, Vm, type VmHeader } from './vm.ts';
 
-/** The lowest service protocol version the VM accepts; the SDK serves anything below. */
-export const MIN_PROTOCOL = 7;
+/** The content type of the explicit recovery protocol's invocations, version 1. */
+export const CONTENT_TYPE = 'application/vnd.restate.invocation.explicitrecovery.v1';
+
+/**
+ * How long the response waits, after the attempt's last message, for Restate
+ * to close the request: Restate closes first, then the attempt (D35). One
+ * that never does is closed anyway.
+ */
+export const CLOSE_TIMEOUT_MS = 30_000;
 
 /** One invocation on the wire: what the core reads, and where it writes. */
 export interface Stream {
@@ -26,22 +32,6 @@ export interface Stream {
   close(): void;
 }
 
-/**
- * Whether this package serves `headers`' invocation, or the SDK does. The VM
- * accepts the service protocol V7 and V8 only.
- *
- * A Restate that speaks less once reached the SDK's VM through the selector.
- * That is gone, and a session object cannot run on a VM that replays, so an
- * older server cannot serve one at all: `endpoint.ts` answers such an
- * invocation itself rather than handing it on. Everything that is not a
- * session object is still the SDK's at any version it supports.
- */
-export function servedHere(headers: Readonly<Record<string, string | string[] | undefined>>): boolean {
-  const type = headers['content-type'];
-  const match = /application\/vnd\.restate\.invocation\.v(\d+)/.exec((Array.isArray(type) ? type[0] : type) ?? '');
-  return match !== null && Number(match[1]) >= MIN_PROTOCOL;
-}
-
 /** `headers` as the VM takes them. */
 function vmHeaders(headers: Readonly<Record<string, string | string[] | undefined>>): VmHeader[] {
   return Object.entries(headers).flatMap(([key, value]) =>
@@ -49,22 +39,46 @@ function vmHeaders(headers: Readonly<Record<string, string | string[] | undefine
   );
 }
 
+/** The attempts this process is serving, with what closes each one's response: a SIGTERM ends them (`goAway`). */
+const live = new Map<AttemptDriver, () => void>();
+
+/**
+ * The process is going away: end every attempt it serves with an unasked
+ * `ShutdownMessage` and close its response at once; Restate starts each
+ * again, elsewhere. Returns how many there were.
+ */
+export function goAway(): number {
+  const attempts = [...live];
+  for (const [driver, close] of attempts) {
+    driver.goAway();
+    close();
+  }
+  return attempts.length;
+}
+
+/** How many attempts this process is serving now. */
+export const serving = (): number => live.size;
+
 /**
  * Run one attempt of `definition`'s handler `name` over `stream`, and end its
- * response. `bidirectional` is false on a request/response transport, which
- * cannot serve such a handler: the VM fails the invocation at once, pausing
- * it, since no response could reach it.
+ * response. A request of another protocol family or version is answered with
+ * the status the VM refuses it with (415), and nothing runs.
  */
-export async function serveSession(
-  definition: { name: string },
-  name: string,
-  stream: Stream,
-  { bidirectional = true } = {},
-): Promise<void> {
+export async function serveSession(definition: { name: string }, name: string, stream: Stream): Promise<void> {
   const entry = handlerEntry(definition, name);
   if (entry === undefined) throw new Error(`${definition.name}/${name} is no handler or view of a session object`);
 
-  const vm = new Vm(vmHeaders(stream.headers), bidirectional);
+  let vm: Vm;
+  try {
+    vm = new Vm(vmHeaders(stream.headers));
+  } catch (error) {
+    const status = refusedStatus(error);
+    if (status === undefined) throw error;
+    // Not a 500: Restate offers the next lower version of its range on a 415.
+    stream.writeHead(status, {});
+    stream.close();
+    return;
+  }
   const head = vm.getResponseHead();
   stream.writeHead(head.statusCode, Object.fromEntries(head.headers.map(({ key, value }) => [key, value])));
 
@@ -78,17 +92,22 @@ export async function serveSession(
   // addon; this is how it asks for the tick that writes what it sent.
   vm.setScheduler(() => driver.scheduleTick());
 
-  // The response ends with the attempt, once the tick wrote its last words:
-  // not when the handler returns. Restate starts the next attempt only once
-  // it has, and a handler that Restate shut down at work of its own (outside
-  // `ctx.working`) runs on until that work is done, its actions throwing.
+  // The response closes once the attempt's last message is written and the
+  // runtime closed its side (it closes first), or when the process goes
+  // away: not when the handler returns. A handler that Restate shut down at
+  // work of its own (outside `ctx.working`) runs on until that work is done,
+  // its actions throwing.
   let closed = false;
+  const whenClosed = Promise.withResolvers<void>();
   const close = () => {
     if (closed) return;
     closed = true;
+    live.delete(driver);
     stream.close();
+    whenClosed.resolve();
   };
-  driver.whenEnded(() => setTimeout(close, 0));
+  live.set(driver, close);
+  driver.whenClosable(close);
 
   // The input pump: the only reader of the request body. It runs until the
   // body ends, beside the handler.
@@ -133,9 +152,22 @@ export async function serveSession(
     await driver.cancellingCalls;
     endWith(driver, error, entry.asTerminalError);
   } finally {
-    await pump;
-    // The attempt's last words are buffered: a turn lets the tick write them.
+    // The attempt's last words are buffered: a turn lets the tick write them,
+    // and the response closes once Restate closed the request too.
     await new Promise((resolve) => setTimeout(resolve, 0));
+    if (!closed) {
+      const timeout = setTimeout(close, CLOSE_TIMEOUT_MS);
+      timeout.unref?.();
+      await Promise.race([pump, whenClosed.promise]);
+      // The end of the input reached the VM: the tick that follows closes.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      driver.scheduleTick();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      // Restate closed the request, and the VM has no last message to write:
+      // it was shut down before it started, say. Nothing more will come.
+      if (!closed && driver.over !== undefined) close();
+      clearTimeout(timeout);
+    }
     close();
   }
 }
@@ -247,6 +279,9 @@ function contextOf(
     // The addon reads and writes the object's state on this, rather than
     // calling back into JavaScript for every page (see `openOnVm`).
     vm,
+    // What the protocol adds beyond the SDK's context: invocation state,
+    // signals, flush and spans (`object.ts`).
+    driver,
   };
   return context as unknown as AttemptContext;
 }
