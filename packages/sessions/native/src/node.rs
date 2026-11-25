@@ -300,6 +300,16 @@ struct VmStore {
 
 /// An error of the VM as the store's.
 fn vm_io(error: restate_sdk_shared_core::Error) -> io::Error {
+    if error.is_invalid_input() {
+        // A send of the commit that Restate would refuse (an empty idempotency
+        // key, say): the text `src/database.ts` gives the handler as a
+        // TerminalError, as `vm.rs`'s `vm_error` writes it.
+        return io_error(format!(
+            "INVALID_INPUT {}: {}",
+            error.code(),
+            error.message()
+        ));
+    }
     io_error(error)
 }
 

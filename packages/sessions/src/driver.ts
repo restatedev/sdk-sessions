@@ -29,6 +29,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import * as restate from '@restatedev/restate-sdk';
 import {
+  invalidInput,
   isShutDown,
   type Vm,
   type VmActionOptions,
@@ -51,6 +52,14 @@ function heartbeatMs(): number {
   const set = Number(process.env.RESTATE_SESSIONS_HEARTBEAT);
   return Number.isFinite(set) && set > 0 ? set : 20_000;
 }
+
+/**
+ * A value user code passed to an action is one Restate would refuse as
+ * malformed (an invocation id that is not one, say), as the VM checks it
+ * (code 400). That action fails alone: nothing was sent, the attempt goes on,
+ * and user code may catch it as any `TerminalError`.
+ */
+export class InvalidInput extends restate.TerminalError {}
 
 /**
  * Restate shut the attempt down: it is over, and a new attempt runs the
@@ -489,6 +498,8 @@ export class AttemptDriver {
         this.end(new AttemptShutDown());
         throw this.ended;
       }
+      const refused = invalidInput(error);
+      if (refused !== undefined) throw new InvalidInput(refused.message, { errorCode: refused.code });
       throw error;
     } finally {
       this.schedule();
@@ -520,8 +531,9 @@ export class AttemptDriver {
     if (this.ended !== undefined) return;
     try {
       this.act(act);
-    } catch {
-      // The attempt ended under us.
+    } catch (error) {
+      // User code's to catch; otherwise the attempt ended under us.
+      if (error instanceof InvalidInput) throw error;
     }
   }
 

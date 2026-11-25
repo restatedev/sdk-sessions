@@ -238,6 +238,21 @@ export function refusedStatus(error: unknown): number | undefined {
 }
 
 /**
+ * The VM's refusal of a value user code passed to an action, which Restate
+ * would refuse as malformed (an invocation id that is not one, say): its code
+ * (400) and why. The VM sent nothing, and the attempt goes on: the driver
+ * fails that action alone, with a `TerminalError`. `undefined` if `error` is
+ * not such a refusal.
+ */
+export function invalidInput(error: unknown): { code: number; message: string } | undefined {
+  const message = (error as { message?: unknown } | undefined)?.message;
+  if (typeof message !== 'string') return undefined;
+  // Anywhere in the text: a commit's send crosses the SQL engine, which may wrap it.
+  const match = /INVALID_INPUT (\d+): ([\s\S]*)$/.exec(message);
+  return match === null ? undefined : { code: Number(match[1]), message: match[2] ?? '' };
+}
+
+/**
  * Restate's signature on a request, as the SDK verifies it before dispatch.
  * This package serves a session object's invocations and its discovery ahead
  * of that handler, so it verifies the signature itself.

@@ -14,8 +14,8 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use restate_sdk_shared_core::Value;
 use restate_sdk_shared_core::explicit_recovery::fake_runtime::{
-    AttemptOutcome, CalleeBehavior, FakeRuntime as Core, FakeRuntimeError, FakeRuntimeOptions,
-    InvocationSpec, InvocationStatus, Preload, ShutdownReason, request_headers,
+    self, AttemptOutcome, CalleeBehavior, FakeRuntime as Core, FakeRuntimeError,
+    FakeRuntimeOptions, InvocationSpec, InvocationStatus, Preload, ShutdownReason, request_headers,
 };
 
 fn fake_error(error: FakeRuntimeError) -> Error {
@@ -213,6 +213,15 @@ impl FakeRuntime {
             ..Default::default()
         };
         Ok(Self(Core::with_options(spec, options)))
+    }
+
+    /// An invocation id in Restate's format, the `n`-th the fake mints: 0 is
+    /// the invocation's own by default, its calls' are 1, 2, … A test takes
+    /// one above those for an invocation the fake does not run (a signal's
+    /// target, say).
+    #[napi]
+    pub fn invocation_id(n: u32) -> String {
+        fake_runtime::invocation_id(u64::from(n))
     }
 
     /// The headers of the request that opens an attempt.

@@ -87,7 +87,9 @@ export interface ViewContext {
  * Cancel invocation `invocationId` (such as `inv_1f…`), as Restate's admin
  * API does: made at once, and not awaited. Cancelling an invocation that
  * already ended does nothing, so a new attempt that cancels it again is
- * harmless.
+ * harmless. An `invocationId` that is not an invocation id throws a
+ * `TerminalError` (400): nothing is sent, and the handler may catch it and go
+ * on.
  *
  *   ctx.cancel(turn.invocationId);
  */
@@ -304,9 +306,8 @@ function spansOf(ctx: object): Pick<SqlHost, 'span' | 'currentSpan'> {
 const cancelOf =
   (ctx: Pick<restate.ObjectContext, 'invocation'>): Cancel =>
   (invocationId) => {
-    // Not an id (the SDK's parser checks no more): a retry would fail the same way.
-    if (!invocationId.startsWith('inv')) throw new restate.TerminalError(`not an invocation id: ${invocationId}`);
-    ctx.invocation(restate.InvocationIdParser.fromString(invocationId)).cancel();
+    // An id that is not one throws a TerminalError (400): the shared core checks it as Restate parses it.
+    ctx.invocation(invocationId as restate.InvocationId).cancel();
   };
 
 /** One attempt of `entry` over `ctx`: its own context and session, which ends with it. */
@@ -499,7 +500,8 @@ export async function start(ctx: SessionContext, target: Target & CallOptions): 
 /**
  * The result of invocation `invocationId` (such as {@link start}'s), once it
  * ends: its output, or its terminal error. Waiting for it cancels nothing
- * when the attempt ends: the invocation is its own.
+ * when the attempt ends: the invocation is its own. An `invocationId` that is
+ * not an invocation id rejects with a `TerminalError` (400): nothing is sent.
  */
 export function attach<O = unknown>(
   ctx: SessionContext,
@@ -507,7 +509,8 @@ export function attach<O = unknown>(
   outputSerde: Serde<O> = restate.serde.json as Serde<O>,
 ): Promise<O> {
   const { sdk } = scopeOfHandler(ctx, 'attach');
-  return sdk.invocation(restate.InvocationIdParser.fromString(invocationId)).attach(outputSerde);
+  // An id that is not one rejects with a TerminalError (400), as the shared core checks it.
+  return sdk.invocation(invocationId as restate.InvocationId).attach(outputSerde);
 }
 
 /** The SDK's context behind `ctx`, a handler's with `explicitCancellation: true`. */
@@ -600,7 +603,11 @@ export function readSignal(ctx: SessionContext | ViewContext, name: string, inde
   return driverOfContext(ctx, 'readSignal').signalRead(name, index);
 }
 
-/** Send the signal `name` to invocation `invocationId`, with `value`, a failure, or nothing. */
+/**
+ * Send the signal `name` to invocation `invocationId`, with `value`, a
+ * failure, or nothing. An `invocationId` that is not an invocation id throws a
+ * `TerminalError` (400): nothing is sent, and the handler may catch it.
+ */
 export function sendSignal(
   ctx: SessionContext | ViewContext,
   invocationId: string,

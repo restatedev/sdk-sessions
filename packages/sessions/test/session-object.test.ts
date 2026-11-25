@@ -107,15 +107,11 @@ test('a context has the key, the request, the database, calls, cancel and workin
   assert.deepEqual(await invoke(seen, 'db', fakeContext({ map, service: 'seen' })), ['get', 'query', 'values']);
 });
 
-test('a view cancels an invocation by its id; one that is no id fails for good', async () => {
+test('a view cancels an invocation by its id', async () => {
+  // One that is no id is the shared core's to refuse, with a TerminalError: see protocol.test.ts.
   const cancels: string[] = [];
-  const id = restate.InvocationIdParser.fromString('inv_1aGuEfH1fC0F1tDaHYyy2FfUD7DhkVvjSl').toString();
+  const id = 'inv_1aGuEfH1fC0F1tDaHYyy2FfUD7DhkVvjSl';
   await invoke(account, 'stop', fakeContext({ map: new Map(), service: 'account', cancels }), id);
-  assert.deepEqual(cancels, [id]);
-  await assert.rejects(
-    invoke(account, 'stop', fakeContext({ map: new Map(), service: 'account', cancels }), 'order-7'),
-    (error) => error instanceof restate.TerminalError && /not an invocation id: order-7/.test(error.message),
-  );
   assert.deepEqual(cancels, [id]);
 });
 

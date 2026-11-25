@@ -6,7 +6,15 @@
 // checks every message against the protocol: `settle` fails on a violation.
 import { describe, expect, it } from 'vitest';
 import * as restate from '@restatedev/sessions';
-import { flush, invocationState, readSignal, rideCommit, sendSignal, span } from '@restatedev/sessions/internal';
+import {
+  attach,
+  flush,
+  invocationState,
+  readSignal,
+  rideCommit,
+  sendSignal,
+  span,
+} from '@restatedev/sessions/internal';
 import { goAway, serveSession } from '../src/handler.ts';
 import { HEAD_KEY } from '../src/object.ts';
 import { FakeRuntime } from './fake.ts';
@@ -80,6 +88,58 @@ const ledger = restate.sessionObject({
       await flush(ctx);
       return 'notified';
     },
+    /**
+     * Cancels, signals and attaches to each malformed id, catching what each
+     * throws; then cancels and signals `other` for real.
+     */
+    malformedIds: async (ctx: restate.SessionContext, other: string) => {
+      const caught: string[] = [];
+      const note = (error: unknown) => {
+        if (!(error instanceof restate.TerminalError)) throw error;
+        caught.push(`${error.code} ${error.message}`);
+      };
+      for (const malformed of MALFORMED_IDS) {
+        try {
+          ctx.cancel(malformed);
+        } catch (error) {
+          note(error);
+        }
+        try {
+          sendSignal(ctx, malformed, 'done', bytes('"x"'));
+        } catch (error) {
+          note(error);
+        }
+        await attach(ctx, malformed).catch(note);
+      }
+      ctx.cancel(other);
+      sendSignal(ctx, other, 'done', bytes('"shipped"'));
+      await ctx.db.transaction(async (tx) => {
+        // In a transaction too: the error is the handler's, which goes on with it.
+        try {
+          ctx.cancel('inv_garbage');
+        } catch (error) {
+          if (error instanceof restate.TerminalError) caught.push('in the transaction');
+        }
+        await tx.execute("INSERT INTO entries (body) VALUES ('after')");
+      });
+      await flush(ctx);
+      return caught;
+    },
+    /** A transaction whose send Restate would refuse (an empty idempotency key), with a row or not; then a row. */
+    refusedSend: async (ctx: restate.SessionContext, withRow: boolean) => {
+      const caught: string[] = [];
+      try {
+        await ctx.db.transaction(async (tx) => {
+          if (withRow) await tx.execute("INSERT INTO entries (body) VALUES ('rolled back')");
+          tx.send({ service: 'Mailer', key: ctx.key, handler: 'notify', input: 'x', idempotencyKey: '' });
+        });
+      } catch (error) {
+        if (!(error instanceof restate.TerminalError)) throw error;
+        caught.push(`${error.code} ${error.message}`);
+      }
+      await ctx.db.execute("INSERT INTO entries (body) VALUES ('after')");
+      return caught;
+    },
     /** Invocation state: attempt 1 notes its step, flushes, then waits on nothing. */
     progress: async (ctx: restate.SessionContext) => {
       const state = invocationState(ctx);
@@ -109,6 +169,9 @@ const ledger = restate.sessionObject({
       (await ctx.db.query<{ body: string }>('SELECT body FROM entries ORDER BY id')).map((r) => r.body),
   },
 });
+
+/** Invocation ids Restate would refuse: user code that passes one gets a TerminalError (D65). */
+const MALFORMED_IDS = ['inv_garbage', 'inv_1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '', 'order-7'];
 
 /** The rows of key `key` in `state`, read by a view. */
 async function entries(state: Map<string, Uint8Array>, key: string): Promise<string[]> {
@@ -285,14 +348,49 @@ describe('session objects on the explicit recovery protocol, across attempts', (
   }, 30_000);
 
   it('a signal sent to another invocation', async () => {
-    const i = invocation('notify', 'i', 'inv_other');
+    const other = FakeRuntime.invocationId(9);
+    const i = invocation('notify', 'i', other);
     const { r, done } = i.attempt();
     await done;
     expect(output(r.sent())).toBe('"notified"');
     expect(
       i.rt.signalsSent().map((s) => [s.targetInvocationId, s.name, s.value.bytes?.toString() ?? s.value.kind]),
-    ).toEqual([['inv_other', 'done', '"shipped"']]);
+    ).toEqual([[other, 'done', '"shipped"']]);
   }, 30_000);
+
+  it('a malformed invocation id is a terminal error the handler catches, and the attempt goes on', async () => {
+    const other = FakeRuntime.invocationId(9);
+    const i = invocation('malformedIds', 'mal', other);
+    const { r, done } = i.attempt();
+    await done;
+    const caught = JSON.parse(output(r.sent()) ?? 'null') as string[];
+    expect(caught).toHaveLength(3 * MALFORMED_IDS.length + 1);
+    for (const one of caught.slice(0, -1)) expect(one).toMatch(/^400 .*is not an invocation id/);
+    expect(caught[0]).toContain("'inv_garbage' is not an invocation id");
+    expect(caught.at(-1)).toBe('in the transaction');
+    // Nothing malformed reached Restate: one attempt, no violation, only the good cancel and signal.
+    expect(i.rt.violations()).toEqual([]);
+    expect(i.rt.outcomes().map((o) => o.kind)).toEqual(['completed']);
+    expect(i.rt.cancelsSent()).toEqual([other]);
+    expect(i.rt.signalsSent().map((s) => s.targetInvocationId)).toEqual([other]);
+    expect(r.sent().some((m) => m.type === TYPE.attach)).toBe(false);
+    expect(await entries(i.state, 'mal')).toEqual(['after']);
+  }, 30_000);
+
+  for (const withRow of [true, false]) {
+    it(`a send Restate would refuse fails its commit with a TerminalError, and the attempt goes on (rows: ${withRow})`, async () => {
+      const key = `refused-${withRow}`;
+      const i = invocation('refusedSend', key, withRow);
+      const { r, done } = i.attempt();
+      await done;
+      expect(JSON.parse(output(r.sent()) ?? 'null')).toEqual(['400 the idempotency key is empty']);
+      // The commit's group was dropped, its row with it; nothing was sent.
+      expect(i.rt.violations()).toEqual([]);
+      expect(i.rt.outcomes().map((o) => o.kind)).toEqual(['completed']);
+      expect(i.rt.calls()).toEqual([]);
+      expect(await entries(i.state, key)).toEqual(['after']);
+    }, 30_000);
+  }
 
   it('invocation state carries progress across attempts, apart from the object', async () => {
     const i = invocation('progress', 'j', null);

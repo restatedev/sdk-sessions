@@ -337,14 +337,23 @@ pub struct Vm(pub(crate) Arc<Mutex<VmInner>>);
 pub(crate) const ATTEMPT_OVER: &str = "restate-sessions: the attempt is over";
 
 /// A VM error as JavaScript gets it. The attempt's shutdown carries the text
-/// `ATTEMPT_SHUT_DOWN`, which the driver tells apart from a failure; a VM the
-/// request is refused for carries `VM_REFUSED <code>:` (415 for a content
-/// type of another family or version), the status to answer with.
+/// `ATTEMPT_SHUT_DOWN`, which the driver tells apart from a failure; a value
+/// user code passed to an action that Restate would refuse (an invocation id
+/// that is not one, say) carries `INVALID_INPUT <code>: <message>`, which the
+/// driver raises to user code as a `TerminalError`: that action fails alone,
+/// and the attempt goes on. A VM the request is refused for carries
+/// `VM_REFUSED <code>:` (415 for a content type of another family or
+/// version), the status to answer with.
 fn vm_error(error: Error) -> Error_ {
     if error.is_suspended_error() {
         Error_::new(
             Status::GenericFailure,
             format!("ATTEMPT_SHUT_DOWN: {error}"),
+        )
+    } else if error.is_invalid_input() {
+        Error_::new(
+            Status::InvalidArg,
+            format!("INVALID_INPUT {}: {}", error.code(), error.message()),
         )
     } else {
         Error_::new(Status::GenericFailure, error.to_string())

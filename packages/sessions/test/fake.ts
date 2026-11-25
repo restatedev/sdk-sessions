@@ -106,6 +106,12 @@ export interface FakeRuntime {
 
 interface FakeRuntimeConstructor {
   new (invocation?: FakeInvocation): FakeRuntime;
+  /**
+   * An invocation id in Restate's format, the `n`-th the fake mints: 0 is the
+   * invocation's own by default, its calls' are 1, 2, … One above those is an
+   * invocation the fake does not run (a signal's target, say).
+   */
+  invocationId(n: number): string;
   /** The headers of the request that opens an attempt. */
   requestHeaders(): VmHeader[];
 }

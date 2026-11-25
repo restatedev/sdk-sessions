@@ -5,8 +5,8 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { Buffer } from 'node:buffer';
 import { addon as loaded } from './addon.ts';
-import { STATE_WAIT_OVER, type Vm, type VmCommit } from './vm.ts';
-import { AttemptShutDown } from './driver.ts';
+import { invalidInput, STATE_WAIT_OVER, type Vm, type VmCommit } from './vm.ts';
+import { AttemptShutDown, InvalidInput } from './driver.ts';
 
 /** An SQL value. Integers come back as numbers, or as bigints beyond 2^53. */
 export type SqlValue = null | number | bigint | string | Uint8Array;
@@ -422,6 +422,11 @@ abstract class Sql implements DatabaseWriter {
     // with.
     const stateWait = stateWaitFailure(error);
     if (stateWait !== undefined) return stateWait;
+    // A send of the commit that Restate would refuse (an empty idempotency
+    // key, say): the VM dropped the commit's group, and the handler gets a
+    // TerminalError (400), as from the send itself.
+    const refused = invalidInput(error);
+    if (refused !== undefined) return new InvalidInput(refused.message, { errorCode: refused.code });
     const failed = this.boundary.failed;
     if (failed !== undefined && !this.native.isUsable()) return failed.error;
     const repeats = (error as { code?: unknown }).code === REFUSED || this.native.isUsable();
